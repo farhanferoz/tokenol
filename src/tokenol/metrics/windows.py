@@ -33,6 +33,10 @@ class Window:
 def align_windows(turns: list[Turn]) -> list[Window]:
     """Partition turns into 5-hour wall-clock windows.
 
+    Window starts are floored to the UTC hour of the first billable turn —
+    this matches Claude Code's rate-limit accounting (windows align to the
+    clock hour, not to the exact first-event timestamp).
+
     Only billable turns (not interrupted) open new windows; interrupted
     turns are attached to whichever window contains their timestamp,
     or dropped if before the first window.
@@ -51,7 +55,8 @@ def align_windows(turns: list[Turn]) -> list[Window]:
         if not turn.is_interrupted:
             # Billable turn: open a new window if none active or current expired
             if active is None or ts >= active.end:
-                active = Window(start=ts, end=ts + WINDOW_DURATION)
+                start = ts.replace(minute=0, second=0, microsecond=0)
+                active = Window(start=start, end=start + WINDOW_DURATION)
                 windows.append(active)
             active.turns.append(turn)
         else:

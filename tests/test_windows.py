@@ -103,6 +103,22 @@ def test_empty_turns():
     assert windows == []
 
 
+def test_window_start_floored_to_hour():
+    """First billable turn at 07:59:30 -> window starts at 07:00, ends at 12:00."""
+    base = datetime(2026, 4, 20, 7, 59, 30, tzinfo=timezone.utc)
+    t0 = _make_turn(0, base, cost=1.0)
+    t_mid = _make_turn(2, base, cost=1.0)  # 09:59:30 — same window
+    t_next = _make_turn(4.5, base, cost=1.0)  # 12:29:30 — past 12:00, new window
+
+    windows = align_windows([t0, t_mid, t_next])
+
+    assert len(windows) == 2
+    assert windows[0].start == datetime(2026, 4, 20, 7, 0, tzinfo=timezone.utc)
+    assert windows[0].end == datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
+    assert windows[1].start == datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
+    assert windows[1].end == datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc)
+
+
 def test_project_window():
     """Burn-rate projection with known values."""
     t0 = _make_turn(0, BASE, cost=5.0)

@@ -27,6 +27,35 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
+def _fmt_cost_per_kw(cost_usd: float, output_tokens: int) -> str:
+    """USD per 1,000 output tokens (cost per kiloword of 'work')."""
+    if output_tokens <= 0:
+        return "—"
+    return f"${cost_usd * 1000 / output_tokens:.3f}"
+
+
+def _fmt_ratio(numerator: int, denominator: int) -> str:
+    """Simple ratio N:1 — e.g. context tokens read per output token."""
+    if denominator <= 0:
+        return "—"
+    return f"{numerator / denominator:.0f}:1"
+
+
+def _fmt_cache_eff(cache_read: int, cache_creation: int) -> str:
+    """Cache reuse efficiency as reads-per-create ratio."""
+    if cache_creation <= 0:
+        return "—"
+    return f"{cache_read / cache_creation:.0f}:1"
+
+
+def _fmt_hit_rate(cache_read: int, cache_creation: int, input_tokens: int) -> str:
+    """% of context served from cache (vs. paid cache-create + fresh input)."""
+    denom = cache_read + cache_creation + input_tokens
+    if denom <= 0:
+        return "—"
+    return f"{cache_read / denom * 100:.1f}%"
+
+
 def _fmt_model(model: str | None) -> str:
     """Shorten full model IDs to a display-friendly form.
 
@@ -59,11 +88,11 @@ def _fmt_duration(td: timedelta) -> str:
 
 
 _VERDICT_SHORT = {
-    BlowUpVerdict.OK: ("OK", "green"),
-    BlowUpVerdict.CONTEXT_CREEP: ("CREEP", "red"),
-    BlowUpVerdict.RUNAWAY_WINDOW: ("RUNAWAY", "red"),
-    BlowUpVerdict.TOOL_ERROR_STORM: ("ERRORS", "red"),
-    BlowUpVerdict.SIDECHAIN_HEAVY: ("SIDECHN", "yellow"),
+    BlowUpVerdict.OK: ("ok", "green"),
+    BlowUpVerdict.CONTEXT_CREEP: ("ctx-creep", "red"),
+    BlowUpVerdict.RUNAWAY_WINDOW: ("runaway", "red"),
+    BlowUpVerdict.TOOL_ERROR_STORM: ("tool-errs", "red"),
+    BlowUpVerdict.SIDECHAIN_HEAVY: ("sidechain", "yellow"),
 }
 
 
@@ -87,23 +116,50 @@ def print_daily(
     c = console or Console()
 
     tbl = Table(title="Daily usage", show_lines=False)
-    tbl.add_column("Date", style="bold")
-    tbl.add_column("Turns", justify="right")
-    tbl.add_column("Input", justify="right")
-    tbl.add_column("Output", justify="right")
-    tbl.add_column("Cache read", justify="right")
-    tbl.add_column("Cache write", justify="right")
-    tbl.add_column("Cost", justify="right", style="green")
+    tbl.add_column("Date", style="bold", no_wrap=True)
+    tbl.add_column("Out", justify="right", no_wrap=True)
+    tbl.add_column("CtxRd", justify="right", no_wrap=True)
+    tbl.add_column("Cost", justify="right", style="green", no_wrap=True)
+    tbl.add_column("$/kW", justify="right", no_wrap=True)
+    tbl.add_column("Ctx", justify="right", no_wrap=True)
+    tbl.add_column("CacheE", justify="right", no_wrap=True)
+    tbl.add_column("Hit%", justify="right", no_wrap=True)
+
+    total_cost = 0.0
+    total_out = 0
+    total_read = 0
+    total_create = 0
+    total_input = 0
+    total_turns = 0
 
     for r in rollups:
         tbl.add_row(
             str(r.date),
-            str(r.turns),
-            _fmt_tokens(r.input_tokens),
             _fmt_tokens(r.output_tokens),
             _fmt_tokens(r.cache_read_tokens),
-            _fmt_tokens(r.cache_creation_tokens),
             _fmt_cost(r.cost_usd),
+            _fmt_cost_per_kw(r.cost_usd, r.output_tokens),
+            _fmt_ratio(r.cache_read_tokens, r.output_tokens),
+            _fmt_cache_eff(r.cache_read_tokens, r.cache_creation_tokens),
+            _fmt_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens),
+        )
+        total_cost += r.cost_usd
+        total_out += r.output_tokens
+        total_read += r.cache_read_tokens
+        total_create += r.cache_creation_tokens
+        total_input += r.input_tokens
+        total_turns += r.turns
+
+    if rollups:
+        tbl.add_row(
+            "[bold]TOTAL[/bold]",
+            _fmt_tokens(total_out),
+            _fmt_tokens(total_read),
+            _fmt_cost(total_cost),
+            _fmt_cost_per_kw(total_cost, total_out),
+            _fmt_ratio(total_read, total_out),
+            _fmt_cache_eff(total_read, total_create),
+            _fmt_hit_rate(total_read, total_create, total_input),
         )
 
     c.print(tbl)

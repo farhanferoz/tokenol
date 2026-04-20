@@ -60,13 +60,24 @@ Every command accepts:
 
 For every session, `tokenol` computes a blow-up verdict against spec-defined thresholds:
 
-| Verdict              | Trigger                                              |
-| -------------------- | ---------------------------------------------------- |
-| `RUNAWAY_WINDOW`     | Any 5-hour window costs ≥ \$50                       |
-| `CONTEXT_CREEP`      | Max single-turn input ≥ 500k **and** growth ≥ 2k/turn |
-| `TOOL_ERROR_STORM`   | ≥ 10 tool uses with > 30% error rate                 |
-| `SIDECHAIN_HEAVY`    | Sidechain session costing > \$5                      |
-| `OK`                 | Everything else                                      |
+| Verdict (table label)         | Trigger                                                |
+| ----------------------------- | ------------------------------------------------------ |
+| `RUNAWAY_WINDOW` (`runaway`)  | Any 5-hour window costs ≥ \$50                         |
+| `CONTEXT_CREEP` (`ctx-creep`) | Max single-turn input ≥ 500k **and** growth ≥ 2k/turn  |
+| `TOOL_ERROR_STORM` (`tool-errs`) | ≥ 10 tool uses with > 30% error rate                |
+| `SIDECHAIN_HEAVY` (`sidechain`) | Sidechain session costing > \$5                      |
+| `OK` (`ok`)                   | Everything else                                        |
+
+### Daily efficiency columns
+
+The `tokenol daily` report shows these cost/cache efficiency ratios:
+
+| Column   | Meaning                                                | Target     |
+| -------- | ------------------------------------------------------ | ---------- |
+| `$/kW`   | USD per 1,000 output tokens (cost per unit of "work")  | `< $0.20`  |
+| `Ctx`    | Context tokens read per output token                   | lower is better |
+| `CacheE` | Cache reads per cache-creation token (reuse ratio)     | `> 50:1`   |
+| `Hit%`   | % of context served from cache (vs. paid input/create) | `> 98%`    |
 
 Thresholds live in `src/tokenol/metrics/verdicts.py` and can be tuned per-project.
 
