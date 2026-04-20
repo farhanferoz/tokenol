@@ -27,6 +27,26 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
+def _fmt_model(model: str | None) -> str:
+    """Shorten full model IDs to a display-friendly form.
+
+    e.g. 'claude-sonnet-4-6-20251015' -> 'sonnet-4.6'
+         'claude-opus-4-7-20260101'   -> 'opus-4.7'
+    """
+    if not model:
+        return "—"
+    m = model.removeprefix("claude-")
+    # Strip trailing -YYYYMMDD date suffix if present.
+    parts = m.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 8:
+        m = parts[0]
+    # Convert family-<major>-<minor> -> family-<major>.<minor>
+    tokens = m.split("-")
+    if len(tokens) >= 3 and tokens[-1].isdigit() and tokens[-2].isdigit():
+        m = "-".join(tokens[:-2]) + f"-{tokens[-2]}.{tokens[-1]}"
+    return m
+
+
 def _fmt_duration(td: timedelta) -> str:
     total_secs = int(td.total_seconds())
     if total_secs < 0:
@@ -38,18 +58,18 @@ def _fmt_duration(td: timedelta) -> str:
     return f"{m}m"
 
 
+_VERDICT_SHORT = {
+    BlowUpVerdict.OK: ("OK", "green"),
+    BlowUpVerdict.CONTEXT_CREEP: ("CREEP", "red"),
+    BlowUpVerdict.RUNAWAY_WINDOW: ("RUNAWAY", "red"),
+    BlowUpVerdict.TOOL_ERROR_STORM: ("ERRORS", "red"),
+    BlowUpVerdict.SIDECHAIN_HEAVY: ("SIDECHN", "yellow"),
+}
+
+
 def _verdict_style(verdict: BlowUpVerdict) -> str:
-    if verdict == BlowUpVerdict.OK:
-        return "[green]OK[/green]"
-    if verdict == BlowUpVerdict.CONTEXT_CREEP:
-        return "[red]CONTEXT_CREEP[/red]"
-    if verdict == BlowUpVerdict.RUNAWAY_WINDOW:
-        return "[red]RUNAWAY_WINDOW[/red]"
-    if verdict == BlowUpVerdict.TOOL_ERROR_STORM:
-        return "[red]TOOL_ERROR_STORM[/red]"
-    if verdict == BlowUpVerdict.SIDECHAIN_HEAVY:
-        return "[yellow]SIDECHAIN_HEAVY[/yellow]"
-    return verdict.value
+    label, colour = _VERDICT_SHORT.get(verdict, (verdict.value, "white"))
+    return f"[{colour}]{label}[/{colour}]"
 
 
 def _print_assumptions(c: Console, force: bool = False) -> None:
@@ -163,19 +183,19 @@ def print_sessions(
     c = console or Console()
 
     tbl = Table(title="Sessions", show_lines=False)
-    tbl.add_column("Session", style="bold")
-    tbl.add_column("Model")
-    tbl.add_column("Start")
-    tbl.add_column("Turns", justify="right")
-    tbl.add_column("Max input", justify="right")
-    tbl.add_column("Cost", justify="right", style="green")
-    tbl.add_column("Verdict")
+    tbl.add_column("Session", style="bold", no_wrap=True)
+    tbl.add_column("Model", no_wrap=True)
+    tbl.add_column("Start", no_wrap=True)
+    tbl.add_column("Turns", justify="right", no_wrap=True)
+    tbl.add_column("MaxIn", justify="right", no_wrap=True)
+    tbl.add_column("Cost", justify="right", style="green", no_wrap=True)
+    tbl.add_column("Verdict", no_wrap=True)
 
     for sr in rollups:
         tbl.add_row(
             sr.session_id[:8],
-            sr.model or "—",
-            sr.first_ts.strftime("%Y-%m-%d %H:%M"),
+            _fmt_model(sr.model),
+            sr.first_ts.strftime("%m-%d %H:%M"),
             str(sr.turns),
             _fmt_tokens(sr.max_turn_input),
             _fmt_cost(sr.cost_usd),
@@ -244,7 +264,7 @@ def print_models(
     c = console or Console()
 
     tbl = Table(title="Models", show_lines=False)
-    tbl.add_column("Model", style="bold")
+    tbl.add_column("Model", style="bold", no_wrap=True)
     tbl.add_column("Turns", justify="right")
     tbl.add_column("Input", justify="right")
     tbl.add_column("Output", justify="right")
@@ -258,7 +278,7 @@ def print_models(
         else:
             tool_err_pct = "—"
         tbl.add_row(
-            mr.model,
+            _fmt_model(mr.model),
             str(mr.turns),
             _fmt_tokens(mr.input_tokens),
             _fmt_tokens(mr.output_tokens),

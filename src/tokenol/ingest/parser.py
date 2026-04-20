@@ -131,6 +131,10 @@ def iter_assistant_events(
         for ev in parse_file(path):
             if ev.event_type != "assistant":
                 continue
+            # Skip Claude Code's synthetic assistant markers (stop-sequence placeholders).
+            # These aren't real API calls and carry zero-token usage.
+            if ev.model == "<synthetic>":
+                continue
             key = dedup_key(ev)
             if key is None:
                 passthroughs.append(ev)
