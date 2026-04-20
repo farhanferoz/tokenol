@@ -30,6 +30,21 @@ def _parse_usage(msg: dict) -> Usage | None:
     )
 
 
+def _count_tool_blocks(content: list) -> tuple[int, int]:
+    """Return (tool_use_count, tool_error_count) from a message content list."""
+    tool_use = 0
+    tool_error = 0
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "tool_use":
+            tool_use += 1
+        elif btype == "tool_result" and block.get("is_error") is True:
+            tool_error += 1
+    return tool_use, tool_error
+
+
 def parse_file(path: Path) -> Iterator[RawEvent]:
     """Yield one RawEvent per non-blank, parseable line of *path*."""
     session_id = path.stem  # filename without .jsonl == sessionId
@@ -56,6 +71,17 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
             msg = ev.get("message") or {}
 
+            # Count tool blocks in message content
+            content = msg.get("content") or []
+            if not isinstance(content, list):
+                content = []
+            tool_use_count, tool_error_count = _count_tool_blocks(content)
+
+            # Extract cwd from system events
+            cwd: str | None = None
+            if event_type == "system":
+                cwd = ev.get("cwd") or None
+
             yield RawEvent(
                 source_file=str(path),
                 line_number=lineno,
@@ -69,6 +95,9 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 model=ev.get("model") or msg.get("model"),
                 is_sidechain=ev.get("isSidechain", is_sidechain),
                 stop_reason=msg.get("stop_reason"),
+                tool_use_count=tool_use_count,
+                tool_error_count=tool_error_count,
+                cwd=cwd,
                 raw=ev,
             )
 

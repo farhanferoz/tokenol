@@ -241,19 +241,28 @@ metric:
 ccusage within 2% for a given `CLAUDE_CONFIG_DIR`, across 5+ reference
 dates. Assumptions footer shows which heuristics fired.
 
-### Phase 2 — Context detection + multi-lens views (week 2)
-- `metrics.context`: all context metrics
-- `metrics.windows`: 5h window alignment (wall-clock from first event)
-- `tokenol live --last Nm` — primary "am I burning too fast?" tool
-- `tokenol sessions --top N --sort max_input`
-- `tokenol projects`
-- `tokenol models`
-- Blow-up verdict badges per session
-- Sidechain attribution
+### Phase 2 — Context detection + multi-lens views (week 2) ✓ COMPLETE
+- ~~`metrics.context`: all context metrics~~ ✓
+- ~~`metrics.windows`: 5h window alignment (wall-clock from first event)~~ ✓
+- ~~`tokenol live --last Nm` — primary "am I burning too fast?" tool~~ ✓
+- ~~`tokenol sessions --top N --sort max_input`~~ ✓
+- ~~`tokenol projects`~~ ✓
+- ~~`tokenol models`~~ ✓
+- ~~Blow-up verdict badges per session~~ ✓
+- ~~Sidechain attribution~~ ✓ (is_sidechain flag on SessionRollup)
 
 **Exit criterion**: can answer (a) *"in the last 20 minutes, am I burning
 too fast?"*, (b) *"which 5 sessions caused my $512 day?"*, (c) *"which
 project + model dominated my last 14 days?"* — each in one command.
+
+*Phase 2 implementation notes:*
+- `is_interrupted` field added to `Turn` to avoid O(n) list membership checks.
+- `tool_use_count`/`tool_error_count` added to `RawEvent` and `Turn`.
+- `build_sessions()` added to `ingest/builder.py`.
+- `cwd` extracted from system events and stored on `Session`.
+- Verdict thresholds documented in `docs/METRICS.md`.
+- `docs/ASSUMPTIONS.md` created as standalone reference.
+- CLI flags `--strict`, `--show-assumptions`, `--log-level` now fully wired.
 
 ### Phase 3 — Polish & publish (week 3)
 - HTML single-file static report (`report.html`)

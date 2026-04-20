@@ -89,7 +89,7 @@ def rollup_by_date(turns: list[Turn]) -> list[DailyRollup]:
             )
         r = buckets[d]
         _accumulate_turn(r, turn)
-        if AssumptionTag.INTERRUPTED_TURN_SKIPPED in turn.assumptions:
+        if turn.is_interrupted:
             r.interrupted_turns += 1
 
     return sorted(buckets.values(), key=lambda r: r.date)

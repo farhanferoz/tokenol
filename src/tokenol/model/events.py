@@ -44,8 +44,15 @@ class RawEvent:
     is_sidechain: bool
     stop_reason: str | None
 
+    # Tool counts (parsed from message.content)
+    tool_use_count: int = 0
+    tool_error_count: int = 0
+
+    # Working directory (from system events)
+    cwd: str | None = None
+
     # Raw for extensibility (caller may inspect)
-    raw: dict
+    raw: dict = field(default_factory=dict)  # type: ignore[assignment]
 
 
 @dataclass
@@ -61,6 +68,9 @@ class Turn:
     stop_reason: str | None
     assumptions: list[AssumptionTag] = field(default_factory=list)
     cost_usd: float = 0.0
+    is_interrupted: bool = False
+    tool_use_count: int = 0
+    tool_error_count: int = 0
 
 
 @dataclass
@@ -70,6 +80,7 @@ class Session:
     session_id: str
     source_file: str
     is_sidechain: bool
+    cwd: str | None = None
     turns: list[Turn] = field(default_factory=list)
 
     @property
