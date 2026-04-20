@@ -1,53 +1,91 @@
-# Claude Code Usage & Efficiency Analysis Tools
+# tokenol
 
-This directory contains a suite of Python scripts designed to monitor, analyze, and optimize Claude Code usage, costs, and cache efficiency across multiple isolated environments.
+Audit [Claude Code](https://claude.com/claude-code) JSONL session logs for cost, cache health, context blow-ups, and 5-hour rate-limit pressure.
 
-## 🚀 Core Analysis Scripts
+`tokenol` parses the session transcripts that Claude Code writes to `~/.claude*/projects/**/*.jsonl` and produces per-day, per-session, per-project, and per-model rollups — plus a live burn-rate view for the active 5-hour window.
 
-### 1. `claude_cost_efficiency.py` (The Main Dashboard)
-The primary tool for monitoring daily budget and project performance.
-- **Daily Report:** `python3 claude_cost_efficiency.py [days]`
-  - Shows consolidated daily totals and a project-by-project breakdown.
-  - **Metrics:** Work (Output), Context Reads, Cost, Cost/1kW (Work), Context Ratio, Cache Efficiency, and Hit Rate.
-- **Session Report:** `python3 claude_cost_efficiency.py session [days]`
-  - Drills down into individual conversation IDs to identify specific "expensive" chat threads.
+## Install
 
-### 2. `hourly_comprehensive_report.py` (Hourly Diagnostics)
-Pinpoints the exact hour of rate limit depletion or usage spikes across all projects.
-- **Usage:** `python3 hourly_comprehensive_report.py`
-- **Output:** Hourly table including Cost, Work, Cache Efficiency Ratio, and Hit Rate.
-- **Note:** Currently configured to analyze the most recent heavy usage day (e.g., April 17th).
+```bash
+pipx install tokenol
+```
 
-### 3. `cache_hit_analysis.py` (Technical Health)
-A specialized diagnostic tool for verifying technical cache performance.
-- **Usage:** `python3 cache_hit_analysis.py [days]`
-- **Best For:** Detecting "Cache Bashing" or verifying if native binary updates are causing systematic cache misses.
+Requires Python 3.10+.
 
-### 4. `comprehensive_report.py` (Quick 14-Day View)
-A simplified, wide-table version of the daily dashboard.
-- **Usage:** `python3 comprehensive_report.py [days]`
+## Quick start
 
----
+```bash
+# Daily token / cost aggregates over the last 14 days
+tokenol daily
 
-## 📈 Key Metrics Explained
+# Hourly breakdown for today
+tokenol hourly
 
-| Metric | Definition | Goal |
-| :--- | :--- | :--- |
-| **Cost/1kW** | Total USD cost per 1,000 output tokens (actual work produced). | **<$0.20** |
-| **Ctx Ratio** | Number of context tokens read per 1 output token. | **Lower is better** |
-| **Cache Eff** | Ratio of tokens read from cache vs. tokens created (e.g., 50:1). | **>50:1** |
-| **Hit Rate** | Percentage of context served from cache. | **>98%** |
+# Top 10 most expensive sessions in the last 30 days
+tokenol sessions --since 30d --top 10 --sort cost
 
----
+# Per-project rollup
+tokenol projects
 
-## 🛠️ Internal Logic & Maintenance
+# Live view: burn rate + projected end-of-window cost
+tokenol live --last 20m
+```
 
-- **Data Source:** These scripts parse the `.jsonl` session logs located in `~/.claude-*/projects/**/`.
-- **Timezone:** All hourly reports are converted from UTC to **UK Time (BST/UTC+1)** for user alignment.
-- **Pricing:** Costs are calculated based on standard Claude 3.5/4.5 pricing tiers defined in `hourly_comprehensive_report.py`.
+All commands scan every JSONL file under `$CLAUDE_CONFIG_DIR` (falling back to the standard `~/.claude*` locations) and deduplicate turns using the same `message.id:requestId` compound key that [ccusage](https://github.com/ryoppippi/ccusage) uses.
 
-## ⚠️ Known Issue: The "Dual Session" Conflict
-Running two concurrent sessions on the same project (e.g., two terminal windows in `StratSense`) triggers immediate **cache invalidation**. Each session will force a "cold start" read on every turn, driving the **Cache Efficiency** below 20:1 and rapidly depleting weekly rate limits. Always work sequentially on large projects.
+## Commands
 
----
-*Created: 2026-04-18*
+| Command    | What it shows                                                               |
+| ---------- | --------------------------------------------------------------------------- |
+| `daily`    | Per-day tokens (input, output, cache read/creation), cost, turn count       |
+| `hourly`   | Per-hour breakdown for a single day (defaults to today)                     |
+| `live`     | Active 5-hour window burn rate, recent-activity rate, projected final cost  |
+| `sessions` | Per-session detail table with blow-up verdict (RUNAWAY, CONTEXT_CREEP, …)  |
+| `projects` | Per-project rollup grouped by `cwd`                                         |
+| `models`   | Per-model rollup with tool-use counts and error rates                       |
+| `verify`   | Cross-check tokenol totals against `ccusage --json` (if installed)          |
+
+Every command accepts:
+
+- `--since 14d` — lookback window (e.g. `7d`, `30d`, or an ISO date)
+- `--strict` — exit non-zero if any cost-computation assumption fired
+- `--show-assumptions` — always print the assumption footer
+- `--log-level debug|info|warning`
+
+`tokenol sessions` additionally takes `--sort` (`cost`, `input`, `output`, `cache_read`, `turns`, `max_input`, `duration`) and `--top`.
+
+`tokenol live` takes `--last 20m|2h|30s` and exits non-zero if the projected window cost exceeds the configured reference.
+
+## What it detects
+
+For every session, `tokenol` computes a blow-up verdict against spec-defined thresholds:
+
+| Verdict              | Trigger                                              |
+| -------------------- | ---------------------------------------------------- |
+| `RUNAWAY_WINDOW`     | Any 5-hour window costs ≥ \$50                       |
+| `CONTEXT_CREEP`      | Max single-turn input ≥ 500k **and** growth ≥ 2k/turn |
+| `TOOL_ERROR_STORM`   | ≥ 10 tool uses with > 30% error rate                 |
+| `SIDECHAIN_HEAVY`    | Sidechain session costing > \$5                      |
+| `OK`                 | Everything else                                      |
+
+Thresholds live in `src/tokenol/metrics/verdicts.py` and can be tuned per-project.
+
+## Pricing
+
+Flat per-model rates (no 1M-token tier surcharge — matches ccusage's default behaviour). The current registry lives in `src/tokenol/metrics/cost.py`. When a turn's model isn't in the registry, `tokenol` records an `UNKNOWN_MODEL_FALLBACK` assumption tag and uses a conservative default; run with `--show-assumptions` or `--strict` to surface these.
+
+See [`docs/METRICS.md`](docs/METRICS.md) for metric definitions and [`docs/ASSUMPTIONS.md`](docs/ASSUMPTIONS.md) for the full list of assumption tags.
+
+## Development
+
+```bash
+git clone https://github.com/farhanferoz/tokenol
+cd tokenol
+uv sync --extra dev
+uv run pytest
+uv run ruff check
+```
+
+## Licence
+
+MIT
