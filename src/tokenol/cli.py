@@ -37,6 +37,10 @@ app = typer.Typer(
     add_completion=False,
 )
 
+# Single process-wide flag — set by the --all-projects option on each command.
+# Simpler than threading it through every helper signature.
+_SCAN_ALL: bool = False
+
 console = Console(stderr=False)
 err = Console(stderr=True)
 
@@ -88,6 +92,19 @@ def _configure_logging(log_level: LogLevel) -> None:
     logging.basicConfig(level=level)
 
 
+def _set_scan_scope(all_projects: bool) -> None:
+    global _SCAN_ALL
+    _SCAN_ALL = all_projects
+
+
+_ALL_PROJECTS_OPT = typer.Option(
+    False,
+    "--all-projects",
+    "-A",
+    help="Scan every ~/.claude* directory, ignoring CLAUDE_CONFIG_DIR.",
+)
+
+
 def _timedelta_label(td: timedelta) -> str:
     """Convert a timedelta to a short human label: '20min', '2hr', '30sec'."""
     total = int(td.total_seconds())
@@ -100,7 +117,7 @@ def _timedelta_label(td: timedelta) -> str:
 
 def _load_turns(since: date | None = None):
     assumption_recorder.reset()
-    dirs = get_config_dirs()
+    dirs = get_config_dirs(all_projects=_SCAN_ALL)
     paths = find_jsonl_files(dirs)
     turns = build_turns(paths)
     if since:
@@ -110,7 +127,7 @@ def _load_turns(since: date | None = None):
 
 def _load_turns_and_sessions(since: date | None = None):
     assumption_recorder.reset()
-    dirs = get_config_dirs()
+    dirs = get_config_dirs(all_projects=_SCAN_ALL)
     paths = find_jsonl_files(dirs)
     turns = build_turns(paths)
     sessions = build_sessions(turns, paths=paths)
@@ -129,8 +146,10 @@ def daily(
     strict: bool = typer.Option(False, "--strict", help="Error on any assumption fallback"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions", help="Always print assumption footer"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Daily token and cost aggregates."""
+    _set_scan_scope(all_projects)
     _configure_logging(log_level)
     since_date = _parse_since(since)
     turns, paths = _load_turns(since=since_date)
@@ -146,8 +165,10 @@ def hourly(
     strict: bool = typer.Option(False, "--strict"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Hourly token and cost breakdown for one day."""
+    _set_scan_scope(all_projects)
     _configure_logging(log_level)
     target = date.fromisoformat(day) if day else date.today()
     turns, paths = _load_turns()
@@ -163,8 +184,10 @@ def live(
     strict: bool = typer.Option(False, "--strict"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Live burn-rate view for the active 5h window."""
+    _set_scan_scope(all_projects)
     _configure_logging(log_level)
     lookback = _parse_last(last)
 
@@ -214,8 +237,10 @@ def sessions(
     strict: bool = typer.Option(False, "--strict"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Per-session detail table sorted by a chosen metric."""
+    _set_scan_scope(all_projects)
     _configure_logging(log_level)
     since_date = _parse_since(since)
     turns, session_list, paths = _load_turns_and_sessions(since=since_date)
@@ -251,8 +276,10 @@ def projects(
     strict: bool = typer.Option(False, "--strict"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Per-project rollup (grouped by cwd)."""
+    _set_scan_scope(all_projects)
     _configure_logging(log_level)
     since_date = _parse_since(since)
     turns, session_list, paths = _load_turns_and_sessions(since=since_date)
@@ -273,8 +300,10 @@ def models(
     strict: bool = typer.Option(False, "--strict"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Per-model rollup."""
+    _set_scan_scope(all_projects)
     _configure_logging(log_level)
     since_date = _parse_since(since)
     turns, paths = _load_turns(since=since_date)
@@ -290,8 +319,10 @@ def models(
 def verify(
     since: str = typer.Option("14d"),
     tolerance: float = typer.Option(0.02, help="Max acceptable fractional diff vs ccusage"),
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
 ) -> None:
     """Cross-check tokenol totals against ccusage (if installed)."""
+    _set_scan_scope(all_projects)
     since_date = _parse_since(since)
     turns, paths = _load_turns(since=since_date)
 

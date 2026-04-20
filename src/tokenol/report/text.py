@@ -19,6 +19,11 @@ def _fmt_cost(usd: float) -> str:
     return f"${usd:.4f}"
 
 
+def _fmt_cost_short(usd: float) -> str:
+    """Compact 2-decimal form for wide tables."""
+    return f"${usd:.2f}"
+
+
 def _fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.2f}M"
@@ -137,7 +142,7 @@ def print_daily(
             str(r.date),
             _fmt_tokens(r.output_tokens),
             _fmt_tokens(r.cache_read_tokens),
-            _fmt_cost(r.cost_usd),
+            _fmt_cost_short(r.cost_usd),
             _fmt_cost_per_kw(r.cost_usd, r.output_tokens),
             _fmt_ratio(r.cache_read_tokens, r.output_tokens),
             _fmt_cache_eff(r.cache_read_tokens, r.cache_creation_tokens),
@@ -155,7 +160,7 @@ def print_daily(
             "[bold]TOTAL[/bold]",
             _fmt_tokens(total_out),
             _fmt_tokens(total_read),
-            _fmt_cost(total_cost),
+            _fmt_cost_short(total_cost),
             _fmt_cost_per_kw(total_cost, total_out),
             _fmt_ratio(total_read, total_out),
             _fmt_cache_eff(total_read, total_create),
