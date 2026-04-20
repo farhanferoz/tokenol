@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
 import tokenol.serve.state as _state_mod
 from tokenol.serve.app import ServerConfig, create_app
-from tokenol.serve.state import ParseCache
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @contextmanager

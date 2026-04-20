@@ -375,13 +375,14 @@ def serve(
 
     try:
         import uvicorn
+
         from tokenol.serve.app import ServerConfig, create_app
     except ImportError:
         err.print(
             "[red]tokenol[serve] extras not installed.[/red] "
             "Run: pip install 'tokenol[serve]'"
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     config = ServerConfig(
         all_projects=all_projects,

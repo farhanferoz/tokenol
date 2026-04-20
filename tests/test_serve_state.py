@@ -6,10 +6,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
+from tokenol.serve.state import ParseCache, SnapshotResult, build_snapshot_full
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-from tokenol.serve.state import ParseCache, SnapshotResult, build_snapshot_full
 
 
 @contextmanager

@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
 import tokenol.serve.state as _state_mod
-from tokenol.serve.state import ParseCache, SnapshotResult, build_snapshot_full
+from tokenol.serve.state import ParseCache
 from tokenol.serve.streaming import _shallow_diff, snapshot_stream
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @contextmanager
