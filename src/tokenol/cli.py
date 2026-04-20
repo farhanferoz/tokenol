@@ -359,6 +359,46 @@ def verify(
         console.print(f"tokenol total: ${our_cost:.4f}")
 
 
+@app.command()
+def serve(
+    port: int = typer.Option(8787, "--port", help="TCP port to bind."),
+    tick: str = typer.Option("5s", "--tick", help="SSE tick interval, e.g. '2s', '5s'."),
+    reference: float = typer.Option(50.0, "--reference", help="$/window alarm threshold."),
+    open_browser: bool = typer.Option(False, "--open", help="Open dashboard in default browser."),
+    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
+    log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
+) -> None:
+    """Start the live dashboard server."""
+    _configure_logging(log_level)
+    tick_td = _parse_last(tick)
+    tick_seconds = max(1, int(tick_td.total_seconds()))
+
+    try:
+        import uvicorn
+        from tokenol.serve.app import ServerConfig, create_app
+    except ImportError:
+        err.print(
+            "[red]tokenol[serve] extras not installed.[/red] "
+            "Run: pip install 'tokenol[serve]'"
+        )
+        raise typer.Exit(code=1)
+
+    config = ServerConfig(
+        all_projects=all_projects,
+        reference_usd=reference,
+        tick_seconds=tick_seconds,
+    )
+    application = create_app(config)
+    url = f"http://127.0.0.1:{port}"
+    err.print(f"tokenol dashboard → {url}")
+
+    if open_browser:
+        import webbrowser
+        webbrowser.open(url)
+
+    uvicorn.run(application, host="127.0.0.1", port=port, log_level="warning")
+
+
 def main() -> None:
     app()
 

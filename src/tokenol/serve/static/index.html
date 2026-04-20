@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — live</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23ffb647' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <!-- uPlot -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+</head>
+<body>
+
+<!-- ===================== HEADER ===================== -->
+<header id="header">
+  <div class="brand serif">tokenol <span>— live</span></div>
+
+  <div class="burn-lookback" id="burn-lookback" role="group" aria-label="Burn rate lookback">
+    <button data-lb="1m">1m</button>
+    <button data-lb="5m" class="active">5m</button>
+    <button data-lb="15m">15m</button>
+    <button data-lb="60m">60m</button>
+  </div>
+
+  <div id="header-right">
+    <span id="wall-clock">––:––:–– ···</span>
+    <div id="conn-dot" title="SSE connection"></div>
+    <button id="settings-btn" title="Settings (s)" aria-label="Open settings">≡</button>
+  </div>
+</header>
+
+<!-- ===================== MAIN GRID ===================== -->
+<main id="main">
+
+  <!-- ---- Burn gauge ---- -->
+  <section class="panel panel-gauge" id="panel-gauge">
+    <div>
+      <div class="label">Burn rate</div>
+      <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px;">
+        <span id="burn-rate-display" class="num amber" style="font-size:28px;">$–.–– / hr</span>
+      </div>
+    </div>
+
+    <div id="gauge-container">
+      <burn-gauge id="main-gauge" rate="0" projected="0" reference="50" max-rate="120"
+        style="width:100%;max-width:340px;"></burn-gauge>
+    </div>
+
+    <div>
+      <div style="display:flex;align-items:baseline;gap:6px;">
+        <span class="label">Projected</span>
+        <span id="projected-cost" class="num">$–.––</span>
+        <span id="over-ref-badge">⚠ over limit</span>
+      </div>
+      <div id="window-range" class="mute" style="margin-top:4px;font-size:11px;">––</div>
+    </div>
+
+    <hr class="rule">
+
+    <div id="burn-history-wrap">
+      <div class="label">Burn history — last 60 min</div>
+      <div id="burn-history-chart" style="margin-top:6px;height:60px;"></div>
+    </div>
+  </section>
+
+  <!-- ---- Today ---- -->
+  <section class="panel panel-today" id="panel-today">
+    <div class="panel-title serif">Today</div>
+    <div class="today-stats">
+      <div>
+        <solari-number id="today-cost" class="big-num" value="0" format="$%.2f"></solari-number>
+        <div class="sub-stats">
+          <div class="sub-stat">
+            <span class="label">turns </span>
+            <span class="val" id="today-turns">–</span>
+          </div>
+          <div class="sub-stat">
+            <span class="label">output </span>
+            <span class="val" id="today-output">–</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="sub-stat" style="margin-bottom:6px;">
+          <span class="label">$/kW </span>
+          <span class="val" id="today-cost-per-kw">–</span>
+        </div>
+        <div class="sub-stat">
+          <span class="label">Hit% </span>
+          <span class="val" id="today-hit-rate">–</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="label">Today by hour (UTC)</div>
+    <div id="hourly-bars" aria-label="Hourly cost bars" title=""></div>
+    <div id="hourly-bars-labels" style="display:flex;justify-content:space-between;margin-top:2px;font-size:9px;color:var(--mute);">
+      <span>00</span><span>06</span><span>12</span><span>18</span><span>23</span>
+    </div>
+  </section>
+
+  <!-- ---- Last N days ---- -->
+  <section class="panel panel-daily" id="panel-daily">
+    <div class="panel-title">
+      <span class="serif">Last <span id="daily-range-label">14</span> days</span>
+      <div class="range-selector" id="daily-range-sel" role="group">
+        <button data-r="7">7d</button>
+        <button data-r="14" class="active">14d</button>
+        <button data-r="30">30d</button>
+        <button data-r="90">90d</button>
+      </div>
+    </div>
+
+    <div id="daily-stats" class="daily-stats">
+      <div class="stat">
+        <div class="label">Total</div>
+        <div class="val" id="daily-total">$–.––</div>
+      </div>
+      <div class="stat">
+        <div class="label">Best day</div>
+        <div class="val" id="daily-best">–</div>
+      </div>
+      <div class="stat">
+        <div class="label">Worst day</div>
+        <div class="val" id="daily-worst">–</div>
+      </div>
+    </div>
+
+    <div id="daily-chart-wrap">
+      <div class="label" style="margin-bottom:4px;">Cost per day</div>
+      <div id="daily-chart" style="height:70px;"></div>
+    </div>
+
+    <div id="kw-drift-wrap" style="margin-top:8px;">
+      <div class="label" style="margin-bottom:4px;">$/kW drift</div>
+      <div id="kw-drift-chart" style="height:50px;"></div>
+    </div>
+  </section>
+
+  <!-- ---- Top sessions ---- -->
+  <section class="panel panel-sessions" id="panel-sessions">
+    <div class="panel-title">
+      <span class="serif">Top sessions</span>
+      <div class="range-selector" id="sessions-range-sel" role="group">
+        <button data-r="1" class="active">24h</button>
+        <button data-r="7">7d</button>
+        <button data-r="14">14d</button>
+      </div>
+    </div>
+    <table class="data-table" id="sessions-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Model</th>
+          <th>Cost</th>
+          <th>Turns</th>
+          <th>MaxIn</th>
+          <th>Verdict</th>
+        </tr>
+      </thead>
+      <tbody id="sessions-tbody"></tbody>
+    </table>
+  </section>
+
+  <!-- ---- Models ---- -->
+  <section class="panel panel-models" id="panel-models">
+    <div class="panel-title">
+      <span class="serif">Models</span>
+      <div class="range-selector" id="models-range-sel" role="group">
+        <button data-r="1" class="active">24h</button>
+        <button data-r="7">7d</button>
+        <button data-r="14">14d</button>
+      </div>
+    </div>
+    <div id="models-bars"></div>
+  </section>
+
+  <!-- ---- Top projects ---- -->
+  <section class="panel panel-projects" id="panel-projects">
+    <div class="panel-title">
+      <span class="serif">Top projects</span>
+      <div class="range-selector" id="projects-range-sel" role="group">
+        <button data-r="1" class="active">24h</button>
+        <button data-r="7">7d</button>
+        <button data-r="14">14d</button>
+      </div>
+    </div>
+    <table class="data-table" id="projects-table">
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th>Cost</th>
+          <th>Sessions</th>
+          <th>Cache%</th>
+        </tr>
+      </thead>
+      <tbody id="projects-tbody"></tbody>
+    </table>
+  </section>
+
+  <!-- ---- Heatmap ---- -->
+  <section class="panel panel-heatmap" id="panel-heatmap">
+    <div class="panel-title serif">Cost heatmap — 14d × 24h</div>
+    <div id="heatmap-hour-labels" aria-hidden="true">
+      <!-- populated by app.js: 1 row-label slot + 24 hour labels (only every 4th shown) -->
+    </div>
+    <div id="heatmap-grid"></div>
+  </section>
+
+  <!-- ---- Live feed ---- -->
+  <section class="panel panel-feed" id="panel-feed">
+    <div class="panel-title serif" style="margin-bottom:8px;">
+      Live feed — last 20 turns
+    </div>
+    <div id="feed-idle-msg">IDLE — no activity</div>
+    <ul id="live-feed-list" aria-label="Recent turns" aria-live="polite" aria-atomic="false"></ul>
+  </section>
+
+</main>
+
+<!-- ===================== SETTINGS DRAWER ===================== -->
+<div id="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+  <div id="settings-backdrop"></div>
+  <div id="settings-panel">
+    <h2>Settings</h2>
+
+    <div class="setting-row">
+      <div class="label">Reference threshold</div>
+      <div class="options" id="ref-opts">
+        <button data-v="10">$10</button>
+        <button data-v="25">$25</button>
+        <button data-v="50" class="active">$50</button>
+        <button data-v="100">$100</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Burn lookback</div>
+      <div class="options" id="lb-opts">
+        <button data-v="1m">1m</button>
+        <button data-v="5m" class="active">5m</button>
+        <button data-v="15m">15m</button>
+        <button data-v="60m">60m</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Daily range</div>
+      <div class="options" id="daily-range-opts">
+        <button data-v="7">7d</button>
+        <button data-v="14" class="active">14d</button>
+        <button data-v="30">30d</button>
+        <button data-v="90">90d</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Sessions / Projects / Models range</div>
+      <div class="options" id="spm-range-opts">
+        <button data-v="1" class="active">24h</button>
+        <button data-v="7">7d</button>
+        <button data-v="14">14d</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Tick interval</div>
+      <div class="options" id="tick-opts">
+        <button data-v="2">2s</button>
+        <button data-v="5" class="active">5s</button>
+        <button data-v="10">10s</button>
+        <button data-v="30">30s</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Idle back-off</div>
+      <div class="options" id="idle-opts">
+        <button data-v="on" class="active">on</button>
+        <button data-v="off">off</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Hide sidechain in feed</div>
+      <div class="options" id="sidechain-opts">
+        <button data-v="off" class="active">off</button>
+        <button data-v="on">on</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div class="label">Reduce motion</div>
+      <div class="options" id="motion-opts">
+        <button data-v="auto" class="active">auto</button>
+        <button data-v="on">on</button>
+        <button data-v="off">off</button>
+      </div>
+    </div>
+
+    <button id="settings-reset" title="Reset all settings to defaults">Reset to defaults</button>
+  </div>
+</div>
+
+<!-- ===================== SCRIPTS ===================== -->
+<script type="module" src="/assets/solari.js"></script>
+<script type="module" src="/assets/gauge.js"></script>
+<script type="module" src="/assets/settings.js"></script>
+<script type="module" src="/assets/app.js"></script>
+
+</body>
+</html>
