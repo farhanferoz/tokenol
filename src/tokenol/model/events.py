@@ -1,0 +1,105 @@
+"""Core data model: Event → Turn → Session → Project."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from tokenol.enums import AssumptionTag
+
+
+@dataclass
+class Usage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
+@dataclass
+class RawEvent:
+    """One parsed line from a JSONL file, after type filtering."""
+
+    # Provenance
+    source_file: str
+    line_number: int
+
+    # Identity
+    event_type: str           # "assistant", "user", "system", …
+    session_id: str
+    request_id: str | None
+    message_id: str | None    # message.id (Anthropic UUID)
+    uuid: str | None          # event-level uuid
+
+    # Timing
+    timestamp: datetime
+
+    # Token accounting (None = interrupted / no billing data)
+    usage: Usage | None
+
+    # Model
+    model: str | None
+
+    # Structural flags
+    is_sidechain: bool
+    stop_reason: str | None
+
+    # Raw for extensibility (caller may inspect)
+    raw: dict
+
+
+@dataclass
+class Turn:
+    """One deduplicated assistant response."""
+
+    dedup_key: str            # message_id:request_id (or passthrough)
+    timestamp: datetime
+    session_id: str
+    model: str | None
+    usage: Usage
+    is_sidechain: bool
+    stop_reason: str | None
+    assumptions: list[AssumptionTag] = field(default_factory=list)
+    cost_usd: float = 0.0
+
+
+@dataclass
+class Session:
+    """All turns from one JSONL file (one sessionId)."""
+
+    session_id: str
+    source_file: str
+    is_sidechain: bool
+    turns: list[Turn] = field(default_factory=list)
+
+    @property
+    def total_cost(self) -> float:
+        return sum(t.cost_usd for t in self.turns)
+
+    @property
+    def total_output_tokens(self) -> int:
+        return sum(t.usage.output_tokens for t in self.turns)
+
+    @property
+    def total_input_tokens(self) -> int:
+        return sum(t.usage.input_tokens for t in self.turns)
+
+    @property
+    def total_cache_read(self) -> int:
+        return sum(t.usage.cache_read_input_tokens for t in self.turns)
+
+    @property
+    def total_cache_creation(self) -> int:
+        return sum(t.usage.cache_creation_input_tokens for t in self.turns)
+
+
+@dataclass
+class Project:
+    """Aggregation of sessions under one config directory."""
+
+    config_dir: str
+    sessions: list[Session] = field(default_factory=list)
+
+    @property
+    def all_turns(self) -> list[Turn]:
+        return [t for s in self.sessions for t in s.turns]
