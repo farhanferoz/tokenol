@@ -47,8 +47,10 @@ let S = {};
 const charts    = {};
 const chartMeta = {};  // keyed by chart id → opts key; controls setData vs rebuild
 
-let _idleTimer     = null;
+let _idleTimer      = null;
 let _todayTimestamp = 0;
+let _isIdle         = false;
+let _staleToday     = false;
 
 const prefs = {
   burnLookback: '5m',
@@ -74,9 +76,9 @@ function render(keys) {
   if (keys.has('active_window') || keys.has('config')) { renderGauge(); renderBurnHistory(); }
   if (keys.has('today'))         { renderToday(); renderHourlyBars(); }
   if (keys.has('daily_90d'))     { renderDailyArea(); }
-  if (keys.has('sessions') || keys.has('_sess')) renderSessions();
-  if (keys.has('models')   || keys.has('_mod'))  renderModels();
-  if (keys.has('projects') || keys.has('_proj')) renderProjects();
+  if (keys.has('sessions')) renderSessions();
+  if (keys.has('models'))   renderModels();
+  if (keys.has('projects')) renderProjects();
   if (keys.has('heatmap_14d'))   renderHeatmap();
   if (keys.has('recent_turns'))  renderFeed();
 }
@@ -142,6 +144,7 @@ function renderToday() {
   const t = S.today;
   if (!t) return;
   _todayTimestamp = Date.now();
+  _staleToday = false;
   $('panel-today')?.classList.remove('stale');
   $('today-cost').setAttribute('value', (t.cost_usd ?? 0).toFixed(4));
   $('today-turns').textContent       = t.turns ?? 0;
@@ -232,7 +235,7 @@ function renderSessions() {
   const sessions = S.sessions?.[prefs.sessionsRange] ?? [];
   $('sessions-tbody').innerHTML = sessions.map(s => {
     const vc = `verdict-${s.verdict}`;
-    return `<tr onclick="location.href='/session/${s.id}'" style="cursor:pointer">
+    return `<tr data-id="${s.id}" style="cursor:pointer">
       <td title="${s.cwd ?? ''}">${s.id.slice(0, 8)}</td>
       <td>${shortModel(s.model)}</td>
       <td>${fmtUSD(s.cost_usd)}</td>
@@ -242,6 +245,11 @@ function renderSessions() {
     </tr>`;
   }).join('');
 }
+
+$('sessions-tbody').addEventListener('click', ev => {
+  const row = ev.target.closest('tr[data-id]');
+  if (row) location.href = `/session/${row.dataset.id}`;
+});
 
 // ---- models bars ----
 
@@ -345,11 +353,11 @@ function renderFeed() {
   const items   = turns.filter(t => !prefs.hideSidechain || !t.is_sidechain).slice(0, 20);
   const liveKeys = new Set(items.map(t => `${t.session_id}|${t.ts}`));
 
-  // remove stale rows
-  [...list.children].forEach(li => { if (!liveKeys.has(li.dataset.key)) li.remove(); });
-
-  // prepend new rows (items are newest-first; iterate reversed so prepend yields correct order)
-  const existing = new Set([...list.children].map(li => li.dataset.key));
+  const existing = new Set();
+  [...list.children].forEach(li => {
+    if (liveKeys.has(li.dataset.key)) existing.add(li.dataset.key);
+    else li.remove();
+  });
   for (let i = items.length - 1; i >= 0; i--) {
     const t = items[i];
     const k = `${t.session_id}|${t.ts}`;
@@ -426,7 +434,8 @@ function updateClock() {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false, timeZoneName: 'short',
   });
-  if (_todayTimestamp && Date.now() - _todayTimestamp > 300_000) {
+  if (!_staleToday && _todayTimestamp && Date.now() - _todayTimestamp > 300_000) {
+    _staleToday = true;
     $('panel-today')?.classList.add('stale');
   }
 }
@@ -447,6 +456,8 @@ function updateTitle() {
 // ---- idle / dead-feed detection ----
 
 function _setIdle(idle) {
+  if (_isIdle === idle) return;
+  _isIdle = idle;
   $('panel-feed')?.classList.toggle('feed-idle', idle);
   if (idle) {
     $('feed-idle-msg').classList.add('visible');

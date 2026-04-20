@@ -51,12 +51,6 @@ function spmVal(range) { return range === '24h' ? '1' : range === '7d' ? '7' : '
 
 function setActive(groupId, val) {
   document.getElementById(groupId)?.querySelectorAll('button').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.v === String(val));
-  });
-}
-
-function syncPanelButton(groupId, val) {
-  document.getElementById(groupId)?.querySelectorAll('button').forEach(btn => {
     const bVal = btn.dataset.lb ?? btn.dataset.r ?? btn.dataset.v;
     btn.classList.toggle('active', bVal === String(val));
   });
@@ -95,12 +89,11 @@ function applyLoadedPrefs(p) {
 
   syncSettingsButtons();
 
-  // Sync panel header / range selector buttons
-  syncPanelButton('burn-lookback',      p.burnLookback);
-  syncPanelButton('sessions-range-sel', spmVal(p.sessionsRange));
-  syncPanelButton('models-range-sel',   spmVal(p.modelsRange));
-  syncPanelButton('projects-range-sel', spmVal(p.projectsRange));
-  syncPanelButton('daily-range-sel',    String(p.dailyRange));
+  setActive('burn-lookback',      p.burnLookback);
+  setActive('sessions-range-sel', spmVal(p.sessionsRange));
+  setActive('models-range-sel',   spmVal(p.modelsRange));
+  setActive('projects-range-sel', spmVal(p.projectsRange));
+  setActive('daily-range-sel',    String(p.dailyRange));
 
   applyReduceMotion(p.reduceMotion);
 
@@ -122,9 +115,10 @@ applyLoadedPrefs(loadPrefs());
 // ---- wire settings panel ----
 
 function wireOpt(groupId, onChange) {
-  document.getElementById(groupId)?.querySelectorAll('button').forEach(btn => {
+  const group = document.getElementById(groupId);
+  group?.querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.getElementById(groupId).querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      group.querySelectorAll('button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       onChange(btn.dataset.v);
       window.savePrefs();
@@ -134,7 +128,7 @@ function wireOpt(groupId, onChange) {
 
 wireOpt('lb-opts', val => {
   window.PREFS.burnLookback = val;
-  syncPanelButton('burn-lookback', val);
+  setActive('burn-lookback', val);
   window.rerender?.(['active_window']);
 });
 
@@ -143,15 +137,15 @@ wireOpt('spm-range-opts', val => {
   window.PREFS.sessionsRange = range;
   window.PREFS.projectsRange = range;
   window.PREFS.modelsRange   = range;
-  syncPanelButton('sessions-range-sel', val);
-  syncPanelButton('models-range-sel',   val);
-  syncPanelButton('projects-range-sel', val);
+  setActive('sessions-range-sel', val);
+  setActive('models-range-sel',   val);
+  setActive('projects-range-sel', val);
   window.rerender?.(['sessions', 'models', 'projects']);
 });
 
 wireOpt('daily-range-opts', val => {
   window.PREFS.dailyRange = parseInt(val, 10);
-  syncPanelButton('daily-range-sel', val);
+  setActive('daily-range-sel', val);
   window.rerender?.(['daily_90d']);
 });
 

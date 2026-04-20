@@ -190,13 +190,15 @@ function renderTimeline(turns, firstTs, lastTs) {
 // ---- turn table ----
 
 const PAGE = 100;
-let _turns   = [];
-let _sortKey = 'ts';
-let _sortAsc = true;
-let _page    = 0;
+let _turns        = [];
+let _origIndexMap = new Map();
+let _sortKey      = 'ts';
+let _sortAsc      = true;
+let _page         = 0;
 
 function initTable(turns) {
   _turns = turns;
+  _origIndexMap = new Map(turns.map((t, i) => [t, i]));
 
   document.querySelectorAll('#turns-table th[data-sort]').forEach(th => {
     th.addEventListener('click', () => {
@@ -244,7 +246,7 @@ function renderTable() {
   });
 
   $('turns-tbody').innerHTML = slice.map((t, i) => {
-    const origIdx = _turns.indexOf(t);
+    const origIdx = _origIndexMap.get(t);
     const rowNum  = _page * PAGE + i + 1;
     const errTd   = t.tool_error_count > 0
       ? `<td class="alarm">${t.tool_error_count}</td>`
@@ -283,7 +285,7 @@ $('turn-pagination').addEventListener('click', ev => {
 
 function highlightTurn(origIdx) {
   const sorted    = sortedTurns();
-  const sortedPos = sorted.findIndex(t => _turns.indexOf(t) === origIdx);
+  const sortedPos = sorted.findIndex(t => _origIndexMap.get(t) === origIdx);
   if (sortedPos < 0) return;
 
   const targetPage = Math.floor(sortedPos / PAGE);
