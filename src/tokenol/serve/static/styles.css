@@ -392,6 +392,7 @@ burn-gauge { display: block; }
 }
 #live-feed-list li {
   display: grid;
+  position: relative;
   grid-template-columns: 68px 80px 72px 90px 1fr;
   gap: 0 12px;
   padding: 4px 0;
@@ -401,9 +402,24 @@ burn-gauge { display: block; }
 }
 #live-feed-list li:last-child { border-bottom: none; }
 
+#live-feed-list li::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 1px;
+  background: var(--amber);
+  pointer-events: none;
+  animation: feed-flash 0.6s ease forwards;
+}
+
 @keyframes feed-in {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes feed-flash {
+  from { opacity: 1; }
+  to   { opacity: 0; }
 }
 
 .feed-ts    { color: var(--mute); font-variant-numeric: tabular-nums; }
