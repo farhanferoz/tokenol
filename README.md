@@ -58,6 +58,7 @@ You can also set `CLAUDE_CONFIG_DIR` to a colon- or comma-separated list of path
 | `projects` | Per-project rollup grouped by `cwd`                                         |
 | `models`   | Per-model rollup with tool-use counts and error rates                       |
 | `verify`   | Cross-check tokenol totals against `ccusage --json` (if installed)          |
+| `serve`    | Launch a local browser dashboard with live burn-rate gauge and all panels   |
 
 Every command accepts:
 
@@ -70,6 +71,28 @@ Every command accepts:
 `tokenol sessions` additionally takes `--sort` (`cost`, `input`, `output`, `cache_read`, `turns`, `max_input`, `duration`) and `--top`.
 
 `tokenol live` takes `--last 20m|2h|30s` and exits non-zero if the projected window cost exceeds the configured reference.
+
+## Live dashboard
+
+```bash
+# Install with dashboard dependencies
+pipx install 'tokenol[serve]'
+
+# Start the dashboard (binds to http://127.0.0.1:8787)
+tokenol serve
+
+# Cross-project view, faster tick, custom reference threshold
+tokenol serve --all-projects --tick 2s --reference 25
+
+# Open browser automatically
+tokenol serve --open
+```
+
+The dashboard runs entirely in your browser and updates every 5 seconds as Claude Code writes new events to disk. It shows burn rate, projected window cost, today's spend, daily history, per-session and per-project breakdowns, a 14-day cost heatmap, and a live feed of the most recent turns. Click any session row to open a drill-down page with a per-turn chart, tool-use timeline, and sortable turn table.
+
+Settings (tick interval, reference threshold, range toggles) are persisted in `localStorage` and survive page reloads. Changes to tick interval and reference threshold are applied to the running server immediately without a page reload.
+
+See [`docs/DASHBOARD.md`](docs/DASHBOARD.md) for a full panel reference and keyboard shortcuts.
 
 ## What it detects
 
