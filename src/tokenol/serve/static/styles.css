@@ -517,7 +517,8 @@ burn-gauge { display: block; }
 a { color: var(--amber); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-.hidden { display: none !important; }
+.hidden        { display: none !important; }
+.hidden-label  { visibility: hidden; }
 
 @keyframes fade-in {
   from { opacity: 0; } to { opacity: 1; }

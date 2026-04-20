@@ -110,22 +110,37 @@ serve/
     {"date": "2026-04-06", "cost_usd": 119.73, "output_tokens": 682700, "cost_per_kw": 0.175, "hit_rate": 0.979},
     // ...
   ],
-  "sessions_14d": [                 // trimmed to 50 highest-cost for payload size
-    {"id": "41adebc8", "model": "sonnet-4.6", "first_ts": "...", "last_ts": "...",
-     "cost_usd": 28.49, "turns": 441, "max_input": 230300, "verdict": "sidechain",
-     "cwd": "/home/ff235/dev/claude_rate_limit"},
-    // ...
-  ],
-  "projects_14d": [
-    {"cwd": "/home/ff235/dev/claude_rate_limit", "cost_usd": 38.26, "sessions": 3,
-     "turns": 647, "cache_reuse_ratio": 0.953},
-    // ...
-  ],
-  "models_14d": [
-    {"model": "opus-4.7", "cost_usd": 19.44, "turns": 164, "input_tokens": 830,
-     "output_tokens": 164000, "cache_read_tokens": 15040000, "tool_error_rate": 0.0},
-    // ...
-  ],
+  // Sessions/projects/models: pre-aggregated at three windows so the client
+  // can switch 24h/7d/14d without a server round-trip. Each list is sorted
+  // cost-desc; sessions is trimmed to 50.
+  "sessions": {
+    "24h": [
+      {"id": "41adebc8", "model": "sonnet-4.6", "first_ts": "...", "last_ts": "...",
+       "cost_usd": 28.49, "turns": 441, "max_input": 230300, "verdict": "sidechain",
+       "cwd": "/home/ff235/dev/claude_rate_limit"},
+      // ...
+    ],
+    "7d":  [ /* same shape */ ],
+    "14d": [ /* same shape */ ]
+  },
+  "projects": {
+    "24h": [
+      {"cwd": "/home/ff235/dev/claude_rate_limit", "cost_usd": 38.26, "sessions": 3,
+       "turns": 647, "cache_reuse_ratio": 0.953},
+      // ...
+    ],
+    "7d":  [ /* same shape */ ],
+    "14d": [ /* same shape */ ]
+  },
+  "models": {
+    "24h": [
+      {"model": "opus-4.7", "cost_usd": 19.44, "turns": 164, "input_tokens": 830,
+       "output_tokens": 164000, "cache_read_tokens": 15040000, "tool_error_rate": 0.0},
+      // ...
+    ],
+    "7d":  [ /* same shape */ ],
+    "14d": [ /* same shape */ ]
+  },
   "heatmap_14d": {                  // UTC hour × date, last 14 days
     "dates": ["2026-04-07", ..., "2026-04-20"],
     "hours": [0, 1, ..., 23],
@@ -153,7 +168,12 @@ serve/
 }
 ```
 
-Client-visible ranges are filtered from these arrays — the server always ships the widest range (14 d for sessions/projects/models, 90 d for daily, 14 d × 24 h for heatmap, 60 m for burn series), the client trims based on the user's range selector without a round-trip.
+Ranges work as follows:
+
+- **`sessions` / `projects` / `models`** are pre-aggregated by the server at `24h` / `7d` / `14d`. Each range is cost-desc sorted, sessions trimmed to 50. The client picks the right key based on the user's range toggle — no client-side re-aggregation, no round-trip.
+- **`daily_90d`** is a flat 90-day list, zero-filled. The client slices by date for the 7/14/30/90-day selector.
+- **`heatmap_14d`** is always 14 × 24. No range selector.
+- **`burn_rate_series`** is the last 60 min. No range selector.
 
 ### Session-detail payload (`/api/session/<id>`)
 
@@ -290,9 +310,9 @@ Uses `GET /api/session/<id>`. Not live — a single fetch on load + a manual ref
 | **Burn history 60 m** | $/hr line for the last 60 min |
 | **Today** | Total cost, turns, output tokens, cache hit %, $/kW, hourly bars (today) |
 | **Last N days** | Daily cost sparkline, total, best & worst day, $/kW drift line, range selector (7/14/30/90 d) |
-| **Top sessions** | id, model, cost, turns, max-input, verdict, cwd (tooltip), range selector (24 h / 7 d / 14 d), click → drill-down |
-| **Top projects** | cwd, cost, sessions, cache reuse %, range selector (24 h / 7 d / 14 d) |
-| **Models** | model, cost share %, tokens, tool-error rate (tooltip), range selector (24 h / 7 d / 14 d / all) |
+| **Top sessions** | id, model, cost, turns, max-input, verdict, cwd (tooltip), range selector (24 h / 7 d / 14 d — reads `sessions[<range>]`), click → drill-down |
+| **Top projects** | cwd, cost, sessions, cache reuse %, range selector (reads `projects[<range>]`) |
+| **Models** | model, cost share %, tokens, tool-error rate (tooltip), range selector (reads `models[<range>]`) |
 | **Cost heatmap** | 14 × 24 grid, amber intensity = hourly spend — reveals "always blow up at 3 am" patterns |
 | **Live feed** | ts, session short-id, model, Δcost, tokens, sidechain pill, tool-use chip |
 
@@ -420,7 +440,7 @@ Each step is independently testable. Sonnet should run tests + a manual `tokenol
 - **$/kW drift line** (uPlot): same X range as daily.
 - **Today hourly bars**: plain CSS flex widths, amber intensity per hour.
 - **Models share bar**: plain CSS flex, hue per model via stable hash → HSL.
-- **Cost heatmap**: 14 × 24 CSS grid, background-color from amber-to-dim interpolation. Hover = tooltip with exact cost.
+- **Cost heatmap**: 14 × 24 CSS grid, background-color from amber-to-dim interpolation. Hover = tooltip with exact cost. Populate `#heatmap-hour-labels` at render time: one empty `<span>` for the row-label column, then 24 hour spans (`0..23`); apply `.hidden-label` to all except hours 0, 4, 8, 12, 16, 20 to keep the axis legible.
 - **Burn history 60m line** (uPlot): cost/hr over the last 60 min, with a dashed reference line at the current reference threshold.
 - **`<live-feed>`** component: last-20 list with the fade-in-from-bottom animation on new rows; a "hide sidechain" class toggled from settings.
 
