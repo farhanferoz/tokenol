@@ -1,4 +1,6 @@
 _local/
+*_PLAN.md
+*.plan.md
 __pycache__/
 *.pyc
 *.pyo

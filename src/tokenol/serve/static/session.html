@@ -1,5 +1,240 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>tokenol — session</title></head>
-<body><p>Session drill-down coming soon.</p></body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — session</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23ffb647' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <style>
+    #session-main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px 24px 60px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+    #header a.back-link {
+      font-size: 12px;
+      color: var(--mute);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    #header a.back-link:hover { color: var(--fg); }
+    #header-session-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #sess-id {
+      font-size: 12px;
+      color: var(--mute);
+      font-variant-numeric: tabular-nums;
+    }
+    #sess-time-range {
+      font-size: 11px;
+      color: var(--mute);
+    }
+    /* meta strip */
+    #session-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      gap: 0 32px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--rule);
+    }
+    #sess-cwd {
+      font-size: 12px;
+      color: var(--mute);
+      max-width: 600px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #sess-model { font-size: 13px; color: var(--fg); margin-top: 2px; }
+    .meta-totals {
+      display: flex;
+      gap: 28px;
+      margin-left: auto;
+      align-items: flex-end;
+    }
+    .total-item .label { display: block; margin-bottom: 2px; }
+    .total-item .val   { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    /* sections */
+    .session-section { border-top: 1px solid var(--rule); padding-top: 20px; }
+    .chart-legend {
+      display: flex;
+      gap: 20px;
+      margin: 6px 0 12px;
+    }
+    .legend-item {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .legend-item::before {
+      content: '';
+      display: inline-block;
+      width: 20px;
+      height: 2px;
+      border-radius: 1px;
+    }
+    .legend-amber     { color: var(--amber);     }
+    .legend-amber     .legend-item::before,
+    .legend-item.legend-amber::before     { background: var(--amber); }
+    .legend-amber-dim { color: var(--amber-dim); }
+    .legend-item.legend-amber-dim::before { background: var(--amber-dim); }
+    .legend-cool      { color: var(--cool);      }
+    .legend-item.legend-cool::before      { background: var(--cool); }
+    /* timeline */
+    #tool-timeline-svg { display: block; margin-top: 8px; }
+    .tl-tip {
+      position: fixed;
+      background: var(--bg);
+      border: 1px solid var(--rule);
+      color: var(--fg);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding: 4px 8px;
+      pointer-events: none;
+      display: none;
+      line-height: 1.5;
+      z-index: 300;
+    }
+    /* turn table */
+    #turns-table th[data-sort] { cursor: pointer; }
+    #turns-table th[data-sort]:hover { color: var(--fg); }
+    #turns-table th[data-sort].sort-asc::after  { content: ' ↑'; opacity: 0.7; }
+    #turns-table th[data-sort].sort-desc::after { content: ' ↓'; opacity: 0.7; }
+    #turns-tbody tr.highlighted td { background: rgba(255,182,71,0.07) !important; color: var(--fg) !important; }
+    #turn-pagination {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    #turn-pagination button {
+      background: none;
+      border: 1px solid var(--rule);
+      color: var(--mute);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      min-width: 30px;
+      padding: 2px 6px;
+      cursor: pointer;
+      transition: color 0.12s, border-color 0.12s;
+    }
+    #turn-pagination button:hover  { color: var(--fg); border-color: var(--mute); }
+    #turn-pagination button.active { color: var(--amber); border-color: var(--amber); }
+    #session-error {
+      color: var(--alarm);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      padding: 24px 0;
+    }
+    #table-meta-row {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<header id="header">
+  <a href="/" class="back-link">← tokenol</a>
+  <div id="header-session-right">
+    <span id="sess-id">…</span>
+    <span id="sess-verdict" class="verdict-pill"></span>
+    <span id="sess-time-range"></span>
+  </div>
+</header>
+
+<main id="session-main">
+
+  <!-- meta strip -->
+  <div id="session-meta">
+    <div>
+      <div class="label">cwd</div>
+      <div id="sess-cwd">–</div>
+      <div class="label" style="margin-top:8px;">model</div>
+      <div id="sess-model">–</div>
+    </div>
+    <div class="meta-totals">
+      <div class="total-item">
+        <span class="label">cost</span>
+        <span class="val amber" id="sess-cost">–</span>
+      </div>
+      <div class="total-item">
+        <span class="label">turns</span>
+        <span class="val" id="sess-turns">–</span>
+      </div>
+      <div class="total-item">
+        <span class="label">tool uses</span>
+        <span class="val" id="sess-tool-uses">–</span>
+      </div>
+      <div class="total-item">
+        <span class="label">tool errors</span>
+        <span class="val" id="sess-tool-errors">–</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- turn chart -->
+  <section id="session-chart-section" class="session-section">
+    <div class="panel-title serif">Turn chart</div>
+    <div class="chart-legend">
+      <span class="legend-item legend-amber">input + creation</span>
+      <span class="legend-item legend-amber-dim">cache read</span>
+      <span class="legend-item legend-cool">output</span>
+    </div>
+    <div id="turn-chart"></div>
+  </section>
+
+  <!-- tool-use timeline -->
+  <section id="tool-timeline-section" class="session-section">
+    <div class="panel-title serif">Tool-use timeline</div>
+    <svg id="tool-timeline-svg" height="48"></svg>
+  </section>
+
+  <!-- turn table -->
+  <section id="session-table-section" class="session-section">
+    <div id="table-meta-row">
+      <span class="panel-title serif" style="margin-bottom:0;">Turns</span>
+      <span id="table-info" class="mute" style="font-size:11px;"></span>
+    </div>
+    <table class="data-table" id="turns-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th data-sort="ts">Time</th>
+          <th>Model</th>
+          <th data-sort="cost">Cost</th>
+          <th data-sort="input">Input+C</th>
+          <th>Cache rd</th>
+          <th>Output</th>
+          <th data-sort="tools">Tools</th>
+          <th data-sort="errors">Errors</th>
+          <th>Stop</th>
+        </tr>
+      </thead>
+      <tbody id="turns-tbody"></tbody>
+    </table>
+    <div id="turn-pagination"></div>
+  </section>
+
+  <div id="session-error" style="display:none;"></div>
+
+</main>
+
+<script type="module" src="/assets/session.js"></script>
+</body>
 </html>
