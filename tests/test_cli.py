@@ -116,6 +116,17 @@ def test_live_invalid_last(basic_config_dir):
     assert result.exit_code != 0
 
 
+def test_live_rejects_zero_duration(basic_config_dir):
+    """live rejects zero-valued durations like '0m' / '0s'."""
+    for bad in ("0m", "0h", "0s"):
+        result = runner.invoke(
+            app,
+            ["live", "--last", bad],
+            env={"CLAUDE_CONFIG_DIR": str(basic_config_dir)},
+        )
+        assert result.exit_code != 0, f"'{bad}' should have been rejected"
+
+
 def test_live_no_recent_data(basic_config_dir):
     """live with no recent data exits cleanly (0) when no active window."""
     # basic.jsonl has data from 2026-04-14; 'now' is 2026-04-20

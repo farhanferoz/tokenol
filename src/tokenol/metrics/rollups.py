@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -89,12 +90,8 @@ def build_session_rollup(session: Session) -> SessionRollup:
     windows = align_windows(session.turns)
     peak_window_cost = max((w.cost_usd for w in windows), default=0.0)
 
-    # Most common model
-    model_counts: dict[str, int] = {}
-    for t in session.turns:
-        if t.model:
-            model_counts[t.model] = model_counts.get(t.model, 0) + 1
-    model = max(model_counts, key=lambda m: model_counts[m]) if model_counts else None
+    model_counter = Counter(t.model for t in session.turns if t.model)
+    model = model_counter.most_common(1)[0][0] if model_counter else None
 
     return SessionRollup(
         session_id=session.session_id,
@@ -135,8 +132,6 @@ def build_project_rollups(session_rollups: list[SessionRollup]) -> list[ProjectR
                 "cache_read_tokens": 0,
                 "cache_creation_tokens": 0,
                 "cost_usd": 0.0,
-                "cache_reads": 0,
-                "cache_creates": 0,
             }
         b = buckets[key]
         b["sessions"] += 1
@@ -146,13 +141,11 @@ def build_project_rollups(session_rollups: list[SessionRollup]) -> list[ProjectR
         b["cache_read_tokens"] += sr.cache_read_tokens
         b["cache_creation_tokens"] += sr.cache_creation_tokens
         b["cost_usd"] += sr.cost_usd
-        b["cache_reads"] += sr.cache_read_tokens
-        b["cache_creates"] += sr.cache_creation_tokens
 
     result: list[ProjectRollup] = []
     for cwd, b in buckets.items():
-        reads = b["cache_reads"]
-        creates = b["cache_creates"]
+        reads = b["cache_read_tokens"]
+        creates = b["cache_creation_tokens"]
         denom = reads + creates
         crr = reads / denom if denom > 0 else None
         result.append(

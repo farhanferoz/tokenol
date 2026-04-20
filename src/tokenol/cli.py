@@ -67,11 +67,11 @@ def _parse_since(since: str) -> date:
 
 
 def _parse_last(last: str) -> timedelta:
-    """Parse lookback duration like '20m', '2h', '30s'. Rejects bare numbers."""
-    m = re.fullmatch(r"(\d+)([mhs])", last.strip())
+    """Parse lookback duration like '20m', '2h', '30s'. Rejects bare numbers and zero."""
+    m = re.fullmatch(r"([1-9]\d*)([mhs])", last.strip())
     if not m:
         raise typer.BadParameter(
-            f"Invalid duration '{last}'. Use format like '20m', '2h', '30s'."
+            f"Invalid duration '{last}'. Use a positive number with unit: '20m', '2h', '30s'."
         )
     value = int(m.group(1))
     unit = m.group(2)
@@ -86,6 +86,16 @@ def _parse_last(last: str) -> timedelta:
 def _configure_logging(log_level: LogLevel) -> None:
     level = getattr(logging, log_level.value.upper(), logging.INFO)
     logging.basicConfig(level=level)
+
+
+def _timedelta_label(td: timedelta) -> str:
+    """Convert a timedelta to a short human label: '20min', '2hr', '30sec'."""
+    total = int(td.total_seconds())
+    if total % 3600 == 0:
+        return f"{total // 3600}hr"
+    if total % 60 == 0:
+        return f"{total // 60}min"
+    return f"{total}sec"
 
 
 def _load_turns(since: date | None = None):
@@ -181,23 +191,14 @@ def live(
 
     proj = project_window(active, now=now, lookback=lookback)
 
-    # Count recent turns
     cutoff = now - lookback
     recent_turns_count = sum(1 for t in active.turns if t.timestamp >= cutoff)
-
-    # Format the last label nicely
-    m = re.fullmatch(r"(\d+)([mhs])", last.strip())
-    if m:
-        val, unit = m.group(1), m.group(2)
-        last_label = f"{val}{'min' if unit == 'm' else ('hr' if unit == 'h' else 'sec')}"
-    else:
-        last_label = last
 
     print_live_full(
         active_window=active,
         projection=proj,
         recent_turns_count=recent_turns_count,
-        last_label=last_label,
+        last_label=_timedelta_label(lookback),
         console=console,
     )
 
@@ -229,25 +230,16 @@ def sessions(
         sr.verdict = compute_verdict(sr)
         rollups.append(sr)
 
-    # Sort
-    def _sort_key(sr):  # type: ignore[name-defined]
-        if sort == SortKey.cost:
-            return sr.cost_usd
-        if sort == SortKey.input:
-            return sr.input_tokens
-        if sort == SortKey.output:
-            return sr.output_tokens
-        if sort == SortKey.cache_read:
-            return sr.cache_read_tokens
-        if sort == SortKey.turns:
-            return sr.turns
-        if sort == SortKey.max_input:
-            return sr.max_turn_input
-        if sort == SortKey.duration:
-            return (sr.last_ts - sr.first_ts).total_seconds()
-        return sr.cost_usd
-
-    rollups.sort(key=_sort_key, reverse=True)
+    _sort_attrs = {
+        SortKey.cost: lambda sr: sr.cost_usd,
+        SortKey.input: lambda sr: float(sr.input_tokens),
+        SortKey.output: lambda sr: float(sr.output_tokens),
+        SortKey.cache_read: lambda sr: float(sr.cache_read_tokens),
+        SortKey.turns: lambda sr: float(sr.turns),
+        SortKey.max_input: lambda sr: float(sr.max_turn_input),
+        SortKey.duration: lambda sr: (sr.last_ts - sr.first_ts).total_seconds(),
+    }
+    rollups.sort(key=_sort_attrs[sort], reverse=True)
     rollups = rollups[:top]
 
     print_sessions(rollups, console=console, show_assumptions=show_assumptions)

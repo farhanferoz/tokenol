@@ -48,24 +48,21 @@ def build_turns(paths: list[Path]) -> list[Turn]:
 def build_sessions(turns: list[Turn], paths: list[Path] | None = None) -> list[Session]:
     """Group turns by session_id. One Session per JSONL file.
 
-    If *paths* is provided, scans system events to extract cwd per session.
+    If *paths* is provided, scans each file once to extract cwd and source path.
     """
-    # Collect cwd per session_id from system events
     cwd_by_session: dict[str, str] = {}
-    sidechain_by_session: dict[str, bool] = {}
+    session_source: dict[str, str] = {}
 
     if paths:
         for path in paths:
+            sid = path.stem
+            session_source[sid] = str(path)
             for raw_ev in parse_file(path):
-                sid = raw_ev.session_id
                 if raw_ev.cwd and sid not in cwd_by_session:
                     cwd_by_session[sid] = raw_ev.cwd
-                if raw_ev.is_sidechain and sid not in sidechain_by_session:
-                    sidechain_by_session[sid] = raw_ev.is_sidechain
+                    break
 
-    # Group turns by session_id; track source_file
     session_turns: dict[str, list[Turn]] = defaultdict(list)
-    session_source: dict[str, str] = {}
     session_sidechain: dict[str, bool] = {}
 
     for turn in turns:
@@ -73,23 +70,6 @@ def build_sessions(turns: list[Turn], paths: list[Path] | None = None) -> list[S
         session_turns[sid].append(turn)
         if sid not in session_sidechain:
             session_sidechain[sid] = turn.is_sidechain
-
-    # Build sessions — if we have paths, map session_id to source file
-    if paths:
-        for path in paths:
-            # The JSONL stem is the session_id
-            sid = path.stem
-            session_source[sid] = str(path)
-            # Also scan any turns whose session_id may differ from filename
-        for turn in turns:
-            sid = turn.session_id
-            if sid not in session_source:
-                session_source[sid] = ""
-    else:
-        for turn in turns:
-            sid = turn.session_id
-            if sid not in session_source:
-                session_source[sid] = ""
 
     sessions: list[Session] = []
     for sid, t_list in session_turns.items():
