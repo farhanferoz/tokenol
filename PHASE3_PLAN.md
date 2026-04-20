@@ -417,9 +417,13 @@ Each step is independently testable. Sonnet should run tests + a manual `tokenol
 ### Task 5 — Live updates (`serve/static/app.js`)
 
 - Open `EventSource('/api/stream')`.
-- Deep-merge incoming diffs into local state; re-render only changed DOM nodes.
-- Connection dot: `.pulse` when connected, `.alarm` on error.
+- Shallow-merge incoming diffs into local state (server already sends complete top-level values; deep-merge would mask list shrinkage).
+- Re-render only the panels whose top-level key changed. Within a panel, reuse DOM where feasible (see Task 11 for live-feed keyed diff and chart `setData`).
+- Connection dot: `.pulse` when connected, `.alarm` on error. Exponential backoff on reconnect (1 s → 30 s cap).
 - Range selectors (per panel) slice the already-received server arrays client-side.
+- Escape all user-derived text before interpolating into `innerHTML` (session ids, cwds, model names, dates). Single helper (`esc(s)`) applied to every `title=`/`data-tip=`/text-node insertion.
+- Replace inline `onclick="location.href=…"` on session rows with a delegated click listener on `#sessions-tbody`.
+- Remove dead diff keys (`_sess`/`_mod`/`_proj`) — the server never emits them.
 
 ### Task 6 — `<solari-number>` component (`serve/static/solari.js`)
 
@@ -433,6 +437,7 @@ Each step is independently testable. Sonnet should run tests + a manual `tokenol
 - `<burn-gauge>` custom element. 180° SVG arc with ticks, needle, projection arc, amber→alarm zone.
 - Attrs: `rate`, `projected`, `reference`, `max-rate`.
 - Colours from CSS variables (inheritable). No hex in JS.
+- Coalesce multi-attr updates: successive `setAttribute` calls within one frame must trigger a single redraw. Prefer scheduling `_update` via `requestAnimationFrame` inside `attributeChangedCallback` over a custom batch method — keeps the public API the standard attribute contract.
 
 ### Task 8 — Charts and small components
 
@@ -440,7 +445,7 @@ Each step is independently testable. Sonnet should run tests + a manual `tokenol
 - **$/kW drift line** (uPlot): same X range as daily.
 - **Today hourly bars**: plain CSS flex widths, amber intensity per hour.
 - **Models share bar**: plain CSS flex, hue per model via stable hash → HSL.
-- **Cost heatmap**: 14 × 24 CSS grid, background-color from amber-to-dim interpolation. Hover = tooltip with exact cost. Populate `#heatmap-hour-labels` at render time: one empty `<span>` for the row-label column, then 24 hour spans (`0..23`); apply `.hidden-label` to all except hours 0, 4, 8, 12, 16, 20 to keep the axis legible.
+- **Cost heatmap**: 14 × 24 CSS grid, background-color from amber-to-dim interpolation. Hover = tooltip with exact cost. Populate `#heatmap-hour-labels` at render time: one empty `<span>` for the row-label column, then 24 hour spans (`0..23`); apply `.hidden-label` to all except hours 0, 4, 8, 12, 16, 20 to keep the axis legible. `#heatmap-grid` must declare `grid-template-columns: auto repeat(24, 1fr)` in `styles.css` — 1 label + 24 cells per row; without it, rows wrap silently.
 - **Burn history 60m line** (uPlot): cost/hr over the last 60 min, with a dashed reference line at the current reference threshold.
 - **`<live-feed>`** component: last-20 list with the fade-in-from-bottom animation on new rows; a "hide sidechain" class toggled from settings.
 
@@ -467,6 +472,9 @@ Each step is independently testable. Sonnet should run tests + a manual `tokenol
 - Title bar text reflects state: `tokenol — $12.50/hr`, `tokenol — ⚠ over $50`, `tokenol — IDLE`.
 - One-colour favicon: the amber arc of the gauge.
 - Keyboard shortcuts: `g` jump to gauge, `l` focus live feed, `s` open settings, `/` focus sessions list.
+- **Wall clock shows local time, not UTC.** Use `toLocaleTimeString` with the user's timezone; matches the `"13:35 BST"` example in the layout sketch.
+- **Live-feed keyed diff**: replace the `innerHTML = items.map(...)` rebuild with a keyed prepend (key = `${session_id}|${ts}`). Only new `<li>` nodes are inserted, so the spec'd fade-in + 4 px slide + amber-underline flash (600 ms) can actually land. Drop trailing nodes once the list exceeds 20.
+- **uPlot `setData` path**: `_chart()` currently destroys and recreates every tick; on burn-history and daily (which diff every tick) this flickers and wastes work. Cache the uPlot instance per id; on subsequent calls with the same series shape, call `u.setData(data)` and only re-apply `scales.y.range` if bounds changed. Destroy + rebuild only when series count or axis config changes.
 
 ### Task 12 — Docs
 
