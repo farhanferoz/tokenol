@@ -352,6 +352,7 @@ function wireRange(selId, onChange) {
       $(selId).querySelectorAll('button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       onChange(btn.dataset.r ?? btn.dataset.lb ?? btn.dataset.v);
+      window.savePrefs?.();
     });
   });
 }

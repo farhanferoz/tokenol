@@ -508,6 +508,10 @@ burn-gauge { display: block; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  transition-duration: 0.01ms !important;
+}
 
 /* ---- uPlot overrides ---- */
 .uplot { font-family: var(--font-mono) !important; }
