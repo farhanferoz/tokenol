@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -23,6 +24,8 @@ from tokenol.metrics.rollups import (
 from tokenol.metrics.verdicts import compute_verdict
 from tokenol.metrics.windows import align_windows, project_window
 from tokenol.model.events import RawEvent, Session, Turn, Usage
+
+log = logging.getLogger(__name__)
 
 
 @dataclass

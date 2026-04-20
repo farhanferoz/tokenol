@@ -13,7 +13,10 @@ from tokenol.model.events import RawEvent, Usage
 
 def _parse_timestamp(ts: str) -> datetime:
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except (ValueError, AttributeError):
         return datetime.fromtimestamp(0, tz=timezone.utc)
 

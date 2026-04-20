@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator, Callable
 
 from tokenol.serve.state import ParseCache, SnapshotResult, build_snapshot_full
+
+log = logging.getLogger(__name__)
 
 
 def _shallow_diff(prev: dict, curr: dict) -> dict:
@@ -35,21 +38,20 @@ async def snapshot_stream(
         tick = int(get_tick_seconds())
         idle_seconds = time.monotonic() - last_change_ts
 
-        if idle_seconds >= IDLE_THRESHOLD:
-            effective_tick = max(tick * 3, 15)
-        else:
-            effective_tick = tick
+        effective_tick = max(tick * 3, 15) if idle_seconds >= IDLE_THRESHOLD else tick
 
-        result: SnapshotResult = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda t=tick: build_snapshot_full(parse_cache, all_projects, reference_usd, t),
-        )
+        try:
+            result: SnapshotResult = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda t=tick: build_snapshot_full(parse_cache, all_projects, reference_usd, t),
+            )
+        except Exception:
+            log.exception("snapshot build failed — skipping tick")
+            await asyncio.sleep(effective_tick)
+            continue
         curr = result.payload
 
-        if prev_payload is None:
-            data = curr
-        else:
-            data = _shallow_diff(prev_payload, curr)
+        data = curr if prev_payload is None else _shallow_diff(prev_payload, curr)
 
         if data:
             last_change_ts = time.monotonic()

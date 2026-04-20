@@ -397,7 +397,7 @@ def serve(
         import webbrowser
         webbrowser.open(url)
 
-    uvicorn.run(application, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(application, host="127.0.0.1", port=port, log_level=log_level.value.lower())
 
 
 def main() -> None:
