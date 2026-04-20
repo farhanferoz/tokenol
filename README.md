@@ -33,6 +33,20 @@ tokenol live --last 20m
 
 All commands scan every JSONL file under `$CLAUDE_CONFIG_DIR` (falling back to the standard `~/.claude*` locations) and deduplicate turns using the same `message.id:requestId` compound key that [ccusage](https://github.com/ryoppippi/ccusage) uses.
 
+### Scanning multiple projects
+
+If you use workspace isolation (one `~/.claude-<project>` directory per repo, pointed at via `CLAUDE_CONFIG_DIR`), `tokenol` by default only sees the currently-active project. Pass **`--all-projects`** (or `-A`) to any command to scan every `~/.claude*` directory and get a cross-project view:
+
+```bash
+# Total spend across every project in the last 14 days
+tokenol daily --since 14d --all-projects
+
+# Which sessions cost the most, globally
+tokenol sessions --since 30d --top 10 -A
+```
+
+You can also set `CLAUDE_CONFIG_DIR` to a colon- or comma-separated list of paths to scan a specific subset.
+
 ## Commands
 
 | Command    | What it shows                                                               |
@@ -48,6 +62,7 @@ All commands scan every JSONL file under `$CLAUDE_CONFIG_DIR` (falling back to t
 Every command accepts:
 
 - `--since 14d` — lookback window (e.g. `7d`, `30d`, or an ISO date)
+- `--all-projects` / `-A` — scan every `~/.claude*` directory (ignores `CLAUDE_CONFIG_DIR`)
 - `--strict` — exit non-zero if any cost-computation assumption fired
 - `--show-assumptions` — always print the assumption footer
 - `--log-level debug|info|warning`
