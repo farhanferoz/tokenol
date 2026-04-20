@@ -136,7 +136,7 @@ def daily(
     turns, paths = _load_turns(since=since_date)
     if strict and assumption_recorder.fired():
         raise typer.BadParameter("Assumptions fired and --strict is set.")
-    rollups = rollup_by_date(turns)
+    rollups = rollup_by_date(turns, since=since_date)
     print_daily(rollups, console=console, show_assumptions=show_assumptions)
 
 

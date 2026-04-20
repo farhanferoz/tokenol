@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from tokenol.enums import AssumptionTag
 from tokenol.model import registry
@@ -76,21 +76,38 @@ def _accumulate_turn(rollup: DailyRollup | HourlyRollup, turn: Turn) -> None:
     rollup.cost_usd += turn.cost_usd
 
 
-def rollup_by_date(turns: list[Turn]) -> list[DailyRollup]:
+def rollup_by_date(
+    turns: list[Turn],
+    since: date | None = None,
+    until: date | None = None,
+) -> list[DailyRollup]:
+    """Bucket turns by date. If *since*/*until* are given, zero-fill missing days."""
+
+    def _empty(d: date) -> DailyRollup:
+        return DailyRollup(
+            date=d, turns=0, input_tokens=0, output_tokens=0,
+            cache_read_tokens=0, cache_creation_tokens=0,
+            cost_usd=0.0, interrupted_turns=0,
+        )
+
     buckets: dict[date, DailyRollup] = {}
 
     for turn in turns:
         d = turn.timestamp.date()
         if d not in buckets:
-            buckets[d] = DailyRollup(
-                date=d, turns=0, input_tokens=0, output_tokens=0,
-                cache_read_tokens=0, cache_creation_tokens=0,
-                cost_usd=0.0, interrupted_turns=0,
-            )
+            buckets[d] = _empty(d)
         r = buckets[d]
         _accumulate_turn(r, turn)
         if turn.is_interrupted:
             r.interrupted_turns += 1
+
+    if since is not None:
+        until = until or date.today()
+        cur = since
+        while cur <= until:
+            if cur not in buckets:
+                buckets[cur] = _empty(cur)
+            cur += timedelta(days=1)
 
     return sorted(buckets.values(), key=lambda r: r.date)
 
