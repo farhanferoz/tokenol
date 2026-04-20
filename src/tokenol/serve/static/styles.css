@@ -429,6 +429,9 @@ burn-gauge { display: block; }
 }
 #feed-idle-msg.visible { display: block; }
 
+.panel-feed.feed-idle { opacity: 0.45; transition: opacity 0.6s ease; }
+.panel-today.stale    { opacity: 0.6;  transition: opacity 0.6s ease; }
+
 /* ---- Settings drawer ---- */
 #settings-overlay {
   display: none;
