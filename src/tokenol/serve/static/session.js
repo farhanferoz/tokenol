@@ -261,30 +261,25 @@ document.addEventListener('keydown', ev => {
   if (ev.key === 'ArrowRight' && _currentTurnIdx != null && _currentTurnIdx < _totalTurns - 1) { ev.preventDefault(); openTurnModal(_currentTurnIdx + 1); }
 });
 
-// ---- cost per turn bars ----
+// ---- cost per turn: small multiples ----
 
-function _niceCostTicks(maxCost) {
-  // Choose 3-4 tick values spanning 0 → maxCost on a sqrt scale so they look evenly spaced.
-  // Generate candidate ticks at 1, 2, 5 × 10^k, pick ones that fall within range.
-  const fractions = [0.1, 0.25, 0.5, 1.0];
-  return fractions.map(f => {
-    const target = f * f * maxCost;  // sqrt-inverse so ticks land at even visual positions
-    // Round to 1 significant figure for readable labels
-    if (target <= 0) return 0;
-    const mag = Math.pow(10, Math.floor(Math.log10(target)));
-    const norm = target / mag;
-    const rounded = (norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10) * mag;
-    return rounded;
-  }).filter((v, i, a) => v > 0 && a.indexOf(v) === i);
+// Four strip charts stacked vertically. Each strip has its own Y-scale so a
+// rare $2 cache_creation spike doesn't flatten a turn's $0.03 input component.
+// A shared vertical cursor ties the rows together; hovering any bar highlights
+// the turn across all four strips.
+const _CBAR_STRIPS = [
+  { key: 'cache_creation', label: 'cache creation', color: 'var(--alarm)'     },
+  { key: 'cache_read',     label: 'cache read',     color: 'var(--amber-dim)' },
+  { key: 'input',          label: 'input',          color: 'var(--amber-dim)' },
+  { key: 'output',         label: 'output',         color: 'var(--cool)'      },
+];
+
+function _fmtCostCompact(v) {
+  if (v >= 1)    return `$${v.toFixed(v >= 10 ? 0 : 1)}`;
+  if (v >= 0.1)  return `$${v.toFixed(2)}`;
+  if (v >= 0.01) return `$${v.toFixed(3)}`;
+  return `$${v.toFixed(4)}`;
 }
-
-const _CBAR_KEYS   = ['cache_read', 'input', 'cache_creation', 'output'];
-const _CBAR_COLORS = () => ({
-  cache_read:     CV['--mute'],
-  input:          CV['--amber-dim'],
-  cache_creation: CV['--alarm'],
-  output:         CV['--cool'],
-});
 
 function renderCostBars(turns) {
   const section = $('cost-bars-section');
@@ -305,96 +300,140 @@ function renderCostBars(turns) {
 }
 
 function _drawCostBars(turns, cont, top30) {
-  const colors = _CBAR_COLORS();
-  let visible;
-  if (top30) {
-    visible = turns.map((t, i) => ({t, i}))
-      .sort((a, b) => b.t.cost_usd - a.t.cost_usd).slice(0, 30)
-      .sort((a, b) => a.i - b.i);
-  } else {
-    visible = turns.map((t, i) => ({t, i}));
-  }
+  const visible = top30
+    ? turns.map((t, i) => ({t, i}))
+        .sort((a, b) => b.t.cost_usd - a.t.cost_usd).slice(0, 30)
+        .sort((a, b) => a.i - b.i)
+    : turns.map((t, i) => ({t, i}));
 
-  const H         = 160;
-  const Y_AXIS_W  = 48;
-  const W         = cont.offsetWidth || 800;
-  const plotW     = Math.max(200, W - Y_AXIS_W);
-  const n         = visible.length;
+  const n = visible.length;
   if (!n) { cont.innerHTML = ''; return; }
-  const barW = Math.max(2, Math.min(20, Math.floor((plotW - 4) / n) - 1));
+
+  const LABEL_W = 130;
+  const STRIP_H = 38;
+  const GAP_Y   = 6;
+  const AXIS_H  = 18;
+  const stripTop = si => si * (STRIP_H + GAP_Y);
+  const plotAreaH = _CBAR_STRIPS.length * (STRIP_H + GAP_Y);
+  const TOTAL_H = plotAreaH + AXIS_H;
+  const W = cont.offsetWidth || 800;
+  const plotW = Math.max(200, W - LABEL_W - 8);
+  const barW = Math.max(1, Math.min(14, Math.floor(plotW / n) - 1));
   const gap  = Math.max(0, Math.floor(barW * 0.15));
-  const maxCost = Math.max(...visible.map(e => e.t.cost_usd), 1e-9);
+  const stride = barW + gap;
+  const plotUsedW = n * stride;
 
-  // sqrt scale so the few extreme spikes don't crush the typical turns into 1-pixel slivers
-  const scale = v => Math.sqrt(Math.max(0, v) / maxCost) * H;
+  const parts = [];
 
-  const rectParts = [];
-  visible.forEach((e, j) => {
-    const t  = e.t;
-    const cc = t.cost_components || {};
-    const x  = Y_AXIS_W + j * (barW + gap);
-    let cum = 0;
-    _CBAR_KEYS.forEach(k => {
-      const v = cc[k] || 0;
+  _CBAR_STRIPS.forEach((strip, si) => {
+    const maxV = Math.max(...visible.map(e => e.t.cost_components?.[strip.key] || 0), 1e-9);
+    const scale = v => Math.max(1, (v / maxV) * (STRIP_H - 4));
+    const yTop = stripTop(si);
+    const baseY = yTop + STRIP_H;
+
+    // Row background + baseline
+    parts.push(
+      `<rect x="${LABEL_W}" y="${yTop}" width="${plotUsedW}" height="${STRIP_H}" fill="var(--bg-raised)"/>`,
+      `<line x1="${LABEL_W}" x2="${LABEL_W + plotUsedW}" y1="${baseY}" y2="${baseY}" stroke="var(--rule)"/>`,
+      `<text x="${LABEL_W - 8}" y="${yTop + 13}" text-anchor="end" font-size="11" fill="var(--fg)">${strip.label}</text>`,
+      `<text x="${LABEL_W - 8}" y="${yTop + 27}" text-anchor="end" font-size="10" fill="var(--mute)">max ${_fmtCostCompact(maxV)}</text>`,
+    );
+
+    visible.forEach((e, j) => {
+      const v = e.t.cost_components?.[strip.key] || 0;
       if (v <= 0) return;
-      const yTop = H - scale(cum + v);
-      const yBot = H - scale(cum);
-      const h    = Math.max(1, yBot - yTop);
-      cum += v;
-      rectParts.push(
-        `<rect data-idx="${e.i}" x="${x}" y="${yTop.toFixed(1)}" `
-        + `width="${barW}" height="${h.toFixed(1)}" fill="${colors[k]}" `
-        + `data-k="${k}" data-v="${v.toFixed(5)}" data-total="${t.cost_usd.toFixed(5)}" `
-        + `data-ts="${t.ts}" style="cursor:pointer"></rect>`
+      const h = scale(v);
+      const x = LABEL_W + j * stride;
+      const y = baseY - h;
+      parts.push(
+        `<rect data-idx="${e.i}" x="${x}" y="${y.toFixed(1)}" width="${barW}" `
+        + `height="${h.toFixed(1)}" fill="${strip.color}" style="cursor:pointer"></rect>`
       );
     });
   });
-  const rects = rectParts.join('');
 
-  // Y-axis ticks — nice round dollar values at sqrt positions
-  const niceTicks = _niceCostTicks(maxCost);
-  const axisLines = niceTicks.map(v => {
-    const y = H - scale(v);
-    const label = v >= 1 ? `$${v.toFixed(v >= 10 ? 0 : 1)}` : v >= 0.1 ? `$${v.toFixed(2)}` : `$${v.toFixed(3)}`;
-    return `<g>
-      <line x1="${Y_AXIS_W}" x2="${Y_AXIS_W + n * (barW + gap)}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--rule)" stroke-dasharray="2 4"/>
-      <text x="${Y_AXIS_W - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--mute)">${label}</text>
-    </g>`;
-  }).join('');
+  // X-axis time labels — 5 ticks across the span
+  const tickCount = 5;
+  for (let ti = 0; ti <= tickCount; ti++) {
+    const j = Math.min(n - 1, Math.floor(ti * (n - 1) / tickCount));
+    const turn = visible[j]?.t;
+    if (!turn) continue;
+    const x = LABEL_W + j * stride + barW / 2;
+    const d = new Date(turn.ts);
+    const lbl = [d.getUTCHours(), d.getUTCMinutes()].map(k => String(k).padStart(2,'0')).join(':');
+    parts.push(
+      `<line x1="${x}" x2="${x}" y1="${plotAreaH}" y2="${plotAreaH + 4}" stroke="var(--mute)"/>`,
+      `<text x="${x}" y="${plotAreaH + 14}" text-anchor="middle" font-size="10" fill="var(--mute)">${lbl}</text>`,
+    );
+  }
 
-  const svgW = Math.max(W, Y_AXIS_W + n * (barW + gap));
-  cont.innerHTML = `<svg width="${svgW}" height="${H + 12}" style="overflow:visible;display:block">${axisLines}${rects}</svg>`;
+  // Shared vertical cursor (hidden until hover)
+  parts.push(
+    `<line id="cbar-cursor" x1="0" y1="0" x2="0" y2="${plotAreaH}" stroke="var(--fg)" stroke-dasharray="2 2" opacity="0" pointer-events="none"/>`
+  );
 
-  let tip = document.createElement('div');
+  const svgW = Math.max(W, LABEL_W + plotUsedW);
+  cont.innerHTML = `<svg width="${svgW}" height="${TOTAL_H}" style="overflow:visible;display:block">${parts.join('')}</svg>`;
+
+  const tip = document.createElement('div');
   tip.className = 'u-tooltip';
   tip.style.cssText = 'position:absolute;display:none;pointer-events:none;';
   cont.appendChild(tip);
 
-  const svg = cont.querySelector('svg');
+  const svg    = cont.querySelector('svg');
+  const cursor = svg.querySelector('#cbar-cursor');
+
+  // Nearest-turn lookup from x-coordinate. Works even when hovering empty space.
+  const nearestIdx = svgX => {
+    const rel = svgX - LABEL_W;
+    if (rel < 0) return -1;
+    const j = Math.floor(rel / stride);
+    return j >= 0 && j < n ? j : -1;
+  };
+
   svg.addEventListener('mousemove', ev => {
-    const rect = ev.target.closest('[data-idx]');
-    if (!rect) { tip.style.display = 'none'; return; }
-    const idx = +rect.dataset.idx;
-    const t   = turns[idx];
-    const cc  = t.cost_components || {};
-    const d   = new Date(t.ts);
-    const hm  = [d.getUTCHours(), d.getUTCMinutes()].map(n => String(n).padStart(2,'0')).join(':');
-    const lines = _CBAR_KEYS
-      .filter(k => (cc[k] || 0) > 0)
-      .map(k => `<span class="tt-lbl">${k.replace('_',' ')}</span> <span class="tt-val">$${cc[k].toFixed(4)}</span>`);
-    tip.innerHTML = `<div class="tt-time">Turn ${idx+1} · ${hm} UTC</div>${lines.join('<br>')}` +
-      `<br><span class="tt-lbl">total</span> <span class="tt-val">$${t.cost_usd.toFixed(4)}</span>`;
+    const pt  = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    const m = svg.getScreenCTM();
+    if (!m) return;
+    const loc = pt.matrixTransform(m.inverse());
+    const j = nearestIdx(loc.x);
+    if (j < 0) { tip.style.display = 'none'; cursor.setAttribute('opacity', '0'); return; }
+
+    const cursorX = LABEL_W + j * stride + barW / 2;
+    cursor.setAttribute('x1', cursorX);
+    cursor.setAttribute('x2', cursorX);
+    cursor.setAttribute('opacity', '0.5');
+
+    const origIdx = visible[j].i;
+    const t  = turns[origIdx];
+    const cc = t.cost_components || {};
+    const d  = new Date(t.ts);
+    const hm = [d.getUTCHours(), d.getUTCMinutes()].map(k => String(k).padStart(2,'0')).join(':');
+    const lines = _CBAR_STRIPS
+      .filter(s => (cc[s.key] || 0) > 0)
+      .map(s => `<span class="tt-lbl">${s.label}</span> <span class="tt-val">${_fmtCostCompact(cc[s.key])}</span>`);
+    tip.innerHTML = `<div class="tt-time">Turn ${origIdx + 1} · ${hm} UTC</div>${lines.join('<br>')}` +
+      `<br><span class="tt-lbl">total</span> <span class="tt-val">${_fmtCostCompact(t.cost_usd)}</span>`;
     tip.style.display = '';
     const bRect = cont.getBoundingClientRect();
-    const tipW  = tip.offsetWidth || 130;
+    const tipW  = tip.offsetWidth || 140;
     const left  = Math.min(ev.clientX - bRect.left + 12, (cont.offsetWidth || W) - tipW - 4);
     tip.style.left = `${left}px`;
     tip.style.top  = `${ev.clientY - bRect.top - (tip.offsetHeight || 60) - 6}px`;
   });
-  svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+  svg.addEventListener('mouseleave', () => {
+    tip.style.display = 'none';
+    cursor.setAttribute('opacity', '0');
+  });
   svg.addEventListener('click', ev => {
-    const rect = ev.target.closest('[data-idx]');
-    if (rect) openTurnModal(+rect.dataset.idx);
+    const pt = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    const m = svg.getScreenCTM();
+    if (!m) return;
+    const loc = pt.matrixTransform(m.inverse());
+    const j = nearestIdx(loc.x);
+    if (j >= 0) openTurnModal(visible[j].i);
   });
 }
 
