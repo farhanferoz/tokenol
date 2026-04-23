@@ -1,5 +1,8 @@
 # tokenol
 
+[![PyPI](https://img.shields.io/pypi/v/tokenol.svg)](https://pypi.org/project/tokenol/)
+[![Python](https://img.shields.io/pypi/pyversions/tokenol.svg)](https://pypi.org/project/tokenol/)
+
 Audit [Claude Code](https://claude.com/claude-code) JSONL session logs for cost, cache health, context blow-ups, and 5-hour rate-limit pressure.
 
 `tokenol` parses the session transcripts that Claude Code writes to `~/.claude*/projects/**/*.jsonl` and produces per-day, per-session, per-project, and per-model rollups — plus a live burn-rate view for the active 5-hour window.
@@ -29,7 +32,7 @@ Project page — cache efficiency trend, verdict distribution, top turns:
 pipx install tokenol
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. See [tokenol on PyPI](https://pypi.org/project/tokenol/).
 
 ## Quick start
 
