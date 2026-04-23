@@ -77,6 +77,15 @@ export function verdictPill(v) {
 }
 
 /** Render a verdict distribution list. */
+const VERDICT_DEFS = {
+  OK:                'No blow-up detected. Session stayed within all cost, context, and tool-error thresholds.',
+  CONTEXT_CREEP:     'Max single-turn input ≥ 500k AND context growth ≥ 2k/turn — session is slowly pushing toward the context ceiling.',
+  RUNAWAY_WINDOW:    'Some 5-hour window cost ≥ $50 — a spending spike compressed into a short period.',
+  TOOL_ERROR_STORM:  '≥ 10 tool uses with > 30% error rate — a failing tool is likely stuck in a retry loop.',
+  SIDECHAIN_HEAVY:   'Sidechain / task-agent session costing more than $5 — delegated sub-agent work dominated the bill.',
+  DUAL_SESSION_CONFLICT: 'Two concurrent sessions in the same project within one 5-hour window dropped cache reuse below 20:1 — sessions were thrashing each other\'s cache.',
+};
+
 export function renderVerdictDist(containerId, dist) {
   const el = document.getElementById(containerId);
   if (!el) return;
@@ -89,10 +98,11 @@ export function renderVerdictDist(containerId, dist) {
   // the panel stays visually stable across ranges (1D with a single session
   // previously showed a one-row list that looked like a data loading bug).
   el.innerHTML = VERDICTS.map(([key, cls]) => {
-    const cnt = dist[key] ?? 0;
-    const w   = cnt > 0 ? (cnt / total * 100).toFixed(1) : 0;
+    const cnt  = dist[key] ?? 0;
+    const w    = cnt > 0 ? (cnt / total * 100).toFixed(1) : 0;
     const mute = cnt === 0 ? ' vd-empty' : '';
-    return `<div class="vd-row ${cls}${mute}">
+    const tip  = VERDICT_DEFS[key] ?? '';
+    return `<div class="vd-row ${cls}${mute}" title="${esc(tip)}">
       <span class="vd-label">${key.replace(/_/g,' ')}</span>
       <div class="vd-bar-track"><div class="vd-bar-fill" style="width:${w}%"></div></div>
       <span class="vd-count">${cnt}</span>

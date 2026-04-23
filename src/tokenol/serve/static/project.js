@@ -107,15 +107,22 @@ function renderCacheTrend(trend, unit) {
   if (_chartInst) { _chartInst.destroy(); _chartInst = null; }
   cont.innerHTML = '';
 
-  // For 1d range the backend emits hourly buckets (ISO datetimes) instead of
-  // date strings. Each row.date is either "YYYY-MM-DD" (day) or a full ISO
-  // datetime (hour); parse accordingly so the x-axis renders meaningful ticks.
+  // Auto-detect the bucket granularity from the string shape so a stale browser
+  // cache (old frontend paired with new backend) doesn't silently render a flat
+  // line by double-appending T00:00:00Z to an already-ISO datetime.
+  // "YYYY-MM-DD" is exactly 10 chars; anything longer is a full ISO timestamp.
+  const isHourly = unit === 'hour' || (trend[0]?.date?.length ?? 0) > 10;
   const xs = trend.map(r => {
     const s = r.date;
-    const iso = unit === 'hour' ? s : `${s}T00:00:00Z`;
+    const iso = isHourly ? s : `${s}T00:00:00Z`;
     return new Date(iso).getTime() / 1000;
   });
   const ys = trend.map(r => r.hit_rate ?? 0);
+  if (xs.some(x => !Number.isFinite(x))) {
+    // Shouldn't happen with both ends current; bail rather than render garbage.
+    cont.innerHTML = '<div class="mute" style="padding:20px 0;font-size:12px;">Cache trend data malformed — hard-refresh (Ctrl+Shift+R) if this persists.</div>';
+    return;
+  }
   const AMBER_RGB = '255,182,71';
 
   _chartInst = new uPlot({
@@ -126,7 +133,15 @@ function renderCacheTrend(trend, unit) {
     padding: [4, 4, 0, 0],
     select: { show: false },
     axes: [
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28 },
+      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28,
+        values: (_, vs) => vs.map(v => {
+          if (v == null) return '';
+          const d = new Date(v * 1000);
+          return isHourly
+            ? `${String(d.getUTCHours()).padStart(2, '0')}:00`
+            : `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+        }),
+      },
       { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 44,
         values: (_, vs) => vs.map(v => v != null ? `${Math.round(v*100)}%` : '') },
     ],
