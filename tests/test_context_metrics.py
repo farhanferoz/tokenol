@@ -6,9 +6,13 @@ from pathlib import Path
 
 from tokenol.ingest.builder import build_turns
 from tokenol.metrics.context import (
+    cache_reuse_n_to_1,
     cache_reuse_ratio,
     context_growth_rate,
     context_tokens,
+    cost_per_kw,
+    ctx_ratio_n_to_1,
+    ctx_used_latest,
     max_turn_input,
     non_cached_input_ratio,
 )
@@ -73,3 +77,63 @@ def test_cache_reuse_ratio_none_when_no_cache():
 
 def test_non_cached_input_ratio_none_when_empty():
     assert non_cached_input_ratio([]) is None
+
+
+# ---- ctx_ratio_n_to_1 --------------------------------------------------
+
+def test_ctx_ratio_none_when_output_zero():
+    assert ctx_ratio_n_to_1(1000, 0) is None
+
+
+def test_ctx_ratio_basic():
+    assert ctx_ratio_n_to_1(1000, 100) == 10.0
+
+
+def test_ctx_ratio_zero_reads():
+    assert ctx_ratio_n_to_1(0, 100) == 0.0
+
+
+# ---- cache_reuse_n_to_1 ------------------------------------------------
+
+def test_cache_reuse_none_when_creation_zero():
+    assert cache_reuse_n_to_1(0, 0) is None
+    assert cache_reuse_n_to_1(500, 0) is None
+
+
+def test_cache_reuse_basic():
+    assert cache_reuse_n_to_1(500, 100) == 5.0
+
+
+def test_cache_reuse_zero_reads():
+    assert cache_reuse_n_to_1(0, 100) == 0.0
+
+
+# ---- cost_per_kw -------------------------------------------------------
+
+def test_cost_per_kw_none_when_output_zero():
+    assert cost_per_kw(0.0, 0) is None
+    assert cost_per_kw(1.0, 0) is None
+
+
+def test_cost_per_kw_basic():
+    assert cost_per_kw(0.5, 1000) == 0.5
+
+
+def test_cost_per_kw_zero_cost():
+    assert cost_per_kw(0.0, 1000) == 0.0
+
+
+# ---- ctx_used_latest ---------------------------------------------------
+
+def test_ctx_used_latest_none_when_window_unknown():
+    turns = build_turns([FIXTURES / "basic.jsonl"])
+    assert ctx_used_latest(turns[0], None) is None
+
+
+def test_ctx_used_latest_fraction():
+    turns = build_turns([FIXTURES / "basic.jsonl"])
+    # Turn with input=1000, cache_read=500, cache_creation=100 → visible=1600
+    turn = min(turns, key=lambda t: t.usage.input_tokens)
+    result = ctx_used_latest(turn, 200_000)
+    assert result is not None
+    assert 0.0 < result < 1.0

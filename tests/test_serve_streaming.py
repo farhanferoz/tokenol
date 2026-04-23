@@ -70,7 +70,7 @@ async def test_stream_first_connect_sends_full_snapshot(tmp_path: Path) -> None:
 
     assert len(messages) == 1
     # Full snapshot must contain all required keys
-    for key in ["generated_at", "config", "today", "daily_90d", "sessions"]:
+    for key in ["generated_at", "config", "thresholds", "period", "topbar_summary", "tiles"]:
         assert key in messages[0], f"Missing key: {key}"
 
 
@@ -116,6 +116,60 @@ async def test_stream_subsequent_sends_diff_only(tmp_path: Path) -> None:
     # Second message is a diff — only the changed key
     assert "generated_at" in messages[1]
     assert "today" not in messages[1]  # unchanged, not in diff
+
+
+@pytest.mark.asyncio
+async def test_stream_diff_omits_unchanged_top_level_keys(tmp_path: Path) -> None:
+    """When a top-level key is unchanged between ticks, it MUST be omitted from the
+    diff. The frontend must therefore merge diffs into local state, not replace it —
+    this test documents that contract so regressions are caught.
+    """
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    cache = ParseCache()
+    call_count = 0
+    original_build = _state_mod.build_snapshot_full
+
+    def patched_build(parse_cache, all_projects=False, reference_usd=50.0, tick_seconds=5,
+                      period="today", thresholds=None):
+        nonlocal call_count
+        call_count += 1
+        result = original_build(parse_cache, all_projects, reference_usd, tick_seconds,
+                                period, thresholds)
+        if call_count == 2:
+            # Simulate a single changed key so the diff is non-empty and emitted.
+            result.payload["generated_at"] = "2099-01-01T00:00:00+00:00"
+        return result
+
+    messages = []
+    with _mock_dirs(tmp_path):
+        _state_mod.build_snapshot_full = patched_build
+        try:
+            async for chunk in snapshot_stream(
+                parse_cache=cache,
+                all_projects=False,
+                reference_usd=50.0,
+                get_tick_seconds=lambda: 0,
+            ):
+                messages.append(json.loads(chunk.removeprefix("data: ").strip()))
+                if len(messages) == 2:
+                    break
+        finally:
+            _state_mod.build_snapshot_full = original_build
+
+    # First message: full snapshot — must include structural keys the UI relies on.
+    assert "config" in messages[0]
+    assert "thresholds" in messages[0]
+    # Second message: diff — unchanged keys are omitted. Structural/stable keys like
+    # 'config' and 'thresholds' don't change between identical ticks, so they MUST
+    # be absent from the diff. If they leak in, the frontend merge regression test
+    # would be silently weakened.
+    assert "config" not in messages[1], (
+        "config leaked into diff — frontend merge fix may be untested"
+    )
+    assert "thresholds" not in messages[1]
 
 
 def test_idle_backoff_formula() -> None:

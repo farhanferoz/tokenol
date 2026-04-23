@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — model</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23a66408' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <style>
+    .cost-bar-wrap { display: flex; gap: 2px; height: 12px; border-radius: 2px; overflow: hidden; margin: 8px 0 16px; }
+    .cost-bar-seg  { display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; min-width: 2px; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar-row1">
+      <div class="brand"><a href="/" style="color:inherit;text-decoration:none">tokenol</a> <span class="dim">— model</span></div>
+    </div>
+  </header>
+
+  <div id="model-error" class="tl-insufficient hidden"></div>
+
+  <div class="section-heading" style="margin-top:24px">
+    <h2 id="model-name" style="font-family:var(--font-serif);font-size:24px">—</h2>
+  </div>
+  <div class="ra-summary" id="model-summary"></div>
+  <div class="cost-bar-wrap" id="model-cost-bar"></div>
+
+  <div class="section-heading">
+    <h2>Projects using this model</h2>
+  </div>
+  <table class="ra-tbl" id="model-projects-tbl">
+    <thead>
+      <tr>
+        <th>Project</th>
+        <th class="num">Cost</th>
+        <th class="num">Turns</th>
+        <th>Last active</th>
+      </tr>
+    </thead>
+    <tbody id="model-projects-tbody"></tbody>
+  </table>
+  <div id="model-no-projects" class="ra-empty hidden">No project data.</div>
+</div>
+<script type="module" src="/assets/model.js"></script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — day</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23ffb647' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <style>
+    #day-main { max-width: 1200px; margin: 0 auto; padding: 24px 24px 60px; display: flex; flex-direction: column; gap: 28px; }
+    .day-section { border-top: 1px solid var(--rule); padding-top: 20px; }
+    #day-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 32px; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
+    .day-totals { display: flex; gap: 28px; margin-left: auto; align-items: flex-end; }
+    .total-item .label { display: block; margin-bottom: 2px; }
+    .total-item .val   { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    #hourly-chart-wrap { height: 80px; margin-top: 8px; position: relative; }
+    #hourly-bar-chart { display: flex; align-items: flex-end; gap: 2px; height: 80px; }
+    .day-hour-bar { flex: 1; background: var(--amber-dim); min-height: 2px; cursor: default; position: relative; }
+    .day-hour-bar.anomaly { background: var(--alarm); }
+    .day-hour-bar:hover { background: var(--amber); }
+    .day-hour-bar.target { outline: 2px solid var(--amber); outline-offset: 2px; }
+    #day-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--rule); }
+    .day-card { background: var(--bg); padding: 16px; }
+    #day-verdict-dist { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .vd-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .vd-label { width: 130px; color: var(--mute); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .vd-bar-track { flex: 1; height: 8px; background: var(--rule); }
+    .vd-bar-fill { height: 100%; }
+    .vd-count { width: 24px; text-align: right; color: var(--mute); }
+    .vd-ok      .vd-bar-fill { background: var(--mute); }
+    .vd-creep   .vd-bar-fill { background: #f5a623; }
+    .vd-runaway .vd-bar-fill { background: var(--alarm); }
+    .vd-tool    .vd-bar-fill { background: #e74c3c; }
+    .vd-sidechain .vd-bar-fill { background: var(--amber-dim); }
+    #day-error { color: var(--alarm); font-size: 13px; padding: 24px 0; }
+  </style>
+</head>
+<body>
+
+<header id="header">
+  <a href="/" class="back-link" style="font-size:12px;color:var(--mute);text-decoration:none;">← tokenol</a>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="day-date" class="serif" style="font-style:italic;font-size:18px;color:var(--fg);"></span>
+    <span id="day-anomaly-badge" style="display:none;font-size:10px;font-weight:600;color:var(--alarm);text-transform:uppercase;letter-spacing:0.08em;border:1px solid var(--alarm);padding:1px 5px;">⚡ anomalous</span>
+  </div>
+</header>
+
+<main id="day-main">
+
+  <div id="day-meta">
+    <div>
+      <div class="label">date</div>
+      <div id="day-date-full" style="font-size:14px;color:var(--fg);"></div>
+    </div>
+    <div class="day-totals">
+      <div class="total-item">
+        <span class="label">cost</span>
+        <span class="val amber" id="day-cost">–</span>
+      </div>
+      <div class="total-item">
+        <span class="label">vs 7d median</span>
+        <span class="val" id="day-delta">–</span>
+      </div>
+    </div>
+  </div>
+
+  <section class="day-section">
+    <div class="panel-title serif">Cost by hour (UTC)</div>
+    <div id="hourly-bar-chart"></div>
+    <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:9px;color:var(--mute);">
+      <span>00</span><span>06</span><span>12</span><span>18</span><span>23</span>
+    </div>
+  </section>
+
+  <div id="day-grid">
+    <div class="day-card">
+      <div class="panel-title serif" style="font-size:16px;">Top sessions</div>
+      <table class="data-table" style="font-size:11px;">
+        <thead><tr><th>ID</th><th>Model</th><th>Cost</th><th>Turns</th><th>Verdict</th></tr></thead>
+        <tbody id="day-sessions-tbody"></tbody>
+      </table>
+    </div>
+    <div class="day-card">
+      <div class="panel-title serif" style="font-size:16px;">Top projects</div>
+      <table class="data-table" style="font-size:11px;">
+        <thead><tr><th>Project</th><th>Cost</th><th>Sessions</th><th class="num help" data-term="Hit% (cache hit rate)">Hit%</th></tr></thead>
+        <tbody id="day-projects-tbody"></tbody>
+      </table>
+    </div>
+    <div class="day-card" style="grid-column:1/-1;">
+      <div class="panel-title serif" style="font-size:16px;">Verdict distribution</div>
+      <div id="day-verdict-dist"></div>
+    </div>
+  </div>
+
+  <div id="day-error" style="display:none;"></div>
+
+</main>
+
+<script type="module" src="/assets/day.js"></script>
+</body>
+</html>

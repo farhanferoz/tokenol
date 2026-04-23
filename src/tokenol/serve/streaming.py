@@ -23,6 +23,8 @@ async def snapshot_stream(
     all_projects: bool,
     reference_usd: float,
     get_tick_seconds: Callable[[], int],
+    period: str = "today",
+    thresholds: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield SSE-formatted strings.
 
@@ -43,7 +45,7 @@ async def snapshot_stream(
         try:
             result: SnapshotResult = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda t=tick: build_snapshot_full(parse_cache, all_projects, reference_usd, t),
+                lambda t=tick: build_snapshot_full(parse_cache, all_projects, reference_usd, t, period, thresholds),
             )
         except Exception:
             log.exception("snapshot build failed — skipping tick")

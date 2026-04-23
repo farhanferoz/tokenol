@@ -97,6 +97,12 @@ CLAUDE_MODELS: dict[str, ModelEntry] = {
     },
 }
 
+def context_window(model: str) -> int | None:
+    """Return context window size in tokens for *model*, or None if unknown."""
+    entry = CLAUDE_MODELS.get(model)
+    return entry["context"] if entry is not None else None
+
+
 # Family fallback order — when unknown model matches a family prefix,
 # use the first (newest) entry in the corresponding list.
 FAMILY_FALLBACKS: dict[str, list[str]] = {

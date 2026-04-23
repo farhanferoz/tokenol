@@ -2,14 +2,30 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from tokenol.enums import BlowUpVerdict
-from tokenol.metrics.context import cache_reuse_ratio, context_growth_rate, max_turn_input
+from tokenol.metrics.context import (
+    cache_reuse_n_to_1,
+    cache_reuse_ratio,
+    context_growth_rate,
+    cost_per_kw,
+    ctx_ratio_n_to_1,
+    ctx_used_latest,
+    max_turn_input,
+)
+from tokenol.metrics.cost import cost_for_turn
+from tokenol.metrics.thresholds import (
+    CACHE_CREATION_DOMINANCE_AMBER,
+    CACHE_HIT_RATE_RED,
+    CONTEXT_GROWTH_AMBER,
+    TOOL_ERROR_RATE_AMBER,
+)
 from tokenol.metrics.windows import align_windows
 from tokenol.model.events import Session, Turn
+from tokenol.model.pricing import context_window
 
 
 @dataclass
@@ -33,7 +49,11 @@ class SessionRollup:
     tool_error_count: int
     peak_window_cost: float = 0.0
     verdict: BlowUpVerdict = BlowUpVerdict.OK
-    model: str | None = None  # most-used model in session
+    model: str | None = None
+    ctx_ratio_n_to_1: float | None = None
+    cache_reuse_n_to_1: float | None = None
+    cost_per_kw_val: float | None = None
+    ctx_used_latest_val: float | None = None
 
 
 @dataclass
@@ -47,6 +67,20 @@ class ProjectRollup:
     cache_creation_tokens: int
     cost_usd: float
     cache_reuse_ratio: float | None
+    cache_hit_rate: float | None = None
+    cache_creation_dominance: float | None = None
+    avg_context_growth: float | None = None
+    tool_error_rate: float | None = None
+    interrupted_turn_rate: float | None = None
+    peak_window_cost: float = 0.0
+    verdict_mix: dict[str, int] | None = None
+    flagged: bool = False
+    ctx_ratio_n_to_1: float | None = None
+    cache_reuse_n_to_1: float | None = None
+    cost_per_kw_val: float | None = None
+    ctx_used_latest: float | None = None
+    model_mix: dict[str, float] = field(default_factory=dict)
+    dual_session_conflict: bool = False
 
 
 @dataclass
@@ -60,6 +94,16 @@ class ModelRollup:
     cost_usd: float
     tool_use_count: int
     tool_error_count: int
+    input_usd: float = 0.0
+    output_usd: float = 0.0
+    cache_read_usd: float = 0.0
+    cache_creation_usd: float = 0.0
+    sidechain_turns: int = 0
+    interrupted_turns: int = 0
+    ctx_ratio_n_to_1: float | None = None
+    cache_reuse_n_to_1: float | None = None
+    cost_per_kw_val: float | None = None
+    cost_share: float | None = None
 
 
 def build_session_rollup(session: Session) -> SessionRollup:
@@ -72,7 +116,6 @@ def build_session_rollup(session: Session) -> SessionRollup:
         first_ts = session.turns[0].timestamp
         last_ts = session.turns[-1].timestamp
 
-    # Token sums over billable turns
     input_tokens = sum(t.usage.input_tokens for t in billable_turns)
     output_tokens = sum(t.usage.output_tokens for t in billable_turns)
     cache_read = sum(t.usage.cache_read_input_tokens for t in billable_turns)
@@ -81,17 +124,22 @@ def build_session_rollup(session: Session) -> SessionRollup:
     tool_use_count = sum(t.tool_use_count for t in session.turns)
     tool_error_count = sum(t.tool_error_count for t in session.turns)
 
-    # Context metrics over billable turns
     mti = max_turn_input(billable_turns)
     crr = cache_reuse_ratio(billable_turns)
     cgr = context_growth_rate(billable_turns)
 
-    # Peak 5h window cost
     windows = align_windows(session.turns)
     peak_window_cost = max((w.cost_usd for w in windows), default=0.0)
 
     model_counter = Counter(t.model for t in session.turns if t.model)
-    model = model_counter.most_common(1)[0][0] if model_counter else None
+    dominant_model = model_counter.most_common(1)[0][0] if model_counter else None
+
+    crn = cache_reuse_n_to_1(cache_read, cache_creation)
+    cxr = ctx_ratio_n_to_1(cache_read, output_tokens)
+    cpk = cost_per_kw(cost, output_tokens)
+
+    latest_billable = billable_turns[-1] if billable_turns else None
+    cul = ctx_used_latest(latest_billable, context_window(dominant_model or "")) if latest_billable else None
 
     return SessionRollup(
         session_id=session.session_id,
@@ -113,52 +161,101 @@ def build_session_rollup(session: Session) -> SessionRollup:
         tool_error_count=tool_error_count,
         peak_window_cost=peak_window_cost,
         verdict=BlowUpVerdict.OK,
-        model=model,
+        model=dominant_model,
+        ctx_ratio_n_to_1=cxr,
+        cache_reuse_n_to_1=crn,
+        cost_per_kw_val=cpk,
+        ctx_used_latest_val=cul,
     )
 
 
-def build_project_rollups(session_rollups: list[SessionRollup]) -> list[ProjectRollup]:
+def build_project_rollups(
+    session_rollups: list[SessionRollup],
+    conflicted_cwds: set[str] | None = None,
+) -> list[ProjectRollup]:
     """Aggregate SessionRollups by cwd."""
-    buckets: dict[str, dict] = {}
+    conflicted = conflicted_cwds or set()
+    buckets: dict[str, list[SessionRollup]] = {}
 
     for sr in session_rollups:
         key = sr.cwd or "(unknown)"
-        if key not in buckets:
-            buckets[key] = {
-                "sessions": 0,
-                "turns": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_creation_tokens": 0,
-                "cost_usd": 0.0,
-            }
-        b = buckets[key]
-        b["sessions"] += 1
-        b["turns"] += sr.turns
-        b["input_tokens"] += sr.input_tokens
-        b["output_tokens"] += sr.output_tokens
-        b["cache_read_tokens"] += sr.cache_read_tokens
-        b["cache_creation_tokens"] += sr.cache_creation_tokens
-        b["cost_usd"] += sr.cost_usd
+        buckets.setdefault(key, []).append(sr)
 
     result: list[ProjectRollup] = []
-    for cwd, b in buckets.items():
-        reads = b["cache_read_tokens"]
-        creates = b["cache_creation_tokens"]
-        denom = reads + creates
-        crr = reads / denom if denom > 0 else None
+    for cwd, srs in buckets.items():
+        reads = sum(sr.cache_read_tokens for sr in srs)
+        creates = sum(sr.cache_creation_tokens for sr in srs)
+        inputs = sum(sr.input_tokens for sr in srs)
+        outputs = sum(sr.output_tokens for sr in srs)
+        total_cost = sum(sr.cost_usd for sr in srs)
+
+        cache_denom = reads + creates
+        crr = reads / cache_denom if cache_denom > 0 else None
+
+        hit_denom = reads + creates + inputs
+        cache_hit_rate = reads / hit_denom if hit_denom > 0 else None
+        cache_creation_dominance = creates / max(reads, 1) if creates > 0 else 0.0
+
+        growths = [sr.context_growth_rate_val for sr in srs if sr.context_growth_rate_val != 0.0]
+        avg_context_growth = sum(growths) / len(growths) if growths else 0.0
+
+        total_tool_uses = sum(sr.tool_use_count for sr in srs)
+        total_tool_errors = sum(sr.tool_error_count for sr in srs)
+        tool_error_rate = total_tool_errors / total_tool_uses if total_tool_uses > 0 else 0.0
+
+        peak_window_cost = max((sr.peak_window_cost for sr in srs), default=0.0)
+
+        verdict_mix = {v.value: 0 for v in BlowUpVerdict}
+        for sr in srs:
+            verdict_mix[sr.verdict.value] += 1
+
+        flagged = bool(
+            (cache_hit_rate is not None and cache_hit_rate < CACHE_HIT_RATE_RED)
+            or cache_creation_dominance > CACHE_CREATION_DOMINANCE_AMBER
+            or avg_context_growth > CONTEXT_GROWTH_AMBER
+            or tool_error_rate > TOOL_ERROR_RATE_AMBER
+            or any(v != BlowUpVerdict.OK.value and cnt > 0 for v, cnt in verdict_mix.items())
+        )
+
+        cxr = ctx_ratio_n_to_1(reads, outputs)
+        crn = cache_reuse_n_to_1(reads, creates)
+        cpk = cost_per_kw(total_cost, outputs)
+
+        most_recent = max(srs, key=lambda s: s.last_ts)
+        cul = most_recent.ctx_used_latest_val
+
+        model_costs: defaultdict[str, float] = defaultdict(float)
+        for sr in srs:
+            if sr.model:
+                model_costs[sr.model] += sr.cost_usd
+        cost_denom = sum(model_costs.values()) or 1.0
+        model_mix = {m: c / cost_denom for m, c in sorted(model_costs.items(), key=lambda x: -x[1])}
+
         result.append(
             ProjectRollup(
                 cwd=cwd,
-                sessions=b["sessions"],
-                turns=b["turns"],
-                input_tokens=b["input_tokens"],
-                output_tokens=b["output_tokens"],
-                cache_read_tokens=b["cache_read_tokens"],
-                cache_creation_tokens=b["cache_creation_tokens"],
-                cost_usd=b["cost_usd"],
+                sessions=len(srs),
+                turns=sum(sr.turns for sr in srs),
+                input_tokens=inputs,
+                output_tokens=outputs,
+                cache_read_tokens=reads,
+                cache_creation_tokens=creates,
+                cost_usd=total_cost,
                 cache_reuse_ratio=crr,
+                cache_hit_rate=cache_hit_rate,
+                cache_creation_dominance=cache_creation_dominance,
+                avg_context_growth=avg_context_growth,
+                tool_error_rate=tool_error_rate,
+                interrupted_turn_rate=None,
+                peak_window_cost=peak_window_cost,
+                verdict_mix=verdict_mix,
+                flagged=flagged,
+                ctx_ratio_n_to_1=cxr,
+                cache_reuse_n_to_1=crn,
+                cost_per_kw_val=cpk,
+                ctx_used_latest=cul,
+                model_mix=model_mix,
+                dual_session_conflict=(cwd in conflicted),
             )
         )
 
@@ -182,31 +279,62 @@ def build_model_rollups(turns: list[Turn]) -> list[ModelRollup]:
                 "cost_usd": 0.0,
                 "tool_use_count": 0,
                 "tool_error_count": 0,
+                "input_usd": 0.0,
+                "output_usd": 0.0,
+                "cache_read_usd": 0.0,
+                "cache_creation_usd": 0.0,
+                "sidechain_turns": 0,
+                "interrupted_turns": 0,
             }
         b = buckets[key]
         b["turns"] += 1
-        if not turn.is_interrupted:
+        if turn.is_sidechain:
+            b["sidechain_turns"] += 1
+        if turn.is_interrupted:
+            b["interrupted_turns"] += 1
+        else:
             b["input_tokens"] += turn.usage.input_tokens
             b["output_tokens"] += turn.usage.output_tokens
             b["cache_read_tokens"] += turn.usage.cache_read_input_tokens
             b["cache_creation_tokens"] += turn.usage.cache_creation_input_tokens
             b["cost_usd"] += turn.cost_usd
+            tc = cost_for_turn(turn.model, turn.usage)
+            b["input_usd"] += tc.input_usd
+            b["output_usd"] += tc.output_usd
+            b["cache_read_usd"] += tc.cache_read_usd
+            b["cache_creation_usd"] += tc.cache_creation_usd
         b["tool_use_count"] += turn.tool_use_count
         b["tool_error_count"] += turn.tool_error_count
 
+    total_cost = sum(b["cost_usd"] for b in buckets.values()) or 1.0
+
     result: list[ModelRollup] = []
     for model, b in buckets.items():
+        reads = b["cache_read_tokens"]
+        creates = b["cache_creation_tokens"]
+        outputs = b["output_tokens"]
+        cost = b["cost_usd"]
         result.append(
             ModelRollup(
                 model=model,
                 turns=b["turns"],
                 input_tokens=b["input_tokens"],
-                output_tokens=b["output_tokens"],
-                cache_read_tokens=b["cache_read_tokens"],
-                cache_creation_tokens=b["cache_creation_tokens"],
-                cost_usd=b["cost_usd"],
+                output_tokens=outputs,
+                cache_read_tokens=reads,
+                cache_creation_tokens=creates,
+                cost_usd=cost,
                 tool_use_count=b["tool_use_count"],
                 tool_error_count=b["tool_error_count"],
+                input_usd=b["input_usd"],
+                output_usd=b["output_usd"],
+                cache_read_usd=b["cache_read_usd"],
+                cache_creation_usd=b["cache_creation_usd"],
+                sidechain_turns=b["sidechain_turns"],
+                interrupted_turns=b["interrupted_turns"],
+                ctx_ratio_n_to_1=ctx_ratio_n_to_1(reads, outputs),
+                cache_reuse_n_to_1=cache_reuse_n_to_1(reads, creates),
+                cost_per_kw_val=cost_per_kw(cost, outputs),
+                cost_share=cost / total_cost,
             )
         )
 

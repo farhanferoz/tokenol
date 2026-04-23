@@ -112,7 +112,19 @@ def rollup_by_date(
     return sorted(buckets.values(), key=lambda r: r.date)
 
 
-def rollup_by_hour(turns: list[Turn], target_date: date | None = None) -> list[HourlyRollup]:
+def rollup_by_hour(
+    turns: list[Turn],
+    target_date: date | None = None,
+    fill_day: bool = False,
+) -> list[HourlyRollup]:
+    """Bucket turns by UTC hour. If *fill_day* and *target_date*, zero-fill 0-23."""
+
+    def _empty(h: datetime) -> HourlyRollup:
+        return HourlyRollup(
+            hour=h, turns=0, input_tokens=0, output_tokens=0,
+            cache_read_tokens=0, cache_creation_tokens=0, cost_usd=0.0,
+        )
+
     buckets: dict[datetime, HourlyRollup] = {}
 
     for turn in turns:
@@ -121,10 +133,13 @@ def rollup_by_hour(turns: list[Turn], target_date: date | None = None) -> list[H
             continue
         hour = utc_ts.replace(minute=0, second=0, microsecond=0)
         if hour not in buckets:
-            buckets[hour] = HourlyRollup(
-                hour=hour, turns=0, input_tokens=0, output_tokens=0,
-                cache_read_tokens=0, cache_creation_tokens=0, cost_usd=0.0,
-            )
+            buckets[hour] = _empty(hour)
         _accumulate_turn(buckets[hour], turn)
+
+    if fill_day and target_date:
+        day_start = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
+        for h in range(24):
+            hour = day_start + timedelta(hours=h)
+            buckets.setdefault(hour, _empty(hour))
 
     return sorted(buckets.values(), key=lambda r: r.hour)
