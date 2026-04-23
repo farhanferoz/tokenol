@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tokenol.metrics.cost import cost_for_turn
 from tokenol.metrics.rollups import build_session_rollup
 from tokenol.metrics.verdicts import compute_verdict
 from tokenol.model.events import Session
@@ -17,8 +18,10 @@ def build_session_detail(session: Session) -> dict:
     first_ts = turns[0].timestamp.isoformat() if turns else None
     last_ts = turns[-1].timestamp.isoformat() if turns else None
 
-    turn_rows = [
-        {
+    turn_rows = []
+    for t in turns:
+        tc = cost_for_turn(t.model, t.usage)
+        turn_rows.append({
             "ts": t.timestamp.isoformat(),
             "model": t.model,
             "input_tokens": t.usage.input_tokens,
@@ -30,9 +33,13 @@ def build_session_detail(session: Session) -> dict:
             "tool_use_count": t.tool_use_count,
             "tool_error_count": t.tool_error_count,
             "stop_reason": t.stop_reason,
-        }
-        for t in turns
-    ]
+            "cost_components": {
+                "input":          tc.input_usd,
+                "output":         tc.output_usd,
+                "cache_read":     tc.cache_read_usd,
+                "cache_creation": tc.cache_creation_usd,
+            },
+        })
 
     return {
         "session_id": session.session_id,
