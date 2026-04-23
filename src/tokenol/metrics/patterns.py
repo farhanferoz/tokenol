@@ -45,11 +45,10 @@ def _idle_expiry(turns: list[Turn], t: dict) -> list[PatternHit]:
             continue
         # Fraction of the turn's cacheable tokens that were brand-new creations.
         # After cache expiry this tends to 1.0; during healthy reuse it's near 0.
-        u = nxt.usage
-        denom = u.cache_creation_input_tokens + u.cache_read_input_tokens + u.input_tokens
+        denom = context_tokens(nxt)
         if denom == 0:
             continue
-        creation_ratio = u.cache_creation_input_tokens / denom
+        creation_ratio = nxt.usage.cache_creation_input_tokens / denom
         if creation_ratio <= creat_thresh:
             continue
         h = round(gap / 3600, 1)

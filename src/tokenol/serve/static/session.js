@@ -328,26 +328,28 @@ function _drawCostBars(turns, cont, top30) {
   // sqrt scale so the few extreme spikes don't crush the typical turns into 1-pixel slivers
   const scale = v => Math.sqrt(Math.max(0, v) / maxCost) * H;
 
-  let rects = '';
+  const rectParts = [];
   visible.forEach((e, j) => {
     const t  = e.t;
     const cc = t.cost_components || {};
     const x  = Y_AXIS_W + j * (barW + gap);
-    // Draw each segment at its height relative to the cumulative cost, using sqrt scaling
     let cum = 0;
     _CBAR_KEYS.forEach(k => {
       const v = cc[k] || 0;
       if (v <= 0) return;
-      const yTop    = H - scale(cum + v);
-      const yBot    = H - scale(cum);
-      const h       = Math.max(1, yBot - yTop);
+      const yTop = H - scale(cum + v);
+      const yBot = H - scale(cum);
+      const h    = Math.max(1, yBot - yTop);
       cum += v;
-      rects += `<rect data-idx="${e.i}" x="${x}" y="${yTop.toFixed(1)}" `
+      rectParts.push(
+        `<rect data-idx="${e.i}" x="${x}" y="${yTop.toFixed(1)}" `
         + `width="${barW}" height="${h.toFixed(1)}" fill="${colors[k]}" `
         + `data-k="${k}" data-v="${v.toFixed(5)}" data-total="${t.cost_usd.toFixed(5)}" `
-        + `data-ts="${t.ts}" style="cursor:pointer"></rect>`;
+        + `data-ts="${t.ts}" style="cursor:pointer"></rect>`
+      );
     });
   });
+  const rects = rectParts.join('');
 
   // Y-axis ticks — nice round dollar values at sqrt positions
   const niceTicks = _niceCostTicks(maxCost);
