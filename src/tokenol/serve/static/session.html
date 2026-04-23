@@ -188,15 +188,42 @@
     </div>
   </div>
 
-  <!-- turn chart -->
+  <!-- cache read per turn -->
   <section id="session-chart-section" class="session-section">
-    <div class="panel-title serif">Turn chart</div>
+    <div class="panel-title serif">Cache read per turn</div>
     <div class="chart-legend">
-      <span class="legend-item legend-amber">input + creation</span>
-      <span class="legend-item legend-amber-dim">cache read</span>
-      <span class="legend-item legend-cool">output</span>
+      <span class="legend-item legend-amber-dim">cache read tokens</span>
     </div>
     <div id="turn-chart"></div>
+  </section>
+
+  <!-- output tokens per turn -->
+  <section id="output-chart-section" class="session-section">
+    <div class="panel-title serif">Output tokens per turn</div>
+    <div id="output-chart"></div>
+  </section>
+
+  <!-- context trajectory -->
+  <section id="context-chart-section" class="session-section">
+    <div class="panel-title serif">Context trajectory <span id="growth-rate-badge" style="font-size:12px;font-weight:400;margin-left:8px;"></span></div>
+    <div class="chart-legend">
+      <span class="legend-item legend-amber">cumulative visible tokens</span>
+      <span class="legend-item legend-cool">growth slope</span>
+    </div>
+    <div id="context-chart"></div>
+  </section>
+
+  <!-- cache hit rate per turn -->
+  <section id="cache-hit-section" class="session-section">
+    <div class="panel-title serif">Cache hit rate per turn <span style="font-size:11px;color:var(--mute);font-weight:400;"> (5-turn moving avg)</span></div>
+    <div id="cache-hit-chart"></div>
+  </section>
+
+  <!-- stop reason strip -->
+  <section id="stop-reason-section" class="session-section" style="display:none;">
+    <div class="panel-title serif" style="font-size:14px;margin-bottom:8px;">Stop reason distribution</div>
+    <div id="stop-reason-strip"></div>
+    <div id="stop-reason-legend" style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:10px;"></div>
   </section>
 
   <!-- tool-use timeline -->

@@ -1,5 +1,7 @@
 // ---- helpers ----
 
+import { drawChart } from '/assets/chart.js';
+
 const $ = id => document.getElementById(id);
 
 const CV = {};
@@ -10,9 +12,8 @@ const CV = {};
   });
 })();
 
-const AMBER_RGB     = '255,182,71';
-const AMBER_DIM_RGB = '138,103,48';
-const COOL_RGB      = '111,174,216';
+const AMBER_RGB = '255,182,71';
+const COOL_RGB  = '111,174,216';
 
 const fmtUSD = v => `$${(+v || 0).toFixed(2)}`;
 const fmtTok = v => +v >= 1e6 ? `${(+v/1e6).toFixed(1)}M` : +v >= 1e3 ? `${(+v/1e3).toFixed(0)}k` : String(+v || 0);
@@ -68,48 +69,173 @@ function render(d) {
   if (d.totals.tool_errors > 0) $('sess-tool-errors').classList.add('alarm');
 
   renderChart(d.turns);
+  renderOutputChart(d.turns);
+  renderContextChart(d.turns);
+  renderCacheHitChart(d.turns);
+  renderStopReasonStrip(d.turns);
   renderTimeline(d.turns, d.first_ts, d.last_ts);
   initTable(d.turns);
 }
 
-// ---- turn chart (uPlot) ----
-
-let _uplot = null;
+// ---- cache read per turn chart ----
 
 function renderChart(turns) {
   if (!turns.length) { $('session-chart-section').style.display = 'none'; return; }
-
   const cont = $('turn-chart');
   const xs   = turns.map(t => new Date(t.ts).getTime() / 1000);
-  const inp  = turns.map(t => t.input_tokens + t.cache_creation_tokens);
   const crd  = turns.map(t => t.cache_read_tokens);
-  const out  = turns.map(t => t.output_tokens);
+  drawChart(cont, {
+    xs, ySeries: [crd], labels: ['cache read'], yUnit: 'tokens', height: 180,
+    stepped: true,
+    onPointClick: idx => highlightTurn(idx),
+  });
+}
 
-  _uplot = new uPlot({
+// ---- output tokens per turn chart ----
+
+function renderOutputChart(turns) {
+  if (!turns.length) { $('output-chart-section').style.display = 'none'; return; }
+  const cont = $('output-chart');
+  const xs  = turns.map(t => new Date(t.ts).getTime() / 1000);
+  const out = turns.map(t => t.output_tokens);
+  drawChart(cont, {
+    xs, ySeries: [out], labels: ['output'], yUnit: 'tokens', height: 120,
+    stepped: true,
+    onPointClick: idx => highlightTurn(idx),
+  });
+}
+
+// ---- context trajectory chart ----
+
+function _lsSlope(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return 0;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) { num += (xs[i]-mx)*(ys[i]-my); den += (xs[i]-mx)**2; }
+  return den > 0 ? num/den : 0;
+}
+
+function renderContextChart(turns) {
+  if (!turns.length) { $('context-chart-section').style.display = 'none'; return; }
+  const cont = $('context-chart');
+
+  const xs    = turns.map(t => new Date(t.ts).getTime() / 1000);
+  const ctxPt = turns.map(t => t.input_tokens + t.cache_read_tokens + t.cache_creation_tokens);
+  const slope = _lsSlope(Array.from({length:turns.length},(_,i)=>i), ctxPt);
+  const slopeLine = ctxPt.map((_, i) => ctxPt[0] + slope * i);
+
+  const badge = $('growth-rate-badge');
+  if (badge) {
+    const k = (slope / 1000).toFixed(1);
+    const cls = slope > 5000 ? 'alarm' : slope > 2000 ? 'amber' : 'mute';
+    badge.innerHTML = `<span class="${cls}">${slope > 0 ? '+':''} ${k}k tokens/turn</span>`;
+  }
+
+  new uPlot({
     width:  cont.offsetWidth || 800,
-    height: 260,
+    height: 180,
     cursor: { show: true, points: { size: 6, fill: CV['--bg'] } },
     legend: { show: false },
     padding: [4, 4, 0, 0],
     select: { show: false },
     axes: [
       { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28 },
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 50 },
+      { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 60 },
     ],
     series: [
       {},
-      { stroke: CV['--amber'],     width: 1.5, fill: `rgba(${AMBER_RGB},0.15)`,     label: 'input+creation' },
-      { stroke: CV['--amber-dim'], width: 1,   fill: `rgba(${AMBER_DIM_RGB},0.10)`, label: 'cache read'     },
-      { stroke: CV['--cool'],      width: 1.5, fill: `rgba(${COOL_RGB},0.12)`,      label: 'output'         },
+      { stroke: CV['--amber'], width: 1.5, fill: `rgba(${AMBER_RGB},0.12)`, label: 'ctx tokens' },
+      { stroke: CV['--cool'],  width: 1,   dash: [4,4], label: 'slope' },
     ],
     scales: { y: { range: (_, _min, max) => [0, Math.max(max * 1.1, 100)] } },
-  }, [xs, inp, crd, out], cont);
+  }, [xs, ctxPt, slopeLine], cont);
+}
 
-  _uplot.over.style.cursor = 'crosshair';
-  _uplot.over.addEventListener('click', () => {
-    const idx = _uplot.cursor.idx;
-    if (idx != null) highlightTurn(idx);
+// ---- cache hit rate per turn ----
+
+function _movingAvg(arr, window) {
+  return arr.map((_, i) => {
+    const start = Math.max(0, i - Math.floor(window/2));
+    const end   = Math.min(arr.length, start + window);
+    const slice = arr.slice(start, end);
+    return slice.reduce((a,b)=>a+b,0)/slice.length;
   });
+}
+
+function renderCacheHitChart(turns) {
+  if (!turns.length) { $('cache-hit-section').style.display = 'none'; return; }
+  const cont = $('cache-hit-chart');
+
+  const hitRates = turns.map(t => {
+    const denom = t.input_tokens + t.cache_read_tokens + t.cache_creation_tokens;
+    return denom > 0 ? t.cache_read_tokens / denom : 0;
+  });
+  const smoothed = _movingAvg(hitRates, 5);
+  const xs = turns.map(t => new Date(t.ts).getTime() / 1000);
+
+  new uPlot({
+    width:  cont.offsetWidth || 800,
+    height: 120,
+    cursor: { show: true, points: { size: 6, fill: CV['--bg'] } },
+    legend: { show: false },
+    padding: [4, 4, 0, 0],
+    select: { show: false },
+    axes: [
+      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28 },
+      { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 44,
+        values: (_, vs) => vs.map(v => v != null ? `${Math.round(v*100)}%` : '') },
+    ],
+    series: [{}, { stroke: CV['--cool'], width: 1.5, fill: `rgba(${COOL_RGB},0.14)`, label: 'hit%' }],
+    scales: { y: { range: [0, 1] } },
+  }, [xs, smoothed], cont);
+}
+
+// ---- stop reason strip ----
+
+function renderStopReasonStrip(turns) {
+  const section = $('stop-reason-section');
+  const strip   = $('stop-reason-strip');
+  const legend  = $('stop-reason-legend');
+  if (!section || !strip || !legend) return;
+
+  const reasons = turns.map(t => t.stop_reason || 'unknown');
+  const counts  = {};
+  for (const r of reasons) counts[r] = (counts[r] ?? 0) + 1;
+  if (Object.keys(counts).length === 0) return;
+  section.style.display = '';
+
+  const COLORS = {
+    'end_turn': 'var(--mute)',
+    'tool_use': 'var(--amber)',
+    'max_tokens': 'var(--alarm)',
+    'refusal': '#e74c3c',
+    'unknown': 'var(--rule)',
+  };
+
+  const total = reasons.length;
+  const total_w = strip.offsetWidth || 600;
+
+  // Build SVG bar
+  let svgParts = '';
+  let x = 0;
+  for (const [r, cnt] of Object.entries(counts)) {
+    const w = (cnt / total) * 100;
+    const color = COLORS[r] || 'var(--cool)';
+    svgParts += `<rect x="${x.toFixed(2)}%" y="0" width="${w.toFixed(2)}%" height="16"
+      fill="${color}" title="${r}: ${cnt}"></rect>`;
+    x += w;
+  }
+  strip.innerHTML = `<svg width="100%" height="16" style="display:block">${svgParts}</svg>`;
+
+  legend.innerHTML = Object.entries(counts).map(([r, cnt]) => {
+    const color = COLORS[r] || 'var(--cool)';
+    return `<span style="display:flex;align-items:center;gap:4px;">
+      <span style="width:12px;height:4px;background:${color};border-radius:2px;display:inline-block;"></span>
+      <span style="color:var(--mute)">${r} (${cnt})</span>
+    </span>`;
+  }).join('');
 }
 
 // ---- tool-use timeline (SVG) ----
