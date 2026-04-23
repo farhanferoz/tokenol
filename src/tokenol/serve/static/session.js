@@ -68,6 +68,7 @@ function render(d) {
   $('sess-tool-errors').textContent = d.totals.tool_errors;
   if (d.totals.tool_errors > 0) $('sess-tool-errors').classList.add('alarm');
 
+  renderCostBars(d.turns);
   renderChart(d.turns);
   renderOutputChart(d.turns);
   renderContextChart(d.turns);
@@ -75,6 +76,111 @@ function render(d) {
   renderStopReasonStrip(d.turns);
   renderTimeline(d.turns, d.first_ts, d.last_ts);
   initTable(d.turns);
+}
+
+// ---- turn modal (wired in Task 8) ----
+
+function openTurnModal(_turnIdx) { /* Task 8 */ }
+
+// ---- cost per turn bars ----
+
+const _CBAR_KEYS   = ['cache_read', 'input', 'cache_creation', 'output'];
+const _CBAR_COLORS = () => ({
+  cache_read:     CV['--mute'],
+  input:          CV['--amber-dim'],
+  cache_creation: CV['--alarm'],
+  output:         CV['--cool'],
+});
+
+function renderCostBars(turns) {
+  const section = $('cost-bars-section');
+  const cont    = $('cost-bars-chart');
+  if (!section || !cont || !turns.length) { if (section) section.style.display = 'none'; return; }
+
+  let _top30 = false;
+  const pills = section.querySelectorAll('[data-cbar-range]');
+  pills.forEach(pill => {
+    pill.addEventListener('click', () => {
+      _top30 = pill.dataset.cbarRange === 'top30';
+      pills.forEach(p => p.classList.toggle('on', p === pill));
+      _drawCostBars(turns, cont, _top30);
+    });
+  });
+
+  _drawCostBars(turns, cont, _top30);
+}
+
+function _drawCostBars(turns, cont, top30) {
+  const colors = _CBAR_COLORS();
+  let visible;
+  if (top30) {
+    visible = turns.map((t, i) => ({t, i}))
+      .sort((a, b) => b.t.cost_usd - a.t.cost_usd).slice(0, 30)
+      .sort((a, b) => a.i - b.i);
+  } else {
+    visible = turns.map((t, i) => ({t, i}));
+  }
+
+  const H = 160;
+  const W = cont.offsetWidth || 800;
+  const n = visible.length;
+  if (!n) { cont.innerHTML = ''; return; }
+  const barW = Math.max(2, Math.min(20, Math.floor((W - 4) / n) - 1));
+  const gap  = Math.max(0, Math.floor(barW * 0.15));
+  const maxCost = Math.max(...visible.map(e => e.t.cost_usd), 1e-9);
+
+  let rects = '';
+  visible.forEach((e, j) => {
+    const t  = e.t;
+    const cc = t.cost_components || {};
+    const x  = j * (barW + gap);
+    let y = H;
+    _CBAR_KEYS.forEach(k => {
+      const v = cc[k] || 0;
+      if (v <= 0) return;
+      const h = Math.max(1, (v / maxCost) * H);
+      y -= h;
+      rects += `<rect data-idx="${e.i}" x="${x}" y="${y.toFixed(1)}" `
+        + `width="${barW}" height="${h.toFixed(1)}" fill="${colors[k]}" `
+        + `data-k="${k}" data-v="${v.toFixed(5)}" data-total="${t.cost_usd.toFixed(5)}" `
+        + `data-ts="${t.ts}" style="cursor:pointer"></rect>`;
+    });
+  });
+
+  const svgW = Math.max(W, n * (barW + gap));
+  cont.innerHTML = `<svg width="${svgW}" height="${H}" style="overflow:visible;display:block">${rects}</svg>`;
+
+  let tip = document.createElement('div');
+  tip.className = 'u-tooltip';
+  tip.style.cssText = 'position:absolute;display:none;pointer-events:none;';
+  cont.appendChild(tip);
+
+  const svg = cont.querySelector('svg');
+  svg.addEventListener('mousemove', ev => {
+    const rect = ev.target.closest('[data-idx]');
+    if (!rect) { tip.style.display = 'none'; return; }
+    const idx = +rect.dataset.idx;
+    const t   = turns[idx];
+    const cc  = t.cost_components || {};
+    const d   = new Date(t.ts);
+    const hm  = [d.getUTCHours(), d.getUTCMinutes()].map(n => String(n).padStart(2,'0')).join(':');
+    const lines = _CBAR_KEYS
+      .filter(k => (cc[k] || 0) > 0)
+      .map(k => `<span class="tt-lbl">${k.replace('_',' ')}</span> <span class="tt-val">$${cc[k].toFixed(4)}</span>`);
+    tip.innerHTML = `<div class="tt-time">Turn ${idx+1} · ${hm} UTC</div>${lines.join('<br>')}` +
+      `<br><span class="tt-lbl">total</span> <span class="tt-val">$${t.cost_usd.toFixed(4)}</span>`;
+    tip.style.display = '';
+    const bRect = cont.getBoundingClientRect();
+    const tipW  = tip.offsetWidth || 130;
+    const left  = Math.min(ev.clientX - bRect.left + 12, (cont.offsetWidth || W) - tipW - 4);
+    tip.style.left = `${left}px`;
+    tip.style.top  = `${ev.clientY - bRect.top - (tip.offsetHeight || 60) - 6}px`;
+  });
+  svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+  svg.addEventListener('click', ev => {
+    const rect = ev.target.closest('[data-idx]');
+    if (rect) openTurnModal(+rect.dataset.idx);
+  });
 }
 
 // ---- cache read per turn chart ----

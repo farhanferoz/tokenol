@@ -188,6 +188,24 @@
     </div>
   </div>
 
+  <!-- cost per turn bars -->
+  <section id="cost-bars-section" class="session-section">
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px;">
+      <div class="panel-title serif" data-term="Cost per turn" style="margin-bottom:0;">Cost per turn</div>
+      <span class="pill-row" id="cost-bars-range" role="group" aria-label="Range">
+        <span data-cbar-range="all" class="on">All</span>
+        <span data-cbar-range="top30">Top 30</span>
+      </span>
+    </div>
+    <div style="display:flex;gap:16px;margin-bottom:8px;font-size:10px;">
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:3px;background:var(--mute);display:inline-block;border-radius:1px;"></span>cache read</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:3px;background:var(--amber-dim);display:inline-block;border-radius:1px;"></span>input</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:3px;background:var(--alarm);display:inline-block;border-radius:1px;"></span>cache creation</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:3px;background:var(--cool);display:inline-block;border-radius:1px;"></span>output</span>
+    </div>
+    <div id="cost-bars-chart" style="overflow-x:auto;position:relative;min-height:8px;"></div>
+  </section>
+
   <!-- cache read per turn -->
   <section id="session-chart-section" class="session-section">
     <div class="panel-title serif">Cache read per turn</div>
