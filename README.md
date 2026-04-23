@@ -15,16 +15,16 @@ Claude Code bills you for everything the model reads — input, output, **and** 
 
 ## Dashboard
 
-![Main dashboard](docs/screenshots/main.jpg)
+![Main dashboard](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/main.jpg)
 
 Session drill-down — pattern detection + cost-per-turn small multiples:
 
-![Session drill-down, top](docs/screenshots/session_top.jpg)
-![Session drill-down, lower panels](docs/screenshots/session_bottom.jpg)
+![Session drill-down, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_top.jpg)
+![Session drill-down, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_bottom.jpg)
 
 Project page — cache efficiency trend, verdict distribution, top turns:
 
-![Project page](docs/screenshots/project.jpg)
+![Project page](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/project.jpg)
 
 ## Install
 

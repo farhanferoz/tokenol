@@ -4,6 +4,12 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-04-23
+
+### Fixed
+- README screenshots now render on PyPI: switched from relative paths to
+  absolute `raw.githubusercontent.com` URLs.
+
 ## [0.1.0] — 2026-04-23
 
 Initial public release.
@@ -37,4 +43,5 @@ Initial public release.
 ### Tested
 - 184 unit + integration tests on Python 3.10 / 3.11 / 3.12.
 
+[0.1.1]: https://github.com/farhanferoz/tokenol/releases/tag/v0.1.1
 [0.1.0]: https://github.com/farhanferoz/tokenol/releases/tag/v0.1.0

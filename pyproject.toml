@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenol"
-version = "0.1.0"
+version = "0.1.1"
 description = "Audit Claude Code JSONL session logs: track cost, cache health, context blow-ups, and 5h-window pressure."
 readme = "README.md"
 license = { text = "MIT" }
