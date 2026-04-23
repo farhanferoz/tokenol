@@ -68,6 +68,7 @@ function render(d) {
   $('sess-tool-errors').textContent = d.totals.tool_errors;
   if (d.totals.tool_errors > 0) $('sess-tool-errors').classList.add('alarm');
 
+  _totalTurns = (d.turns || []).length;
   renderPatternCards(d.patterns || []);
   renderCostBars(d.turns);
   renderChart(d.turns);
@@ -119,6 +120,7 @@ function renderPatternCards(patterns) {
       const barsSection = $('cost-bars-section');
       if (barsSection) barsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
       _highlightCostBar(idx);
+      openTurnModal(idx);
     });
   });
 }
@@ -132,9 +134,132 @@ function _highlightCostBar(turnIdx) {
   });
 }
 
-// ---- turn modal (wired in Task 8) ----
+// ---- turn drill-down modal ----
 
-function openTurnModal(_turnIdx) { /* Task 8 */ }
+let _currentTurnIdx = null;
+let _totalTurns = 0;
+
+function openTurnModal(turnIdx) {
+  const bg = $('turn-modal-bg');
+  if (!bg) return;
+  $('turn-modal-content').innerHTML = '<div style="color:var(--mute);padding:20px 0;">Loading…</div>';
+  bg.style.display = 'block';
+  _currentTurnIdx = turnIdx;
+  _updateNavButtons();
+
+  fetch(`/api/session/${sessionId}/turn/${turnIdx}`)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(d => _renderTurnModal(d))
+    .catch(err => {
+      $('turn-modal-content').innerHTML = `<div style="color:var(--alarm)">Error: ${esc(String(err))}</div>`;
+    });
+}
+
+function _closeTurnModal() {
+  const bg = $('turn-modal-bg');
+  if (bg) bg.style.display = 'none';
+  _currentTurnIdx = null;
+}
+
+function _updateNavButtons() {
+  const prev = $('turn-modal-prev');
+  const next = $('turn-modal-next');
+  if (prev) prev.style.opacity = _currentTurnIdx > 0 ? '1' : '0.3';
+  if (next) next.style.opacity = (_currentTurnIdx != null && _currentTurnIdx < _totalTurns - 1) ? '1' : '0.3';
+}
+
+function _renderTurnModal(d) {
+  const cc = d.cost_components || {};
+  const tc = d.token_counts   || {};
+  const tools = (d.tool_calls || []);
+
+  const fmtCents = v => v >= 0.01 ? `$${v.toFixed(2)}` : v > 0 ? `$${v.toFixed(5)}` : '$0';
+  const ts = new Date(d.ts);
+  const tsStr = ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+
+  const miniBar = ['cache_read','input','cache_creation','output'].map(k => {
+    const total = (cc.cache_read||0)+(cc.input||0)+(cc.cache_creation||0)+(cc.output||0);
+    if (!total || !(cc[k]||0)) return '';
+    const pct = (cc[k] / total * 100).toFixed(1);
+    const col = k === 'cache_creation' ? 'var(--alarm)' : k === 'input' ? 'var(--amber-dim)' : k === 'output' ? 'var(--cool)' : 'var(--mute)';
+    return `<div style="width:${pct}%;background:${col};height:100%;display:inline-block;"></div>`;
+  }).join('');
+
+  const toolsHtml = tools.length
+    ? tools.map(t => `<span style="margin-right:8px;color:${t.ok ? 'var(--mute)' : 'var(--alarm)'}">${esc(t.name)} ${t.ok ? '✓' : '✗'}</span>`).join('')
+    : '<span style="color:var(--mute)">none</span>';
+
+  const promptHtml = d.user_prompt
+    ? `<div style="background:var(--bg);padding:10px 12px;font-size:12px;white-space:pre-wrap;overflow-wrap:break-word;max-height:150px;overflow-y:auto;color:var(--mute)">${esc(d.user_prompt)}</div>`
+    : '<div style="color:var(--mute);font-size:12px;">—</div>';
+
+  const asstHtml = d.assistant_preview
+    ? `<div style="background:var(--bg);padding:10px 12px;font-size:12px;white-space:pre-wrap;overflow-wrap:break-word;max-height:150px;overflow-y:auto;color:var(--mute)">${esc(d.assistant_preview)}</div>`
+    : '<div style="color:var(--mute);font-size:12px;">—</div>';
+
+  const sideLabel = d.is_sidechain ? ' <span style="font-size:10px;color:var(--mute);text-transform:uppercase;letter-spacing:0.06em;">sidechain</span>' : '';
+
+  $('turn-modal-content').innerHTML = `
+    <div style="margin-bottom:16px;">
+      <span class="serif" style="font-style:italic;font-size:18px;">Turn ${d.turn_idx + 1}</span>
+      <span style="font-size:12px;color:var(--mute);margin-left:12px;">${tsStr}</span>
+      <span style="font-size:12px;color:var(--mute);margin-left:10px;">${esc(shortModel(d.model))}</span>
+      <span style="font-size:12px;color:var(--mute);margin-left:10px;">${esc(d.stop_reason || '–')}${sideLabel}</span>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Cost <span class="amber" style="font-size:16px;font-weight:600;">${fmtCents((cc.cache_read||0)+(cc.input||0)+(cc.cache_creation||0)+(cc.output||0))}</span></div>
+      <div style="width:100%;height:6px;background:var(--rule);border-radius:3px;overflow:hidden;">${miniBar}</div>
+      <div style="display:flex;gap:16px;margin-top:6px;font-size:11px;color:var(--mute);">
+        ${['cache_read','input','cache_creation','output'].map(k => cc[k] > 0 ? `<span>${k.replace('_',' ')} <b>${fmtCents(cc[k])}</b></span>` : '').filter(Boolean).join('')}
+      </div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Tokens</div>
+      <div style="font-size:12px;display:flex;gap:16px;flex-wrap:wrap;">
+        <span>in <b>${fmtTok(tc.input)}</b></span>
+        <span>out <b>${fmtTok(tc.output)}</b></span>
+        <span>read <b>${fmtTok(tc.cache_read)}</b></span>
+        <span>creation <b>${fmtTok(tc.cache_creation)}</b></span>
+      </div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Tools</div>
+      <div style="font-size:12px;">${toolsHtml}</div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">User prompt</div>
+      ${promptHtml}
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Assistant preview</div>
+      ${asstHtml}
+    </div>
+    <div style="font-size:10px;color:var(--mute);">Source: ${esc(d.source_file)}${d.source_line ? ':' + d.source_line : ''}</div>
+  `;
+}
+
+// Close on X / backdrop click
+$('turn-modal-close').addEventListener('click', _closeTurnModal);
+$('turn-modal-bg').addEventListener('click', ev => {
+  if (ev.target === $('turn-modal-bg')) _closeTurnModal();
+});
+
+// Prev / next navigation
+$('turn-modal-prev').addEventListener('click', () => {
+  if (_currentTurnIdx > 0) openTurnModal(_currentTurnIdx - 1);
+});
+$('turn-modal-next').addEventListener('click', () => {
+  if (_currentTurnIdx != null && _currentTurnIdx < _totalTurns - 1) openTurnModal(_currentTurnIdx + 1);
+});
+
+// Keyboard: Esc close, ← / → navigate
+document.addEventListener('keydown', ev => {
+  const bg = $('turn-modal-bg');
+  if (!bg || bg.style.display === 'none') return;
+  if (ev.key === 'Escape') { _closeTurnModal(); return; }
+  if (ev.key === 'ArrowLeft'  && _currentTurnIdx > 0) { ev.preventDefault(); openTurnModal(_currentTurnIdx - 1); }
+  if (ev.key === 'ArrowRight' && _currentTurnIdx != null && _currentTurnIdx < _totalTurns - 1) { ev.preventDefault(); openTurnModal(_currentTurnIdx + 1); }
+});
 
 // ---- cost per turn bars ----
 

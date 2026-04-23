@@ -286,6 +286,18 @@
 
 </main>
 
+<!-- turn drill-down modal -->
+<div id="turn-modal-bg" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:1000;overflow-y:auto;padding:60px 20px 20px;">
+  <div class="modal-inner" id="turn-modal-inner" style="max-width:720px;">
+    <span class="modal-close" id="turn-modal-close">✕ close</span>
+    <div id="turn-modal-content"></div>
+    <div id="turn-modal-nav" style="display:flex;gap:12px;margin-top:20px;padding-top:16px;border-top:1px solid var(--rule);">
+      <span id="turn-modal-prev" style="cursor:pointer;color:var(--mute);font-size:12px;" title="← prev turn">← prev</span>
+      <span id="turn-modal-next" style="cursor:pointer;color:var(--mute);font-size:12px;" title="→ next turn">next →</span>
+    </div>
+  </div>
+</div>
+
 <script type="module" src="/assets/session.js"></script>
 </body>
 </html>
