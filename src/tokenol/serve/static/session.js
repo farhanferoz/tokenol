@@ -263,6 +263,21 @@ document.addEventListener('keydown', ev => {
 
 // ---- cost per turn bars ----
 
+function _niceCostTicks(maxCost) {
+  // Choose 3-4 tick values spanning 0 → maxCost on a sqrt scale so they look evenly spaced.
+  // Generate candidate ticks at 1, 2, 5 × 10^k, pick ones that fall within range.
+  const fractions = [0.1, 0.25, 0.5, 1.0];
+  return fractions.map(f => {
+    const target = f * f * maxCost;  // sqrt-inverse so ticks land at even visual positions
+    // Round to 1 significant figure for readable labels
+    if (target <= 0) return 0;
+    const mag = Math.pow(10, Math.floor(Math.log10(target)));
+    const norm = target / mag;
+    const rounded = (norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10) * mag;
+    return rounded;
+  }).filter((v, i, a) => v > 0 && a.indexOf(v) === i);
+}
+
 const _CBAR_KEYS   = ['cache_read', 'input', 'cache_creation', 'output'];
 const _CBAR_COLORS = () => ({
   cache_read:     CV['--mute'],
@@ -300,34 +315,53 @@ function _drawCostBars(turns, cont, top30) {
     visible = turns.map((t, i) => ({t, i}));
   }
 
-  const H = 160;
-  const W = cont.offsetWidth || 800;
-  const n = visible.length;
+  const H         = 160;
+  const Y_AXIS_W  = 48;
+  const W         = cont.offsetWidth || 800;
+  const plotW     = Math.max(200, W - Y_AXIS_W);
+  const n         = visible.length;
   if (!n) { cont.innerHTML = ''; return; }
-  const barW = Math.max(2, Math.min(20, Math.floor((W - 4) / n) - 1));
+  const barW = Math.max(2, Math.min(20, Math.floor((plotW - 4) / n) - 1));
   const gap  = Math.max(0, Math.floor(barW * 0.15));
   const maxCost = Math.max(...visible.map(e => e.t.cost_usd), 1e-9);
+
+  // sqrt scale so the few extreme spikes don't crush the typical turns into 1-pixel slivers
+  const scale = v => Math.sqrt(Math.max(0, v) / maxCost) * H;
 
   let rects = '';
   visible.forEach((e, j) => {
     const t  = e.t;
     const cc = t.cost_components || {};
-    const x  = j * (barW + gap);
-    let y = H;
+    const x  = Y_AXIS_W + j * (barW + gap);
+    // Draw each segment at its height relative to the cumulative cost, using sqrt scaling
+    let cum = 0;
     _CBAR_KEYS.forEach(k => {
       const v = cc[k] || 0;
       if (v <= 0) return;
-      const h = Math.max(1, (v / maxCost) * H);
-      y -= h;
-      rects += `<rect data-idx="${e.i}" x="${x}" y="${y.toFixed(1)}" `
+      const yTop    = H - scale(cum + v);
+      const yBot    = H - scale(cum);
+      const h       = Math.max(1, yBot - yTop);
+      cum += v;
+      rects += `<rect data-idx="${e.i}" x="${x}" y="${yTop.toFixed(1)}" `
         + `width="${barW}" height="${h.toFixed(1)}" fill="${colors[k]}" `
         + `data-k="${k}" data-v="${v.toFixed(5)}" data-total="${t.cost_usd.toFixed(5)}" `
         + `data-ts="${t.ts}" style="cursor:pointer"></rect>`;
     });
   });
 
-  const svgW = Math.max(W, n * (barW + gap));
-  cont.innerHTML = `<svg width="${svgW}" height="${H}" style="overflow:visible;display:block">${rects}</svg>`;
+  // Y-axis ticks — nice round dollar values at sqrt positions
+  const niceTicks = _niceCostTicks(maxCost);
+  const axisLines = niceTicks.map(v => {
+    const y = H - scale(v);
+    const label = v >= 1 ? `$${v.toFixed(v >= 10 ? 0 : 1)}` : v >= 0.1 ? `$${v.toFixed(2)}` : `$${v.toFixed(3)}`;
+    return `<g>
+      <line x1="${Y_AXIS_W}" x2="${Y_AXIS_W + n * (barW + gap)}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--rule)" stroke-dasharray="2 4"/>
+      <text x="${Y_AXIS_W - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--mute)">${label}</text>
+    </g>`;
+  }).join('');
+
+  const svgW = Math.max(W, Y_AXIS_W + n * (barW + gap));
+  cont.innerHTML = `<svg width="${svgW}" height="${H + 12}" style="overflow:visible;display:block">${axisLines}${rects}</svg>`;
 
   let tip = document.createElement('div');
   tip.className = 'u-tooltip';

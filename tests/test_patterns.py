@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
-from tokenol.metrics.patterns import PatternHit, detect_patterns
+from tokenol.metrics.patterns import detect_patterns
 from tokenol.model.events import Turn, Usage
 
 _BASE_TS = datetime(2026, 4, 14, 10, 0, 0, tzinfo=timezone.utc)
@@ -51,7 +49,7 @@ class TestIdleExpiry:
         turns = [
             _turn(offset_h=0),
             # 2-hour gap + high cache_creation ratio
-            _turn(offset_h=2, input_t=1000, cache_creation=900, cache_read=0),
+            _turn(offset_h=2, input_t=100, cache_creation=9000, cache_read=0),
         ]
         hits = detect_patterns(turns)
         kinds = [h.kind for h in hits]
@@ -78,9 +76,9 @@ class TestIdleExpiry:
         # 4 turns with 3 big gaps → 3 hits → red
         turns = [
             _turn(offset_h=0),
-            _turn(offset_h=2,  input_t=1000, cache_creation=900, cache_read=0),
-            _turn(offset_h=4,  input_t=1000, cache_creation=900, cache_read=0),
-            _turn(offset_h=6,  input_t=1000, cache_creation=900, cache_read=0),
+            _turn(offset_h=2,  input_t=100, cache_creation=9000, cache_read=0),
+            _turn(offset_h=4,  input_t=100, cache_creation=9000, cache_read=0),
+            _turn(offset_h=6,  input_t=100, cache_creation=9000, cache_read=0),
         ]
         hits = [h for h in detect_patterns(turns) if h.kind == "idle_expiry"]
         assert all(h.severity == "red" for h in hits)
@@ -221,7 +219,7 @@ class TestAllPatternsIntegration:
             turns.append(_turn(offset_h=gap * 3.0))
             turns.append(_turn(
                 offset_h=gap * 3.0 + 2.0,
-                input_t=1000, cache_creation=900, cache_read=0,
+                input_t=100, cache_creation=9000, cache_read=0,
             ))
 
         # 2. compaction_reinflation: 3 cycles (triggers red)
