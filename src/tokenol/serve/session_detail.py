@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from tokenol.metrics.cost import cost_for_turn
+from tokenol.metrics.patterns import detect_patterns
 from tokenol.metrics.rollups import build_session_rollup
 from tokenol.metrics.verdicts import compute_verdict
 from tokenol.model.events import Session
@@ -41,6 +44,8 @@ def build_session_detail(session: Session) -> dict:
             },
         })
 
+    patterns = [asdict(h) for h in detect_patterns(turns)]
+
     return {
         "session_id": session.session_id,
         "source_file": session.source_file,
@@ -56,4 +61,5 @@ def build_session_detail(session: Session) -> dict:
             "tool_errors": sr.tool_error_count,
         },
         "turns": turn_rows,
+        "patterns": patterns,
     }

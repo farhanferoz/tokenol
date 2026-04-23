@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-import pytest
+from datetime import datetime, timedelta, timezone
 
 from tokenol.model.events import Session, Turn, Usage
 from tokenol.serve.session_detail import build_session_detail
@@ -110,5 +108,40 @@ class TestExistingKeys:
     def test_top_level_keys_present(self):
         detail = build_session_detail(_make_session([_make_turn()]))
         for key in ("session_id", "source_file", "model", "cwd", "verdict",
-                    "first_ts", "last_ts", "totals", "turns"):
+                    "first_ts", "last_ts", "totals", "turns", "patterns"):
             assert key in detail
+
+
+class TestPatterns:
+    def test_patterns_key_present(self):
+        detail = build_session_detail(_make_session([_make_turn()]))
+        assert "patterns" in detail
+        assert isinstance(detail["patterns"], list)
+
+    def test_healthy_session_no_patterns(self):
+        # Low-cost, no sidechains, no gaps — should be clean
+        turns = [
+            _make_turn(ts=f"2026-04-14T10:0{i}:00+00:00", input_t=100, cache_creation=10, cache_read=50)
+            for i in range(5)
+        ]
+        detail = build_session_detail(_make_session(turns))
+        assert detail["patterns"] == []
+
+    def test_known_pattern_idle_expiry(self):
+        # 2-hour idle gap + high cache_creation spike
+        base = datetime(2026, 4, 14, 8, 0, 0, tzinfo=timezone.utc)
+        t1 = _make_turn(ts=base.isoformat(), input_t=100, cache_creation=10)
+        t2_ts = (base + timedelta(hours=2)).isoformat()
+        t2 = _make_turn(ts=t2_ts, input_t=100, cache_creation=900, cache_read=0)
+        detail = build_session_detail(_make_session([t1, t2]))
+        kinds = [p["kind"] for p in detail["patterns"]]
+        assert "idle_expiry" in kinds
+
+    def test_pattern_fields_present(self):
+        base = datetime(2026, 4, 14, 8, 0, 0, tzinfo=timezone.utc)
+        t1 = _make_turn(ts=base.isoformat(), input_t=100, cache_creation=10)
+        t2 = _make_turn(ts=(base + timedelta(hours=2)).isoformat(), input_t=100, cache_creation=900, cache_read=0)
+        detail = build_session_detail(_make_session([t1, t2]))
+        p = next(x for x in detail["patterns"] if x["kind"] == "idle_expiry")
+        for field in ("kind", "severity", "headline", "reason", "suggested_fix", "turn_indices"):
+            assert field in p
