@@ -80,10 +80,15 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 content = []
             tool_use_count, tool_error_count = _count_tool_blocks(content)
 
-            # Extract cwd from system events
-            cwd: str | None = None
-            if event_type == "system":
-                cwd = ev.get("cwd") or None
+            cwd: str | None = ev.get("cwd") or None
+            if cwd and (
+                (len(cwd) >= 2 and cwd[1] == ":" and cwd[0].isalpha())  # Windows drive letter
+                or cwd.startswith("\\\\")  # UNC path
+            ):
+                # Normalize Windows-style separators so downstream path logic
+                # (ancestor detection, basename extraction, URL encoding) can
+                # treat every cwd as POSIX.
+                cwd = cwd.replace("\\", "/")
 
             yield RawEvent(
                 source_file=str(path),
