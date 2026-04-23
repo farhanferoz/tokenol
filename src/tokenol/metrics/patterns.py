@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tokenol.metrics.context import context_tokens
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.model.events import Turn
 from tokenol.model.pricing import context_window
@@ -76,12 +77,7 @@ def _compaction_reinflation(turns: list[Turn], t: dict) -> list[PatternHit]:
     red_cycles      = int(t["compaction_red_cycles"])
     W = 5
 
-    visible = [
-        tr.usage.input_tokens
-        + tr.usage.cache_read_input_tokens
-        + tr.usage.cache_creation_input_tokens
-        for tr in turns
-    ]
+    visible = [context_tokens(tr) for tr in turns]
 
     # Find cycles: peak → drop ≤ (1-drop_ratio)*peak within W → rise ≥ reinflate_ratio*peak within W
     cycle_indices: list[int] = []
@@ -144,8 +140,7 @@ def _context_ceiling_plateau(turns: list[Turn], t: dict) -> list[PatternHit]:
 
     # A turn is "at the ceiling" if its visible tokens >= fraction * its model's context window
     at_ceiling = [
-        (tr.usage.input_tokens + tr.usage.cache_read_input_tokens + tr.usage.cache_creation_input_tokens)
-        >= plateau_fraction * _cw(tr.model)
+        context_tokens(tr) >= plateau_fraction * _cw(tr.model)
         for tr in turns
     ]
 

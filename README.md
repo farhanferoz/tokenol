@@ -88,11 +88,74 @@ tokenol serve --all-projects --tick 2s --reference 25
 tokenol serve --open
 ```
 
-The dashboard runs entirely in your browser and updates every 5 seconds as Claude Code writes new events to disk. It shows burn rate, projected window cost, today's spend, daily history, per-session and per-project breakdowns, a 14-day cost heatmap, and a live feed of the most recent turns. Click any session row to open a drill-down page with a per-turn chart, tool-use timeline, and sortable turn table.
+The dashboard updates via SSE as Claude Code writes events to disk. Main page layout (top to bottom):
 
-Settings (tick interval, reference threshold, range toggles) are persisted in `localStorage` and survive page reloads. Changes to tick interval and reference threshold are applied to the running server immediately without a page reload.
+| Panel | What it shows |
+|---|---|
+| **Topbar** | Today's cost · sessions · output · last-active time; global period selector (Today / 7D / 30D / All) |
+| **Efficiency tiles** | Hit% · $/kW · Ctx · Cache reuse — each with a delta chip vs 7-day median and colour-coded threshold |
+| **Hour By Hour** | Hourly metric timeline with day-picker, metric pills, project/model filters, and click-to-drilldown |
+| **Daily History** | 30-day metric history with 7-day moving average overlay; range pills (7D / 30D / 90D / All) |
+| **Models** | Per-model cost, turns, output, and efficiency metrics; local range override; click row → `/model/<name>` |
+| **Recent Activity** | Active projects in the last 60 min with Ctx used, $/kW, hit%, verdict; sortable; click row → `/project/<cwd>` |
 
-See [`docs/DASHBOARD.md`](docs/DASHBOARD.md) for a full panel reference and keyboard shortcuts.
+Keyboard shortcuts: `?` Glossary · `/` Find · `,` Settings · `Esc` close/back · `g t` scroll to top · `↑↓ Enter` table row navigation · `← →` chart cursor.
+
+### Efficiency metric glossary
+
+| Metric | Definition | Target |
+|---|---|---|
+| **Hit%** | `cache_read / (cache_read + cache_creation + input)` | ≥ 95% |
+| **$/kW** | `cost × 1000 / output_tokens` — dollars per 1k output tokens | < $0.20 |
+| **Ctx** | `cache_read / output` as N:1 — context tokens read per output token | < 400:1 |
+| **Cache reuse** | `cache_read / cache_creation` as N:1 — low = cache thrashing | > 50:1 |
+| **Ctx used** | Latest turn's visible context ÷ model context window | < 85% |
+
+### Preferences
+
+User preferences (tick cadence and threshold overrides) are saved to:
+
+```
+$XDG_CONFIG_HOME/tokenol/prefs.json   # default: ~/.config/tokenol/prefs.json
+```
+
+Shape:
+
+```json
+{
+  "tick_seconds": 300,
+  "reference_usd": 50.0,
+  "thresholds": {
+    "hit_rate_good_pct": 95,
+    "hit_rate_red_pct": 85,
+    "cost_per_kw_good": 0.20,
+    "cost_per_kw_red": 0.40,
+    "ctx_ratio_red": 400.0,
+    "cache_reuse_good": 50.0,
+    "cache_reuse_red": 20.0
+  }
+}
+```
+
+Reset to defaults via the Settings modal (`POST /api/prefs {"thresholds": "reset"}`).
+
+### Session drill-down
+
+Click any session to open the drill-down page (`/session/<id>`). It shows:
+
+- **What likely went wrong** — automated pattern cards at the top of the page, each with a headline, the measurable signal that triggered it, and a suggested fix. Five patterns are detected:
+
+  | Pattern | Signal |
+  |---|---|
+  | **Idle expiry** | Gap ≥ 1 h between turns + next turn was ≥ 80% cache_creation — the 5-minute prompt-cache TTL expired |
+  | **Compaction re-inflation** | Visible-token count dropped then climbed back to ≥ 80% of the previous peak — compacting but immediately refilling the context |
+  | **Context ceiling plateau** | ≥ 20 consecutive turns at ≥ 90% of the model's context window — paying near-full-context input rates throughout |
+  | **Sidechain explosion** | Sidechain/task-agent work accounts for > 40% of session cost |
+  | **Tool error storm** | > 20% error rate across any 10-turn window |
+
+- **Cost per turn** — stacked bar chart (input / output / cache_read / cache_creation). Toggle "All" or "Top 30" to focus on the most expensive turns. Click any bar to open the per-turn detail modal.
+
+- **Per-turn modal** — cost component breakdown, token counts, tool call results (✓/✗), first 500 chars of the user prompt and assistant preview. Navigate with ← / → or close with Esc.
 
 ## What it detects
 
@@ -110,14 +173,12 @@ For every session, `tokenol` computes a blow-up verdict against spec-defined thr
 
 The `tokenol daily` report shows these cost/cache efficiency ratios:
 
-| Column   | Meaning                                                | Target     |
-| -------- | ------------------------------------------------------ | ---------- |
-| `$/kW`   | USD per 1,000 output tokens (cost per unit of "work")  | `< $0.20`  |
-| `Ctx`    | Context tokens read per output token                   | lower is better |
-| `CacheE` | Cache reads per cache-creation token (reuse ratio)     | `> 50:1`   |
-| `Hit%`   | % of context served from cache (vs. paid input/create) | `> 98%`    |
-
-Thresholds live in `src/tokenol/metrics/verdicts.py` and can be tuned per-project.
+| Column | Meaning | Target |
+|---|---|---|
+| `$/kW` | USD per 1,000 output tokens | `< $0.20` |
+| `Ctx` | Context tokens read per output token (N:1) | lower is better |
+| `Cache reuse` | Cache reads per cache-creation token (N:1) | `> 50:1` |
+| `Hit%` | % of context served from prompt cache | `≥ 95%` |
 
 ## Pricing
 

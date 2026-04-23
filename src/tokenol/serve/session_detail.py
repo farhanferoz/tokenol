@@ -90,7 +90,7 @@ def _parse_turn_snippets(
 
     # Find the user event immediately preceding the assistant event
     user_text = ""
-    for lineno, ev in reversed([(l, e) for l, e in events if l < (asst_lineno or 0)]):
+    for _lineno, ev in reversed([(ln, e) for ln, e in events if ln < (asst_lineno or 0)]):
         if ev.get("type") == "user":
             user_text = _snip(_extract_text(ev.get("message", {}).get("content")))
             break
