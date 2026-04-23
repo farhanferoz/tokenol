@@ -68,6 +68,7 @@ function render(d) {
   $('sess-tool-errors').textContent = d.totals.tool_errors;
   if (d.totals.tool_errors > 0) $('sess-tool-errors').classList.add('alarm');
 
+  renderPatternCards(d.patterns || []);
   renderCostBars(d.turns);
   renderChart(d.turns);
   renderOutputChart(d.turns);
@@ -76,6 +77,59 @@ function render(d) {
   renderStopReasonStrip(d.turns);
   renderTimeline(d.turns, d.first_ts, d.last_ts);
   initTable(d.turns);
+}
+
+// ---- pattern cards ----
+
+function renderPatternCards(patterns) {
+  const section = $('pattern-section');
+  const cont    = $('pattern-cards');
+  if (!section || !cont) return;
+
+  section.style.display = '';
+
+  if (!patterns.length) {
+    cont.innerHTML = '<div class="pattern-empty">No known problem patterns detected — this session looks healthy.</div>';
+    return;
+  }
+
+  const GLYPH = { red: '⚠', amber: '⚠', info: 'ⓘ' };
+  cont.innerHTML = patterns.map(p => {
+    const glyph  = GLYPH[p.severity] || 'ⓘ';
+    const first  = (p.turn_indices || [])[0];
+    const n      = (p.turn_indices || []).length;
+    const jumpHtml = (first != null)
+      ? `<span class="jump-link" data-idx="${first}">Jump to first ↓</span>`
+      : '';
+    return `<div class="pattern-card pattern-sev-${p.severity}"
+                data-turn-indices="${(p.turn_indices || []).join(',')}">
+      <div class="pattern-glyph">${glyph}</div>
+      <div class="pattern-body">
+        <div class="pattern-headline">${esc(p.headline)}</div>
+        <div class="pattern-reason">${esc(p.reason)}</div>
+        <div class="pattern-fix">${esc(p.suggested_fix)}</div>
+        <div class="pattern-jump">Triggered by ${n} turn${n === 1 ? '' : 's'}. ${jumpHtml}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  cont.querySelectorAll('.jump-link[data-idx]').forEach(link => {
+    link.addEventListener('click', () => {
+      const idx = +link.dataset.idx;
+      const barsSection = $('cost-bars-section');
+      if (barsSection) barsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      _highlightCostBar(idx);
+    });
+  });
+}
+
+function _highlightCostBar(turnIdx) {
+  const cont = $('cost-bars-chart');
+  if (!cont) return;
+  cont.querySelectorAll(`[data-idx="${turnIdx}"]`).forEach(rect => {
+    rect.classList.add('bar-highlight');
+    rect.addEventListener('animationend', () => rect.classList.remove('bar-highlight'), { once: true });
+  });
 }
 
 // ---- turn modal (wired in Task 8) ----
