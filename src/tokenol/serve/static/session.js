@@ -337,11 +337,11 @@ function _drawCostBars(turns, cont, top30) {
   const n = visible.length;
   if (!n) { cont.innerHTML = ''; return; }
 
-  // Skip strips whose max is 0 (e.g. all input was cached, so cost_components.input = 0).
-  // Strips with zero data are visual noise and confuse the reader with "max $0.0000".
+  // Skip strips whose max is too small to render as a meaningful bar (< 1/10 of
+  // a cent). A visible "input max $0.0000" strip is noise for cached sessions.
   const activeStrips = _CBAR_STRIPS
     .map(s => ({...s, max: Math.max(...visible.map(e => e.t.cost_components?.[s.key] || 0), 0)}))
-    .filter(s => s.max > 0);
+    .filter(s => s.max >= 0.001);
   if (!activeStrips.length) { cont.innerHTML = ''; return; }
 
   const LABEL_W = 130;
@@ -351,12 +351,16 @@ function _drawCostBars(turns, cont, top30) {
   const stripTop = si => si * (STRIP_H + GAP_Y);
   const plotAreaH = activeStrips.length * (STRIP_H + GAP_Y);
   const TOTAL_H = plotAreaH + AXIS_H;
+  // Fill the full container width. Use a float stride (plotW / n) to position
+  // bars; this keeps the plot area visually consistent with the Cache-read /
+  // Output charts below and avoids a 200-400px dead margin on sessions with
+  // few turns. Bar width is capped at 24px so a 30-turn view doesn't look like
+  // a stretched row of slabs; center each bar inside its stride slot.
   const W = cont.offsetWidth || 800;
   const plotW = Math.max(200, W - LABEL_W - 8);
-  const barW = Math.max(1, Math.min(14, Math.floor(plotW / n) - 1));
-  const gap  = Math.max(0, Math.floor(barW * 0.15));
-  const stride = barW + gap;
-  const plotUsedW = n * stride;
+  const strideFloat = plotW / n;
+  const barW = Math.max(1, Math.min(24, Math.floor(strideFloat * 0.85)));
+  const plotUsedW = plotW;
 
   const parts = [];
 
@@ -378,7 +382,7 @@ function _drawCostBars(turns, cont, top30) {
       const v = e.t.cost_components?.[strip.key] || 0;
       if (v <= 0) return;
       const h = scale(v);
-      const x = LABEL_W + j * stride;
+      const x = LABEL_W + j * strideFloat + (strideFloat - barW) / 2;
       const y = baseY - h;
       parts.push(
         `<rect data-idx="${e.i}" x="${x}" y="${y.toFixed(1)}" width="${barW}" `
@@ -397,7 +401,7 @@ function _drawCostBars(turns, cont, top30) {
     const j = Math.min(n - 1, Math.floor(ti * (n - 1) / tickCount));
     const turn = visible[j]?.t;
     if (!turn) continue;
-    const x = LABEL_W + j * stride + barW / 2;
+    const x = LABEL_W + (j + 0.5) * strideFloat;
     const d = new Date(turn.ts);
     const dateStr = d.toISOString().slice(0, 10);
     const hm = [d.getUTCHours(), d.getUTCMinutes()].map(k => String(k).padStart(2,'0')).join(':');
@@ -430,7 +434,7 @@ function _drawCostBars(turns, cont, top30) {
   const nearestIdx = svgX => {
     const rel = svgX - LABEL_W;
     if (rel < 0) return -1;
-    const j = Math.floor(rel / stride);
+    const j = Math.floor(rel / strideFloat);
     return j >= 0 && j < n ? j : -1;
   };
 
@@ -443,7 +447,7 @@ function _drawCostBars(turns, cont, top30) {
     const j = nearestIdx(loc.x);
     if (j < 0) { tip.style.display = 'none'; cursor.setAttribute('opacity', '0'); return; }
 
-    const cursorX = LABEL_W + j * stride + barW / 2;
+    const cursorX = LABEL_W + (j + 0.5) * strideFloat;
     cursor.setAttribute('x1', cursorX);
     cursor.setAttribute('x2', cursorX);
     cursor.setAttribute('opacity', '0.5');
