@@ -122,11 +122,16 @@ const _xFmtHour = v => {
 
 export function drawChart(container, {
   xs, ySeries, labels, yUnit, height = 180,
-  onPointClick, xFmt, dashes, stepped = false, turnsByX,
+  onPointClick, xFmt, dashes, stepped = false, turnsByX, yScale = 'linear',
 }) {
   const xFmtFn  = xFmt ?? _xFmtHour;
   const existing = container._uplot;
-  if (existing && existing.series.length === ySeries.length + 1 && container._yUnit === yUnit) {
+  // Fast path only works when every axis config is unchanged. Changing scale
+  // (linear ↔ log) reshapes the y distribution, so fall through to a rebuild.
+  if (existing
+      && existing.series.length === ySeries.length + 1
+      && container._yUnit === yUnit
+      && container._yScale === yScale) {
     existing.setData([xs, ...ySeries]);
     container._xs = xs;
     container._turnsByX = turnsByX;
@@ -161,11 +166,21 @@ export function drawChart(container, {
     select:  { show: false },
     legend:  { show: ySeries.length > 1 },
     cursor:  { drag: { x: false, y: false } },
-    scales:  { y: { range: (_u, lo, hi) => {
-      if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
-      const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
-      return [lo - pad, hi + pad];
-    }}},
+    // Linear: auto-fit with 5% padding.
+    // Log: distr:3 is uPlot's log10; zero or negative values would blow up, so
+    // floor the bottom at 1/10 of a cent so a handful of $0 turns don't kill
+    // the scale for the whole chart.
+    scales:  yScale === 'log'
+      ? { y: { distr: 3, range: (_u, lo, hi) => {
+          const lower = Math.max(1e-4, Number.isFinite(lo) ? lo : 1e-4);
+          const upper = Number.isFinite(hi) && hi > lower ? hi : lower * 10;
+          return [lower, upper];
+        }}}
+      : { y: { range: (_u, lo, hi) => {
+          if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+          const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
+          return [lo - pad, hi + pad];
+        }}},
     axes: [
       { stroke: '#7a7062', ticks: g, grid: g, values: (_u, vs) => vs.map(xFmtFn) },
       { stroke: '#7a7062', ticks: g, grid: g, size: _Y_AXIS_SIZE[yUnit] ?? 50, values: (_u, vs) => vs.map(fmt) },
@@ -177,9 +192,10 @@ export function drawChart(container, {
     series,
   }, [xs, ...ySeries], container);
 
-  container._uplot = u;
-  container._xs    = xs;
-  container._yUnit = yUnit;
+  container._uplot  = u;
+  container._xs     = xs;
+  container._yUnit  = yUnit;
+  container._yScale = yScale;
   container.tabIndex = 0;
 
   if (onPointClick) {

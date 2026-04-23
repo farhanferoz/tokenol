@@ -352,8 +352,28 @@ function _makeFetcher({ urlFn, xform, paint }) {
   };
 }
 
+// ---- y-scale (linear / log) per panel, persisted ----
+const _LS_H_SCALE = 'tokenol.hourly.scale';
+const _LS_D_SCALE = 'tokenol.daily.scale';
+const _scaleFor = (metric, stored) => {
+  // Hit% is bounded [0,1], log would be meaningless there — force linear.
+  if (metric === 'hit_pct') return 'linear';
+  return stored === 'log' ? 'log' : 'linear';
+};
+function _syncScalePills(groupId, active) {
+  const group = $(groupId);
+  if (!group) return;
+  group.querySelectorAll('[data-scale]').forEach(el => {
+    el.classList.toggle('on', el.dataset.scale === active);
+  });
+  // Disable the log pill entirely when the active metric forces linear
+  const logPill = group.querySelector('[data-scale="log"]');
+  if (logPill) logPill.classList.toggle('disabled', active === 'linear-forced');
+}
+
 // ---- hourly timeline ----
 let _hMetric    = 'hit_pct';
+let _hScaleRaw  = localStorage.getItem(_LS_H_SCALE) || 'linear';
 let _hDay       = null;   // null = today
 let _hEarliest  = null;
 
@@ -408,8 +428,11 @@ const _fetchHourly = _makeFetcher({
 });
 
 function _paintHourly(data) {
+  const scale = _scaleFor(_hMetric, _hScaleRaw);
+  _syncScalePills('hourly-scale-pills', _hMetric === 'hit_pct' ? 'linear-forced' : scale);
   _paintTimeline('hourly-chart', data, 'No data for this selection.', {
     stepped: true,
+    yScale: scale,
     onPointClick: ts => {
       const d = new Date(ts * 1000);
       location.href = `/day/${_toLocalDate(d)}#hour=${d.getHours()}`;
@@ -577,6 +600,11 @@ function _initTzLabel() {
 
 function _wireHourly() {
   _wireRange('hourly-metric-pills', m => { _hMetric = m; _fetchHourly(); });
+  _wireRange('hourly-scale-pills',  s => {
+    _hScaleRaw = s;
+    localStorage.setItem(_LS_H_SCALE, s);
+    _fetchHourly();
+  });
 
   const dayBtn = $('hourly-day-picker');
   dayBtn?.addEventListener('click', e => {
@@ -611,6 +639,7 @@ const _DAILY_META = {
 let _dMetric   = 'hit_pct';
 let _dRange    = '30d';
 let _dEarliest = null;
+let _dScaleRaw = localStorage.getItem(_LS_D_SCALE) || 'linear';
 
 const _xFmtDate = v => { const d = new Date(v * 1000); return `${d.getMonth()+1}/${d.getDate()}`; };
 
@@ -683,10 +712,13 @@ const _fetchDaily = _makeFetcher({
 });
 
 function _paintDaily(data) {
+  const scale = _scaleFor(_dMetric, _dScaleRaw);
+  _syncScalePills('daily-scale-pills', _dMetric === 'hit_pct' ? 'linear-forced' : scale);
   _paintTimeline('daily-chart', data, 'No history yet — check back after a few days.', {
     xFmt: _xFmtDate,
     stepped: data.labels.map(lbl => lbl !== '7d avg'),
     dashes: [null, [4, 4]],
+    yScale: scale,
     onPointClick: ts => { location.href = `/day/${_toLocalDate(new Date(ts * 1000))}`; },
   });
 }
@@ -694,6 +726,11 @@ function _paintDaily(data) {
 function _wireDaily() {
   _wireRange('daily-range-pills',  r => { _dRange  = r; _fetchDaily(); });
   _wireRange('daily-metric-pills', m => { _dMetric = m; _fetchDaily(); });
+  _wireRange('daily-scale-pills',  s => {
+    _dScaleRaw = s;
+    localStorage.setItem(_LS_D_SCALE, s);
+    _fetchDaily();
+  });
 
   _wireMultiFilter($('daily-project-filter'), {
     storageKey: 'tokenol.filter.daily.project', noun: 'projects',
@@ -809,7 +846,7 @@ function _wireRange(groupId, onChange) {
     btn.addEventListener('click', () => {
       group.querySelectorAll(_PILL_SEL).forEach(b => b.classList.remove('on'));
       btn.classList.add('on');
-      onChange(btn.dataset.range ?? btn.dataset.metric ?? btn.dataset.window);
+      onChange(btn.dataset.range ?? btn.dataset.metric ?? btn.dataset.window ?? btn.dataset.scale);
     });
   });
 }
