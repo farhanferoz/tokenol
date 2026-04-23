@@ -32,6 +32,30 @@ function hmsUTC(isoStr) {
     .map(n => String(n).padStart(2, '0')).join(':');
 }
 
+// True when the session spans multiple UTC calendar days — triggers date-aware
+// tick labels on charts and the turns table so '23:00 → 00:00' stops ambiguating.
+let _multiDay = false;
+
+function _dateShort(d) {
+  return d.toLocaleDateString('en', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function fmtTurnTs(isoStr) {
+  const d = new Date(isoStr);
+  const t = [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':');
+  return _multiDay ? `${_dateShort(d)} ${t}` : t;
+}
+
+function _xFmtTurn(v) {
+  const d = new Date(v * 1000);
+  const hm = `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
+  if (!_multiDay) return d.getUTCMinutes() === 0 ? `${d.getUTCHours()}:00` : '';
+  // Multi-day: show date on the first tick of each day (midnight ± tick granularity)
+  if (d.getUTCHours() === 0 && d.getUTCMinutes() < 30) return _dateShort(d);
+  return hm;
+}
+
 // ---- load ----
 
 const sessionId = location.pathname.split('/').pop();
@@ -50,13 +74,18 @@ fetch(`/api/session/${sessionId}`)
 function render(d) {
   document.title = `tokenol — ${d.session_id.slice(0, 8)}`;
 
+  // Set _multiDay first — every downstream tick/table formatter reads it.
+  _totalTurns = (d.turns || []).length;
+  _multiDay = d.first_ts && d.last_ts
+    && new Date(d.first_ts).toUTCString().slice(0, 16) !== new Date(d.last_ts).toUTCString().slice(0, 16);
+
   $('sess-id').textContent = d.session_id;
   const vEl = $('sess-verdict');
   vEl.textContent = d.verdict;
   vEl.className   = `verdict-pill verdict-${d.verdict}`;
 
   if (d.first_ts && d.last_ts) {
-    $('sess-time-range').textContent = `${hmsUTC(d.first_ts)} – ${hmsUTC(d.last_ts)} UTC`;
+    $('sess-time-range').textContent = `${fmtTurnTs(d.first_ts)} – ${fmtTurnTs(d.last_ts)} UTC`;
   }
 
   $('sess-cwd').textContent       = d.cwd || '–';
@@ -68,7 +97,6 @@ function render(d) {
   $('sess-tool-errors').textContent = d.totals.tool_errors;
   if (d.totals.tool_errors > 0) $('sess-tool-errors').classList.add('alarm');
 
-  _totalTurns = (d.turns || []).length;
   renderPatternCards(d.patterns || []);
   renderCostBars(d.turns);
   renderChart(d.turns);
@@ -309,12 +337,19 @@ function _drawCostBars(turns, cont, top30) {
   const n = visible.length;
   if (!n) { cont.innerHTML = ''; return; }
 
+  // Skip strips whose max is 0 (e.g. all input was cached, so cost_components.input = 0).
+  // Strips with zero data are visual noise and confuse the reader with "max $0.0000".
+  const activeStrips = _CBAR_STRIPS
+    .map(s => ({...s, max: Math.max(...visible.map(e => e.t.cost_components?.[s.key] || 0), 0)}))
+    .filter(s => s.max > 0);
+  if (!activeStrips.length) { cont.innerHTML = ''; return; }
+
   const LABEL_W = 130;
-  const STRIP_H = 38;
-  const GAP_Y   = 6;
-  const AXIS_H  = 18;
+  const STRIP_H = 64;
+  const GAP_Y   = 8;
+  const AXIS_H  = 20;
   const stripTop = si => si * (STRIP_H + GAP_Y);
-  const plotAreaH = _CBAR_STRIPS.length * (STRIP_H + GAP_Y);
+  const plotAreaH = activeStrips.length * (STRIP_H + GAP_Y);
   const TOTAL_H = plotAreaH + AXIS_H;
   const W = cont.offsetWidth || 800;
   const plotW = Math.max(200, W - LABEL_W - 8);
@@ -325,8 +360,8 @@ function _drawCostBars(turns, cont, top30) {
 
   const parts = [];
 
-  _CBAR_STRIPS.forEach((strip, si) => {
-    const maxV = Math.max(...visible.map(e => e.t.cost_components?.[strip.key] || 0), 1e-9);
+  activeStrips.forEach((strip, si) => {
+    const maxV = strip.max;
     const scale = v => Math.max(1, (v / maxV) * (STRIP_H - 4));
     const yTop = stripTop(si);
     const baseY = yTop + STRIP_H;
@@ -352,15 +387,23 @@ function _drawCostBars(turns, cont, top30) {
     });
   });
 
-  // X-axis time labels — 5 ticks across the span
+  // X-axis time labels — 5 ticks across the span. In multi-day sessions,
+  // prepend the date on the first tick and whenever the UTC date changes
+  // between ticks; otherwise the reader sees "23:00, 00:00, 01:00" with no way
+  // to tell they're straddling midnight.
   const tickCount = 5;
+  let prevDateStr = null;
   for (let ti = 0; ti <= tickCount; ti++) {
     const j = Math.min(n - 1, Math.floor(ti * (n - 1) / tickCount));
     const turn = visible[j]?.t;
     if (!turn) continue;
     const x = LABEL_W + j * stride + barW / 2;
     const d = new Date(turn.ts);
-    const lbl = [d.getUTCHours(), d.getUTCMinutes()].map(k => String(k).padStart(2,'0')).join(':');
+    const dateStr = d.toISOString().slice(0, 10);
+    const hm = [d.getUTCHours(), d.getUTCMinutes()].map(k => String(k).padStart(2,'0')).join(':');
+    const showDate = _multiDay && (ti === 0 || dateStr !== prevDateStr);
+    const lbl = showDate ? `${_dateShort(d)} ${hm}` : hm;
+    prevDateStr = dateStr;
     parts.push(
       `<line x1="${x}" x2="${x}" y1="${plotAreaH}" y2="${plotAreaH + 4}" stroke="var(--mute)"/>`,
       `<text x="${x}" y="${plotAreaH + 14}" text-anchor="middle" font-size="10" fill="var(--mute)">${lbl}</text>`,
@@ -446,7 +489,7 @@ function renderChart(turns) {
   const crd  = turns.map(t => t.cache_read_tokens);
   drawChart(cont, {
     xs, ySeries: [crd], labels: ['cache read'], yUnit: 'tokens', height: 180,
-    stepped: true,
+    stepped: true, xFmt: _xFmtTurn,
     onPointClick: idx => highlightTurn(idx),
   });
 }
@@ -460,7 +503,7 @@ function renderOutputChart(turns) {
   const out = turns.map(t => t.output_tokens);
   drawChart(cont, {
     xs, ySeries: [out], labels: ['output'], yUnit: 'tokens', height: 120,
-    stepped: true,
+    stepped: true, xFmt: _xFmtTurn,
     onPointClick: idx => highlightTurn(idx),
   });
 }
@@ -501,7 +544,8 @@ function renderContextChart(turns) {
     padding: [4, 4, 0, 0],
     select: { show: false },
     axes: [
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28 },
+      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28,
+        values: (_, vs) => vs.map(_xFmtTurn) },
       { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 60 },
     ],
     series: [
@@ -543,7 +587,8 @@ function renderCacheHitChart(turns) {
     padding: [4, 4, 0, 0],
     select: { show: false },
     axes: [
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28 },
+      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 28,
+        values: (_, vs) => vs.map(_xFmtTurn) },
       { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 44,
         values: (_, vs) => vs.map(v => v != null ? `${Math.round(v*100)}%` : '') },
     ],
@@ -739,7 +784,7 @@ function renderTable() {
       : `<td class="mute">–</td>`;
     return `<tr data-orig="${origIdx}">
       <td class="mute">${rowNum}</td>
-      <td>${hmsUTC(t.ts)}</td>
+      <td>${fmtTurnTs(t.ts)}</td>
       <td>${esc(shortModel(t.model))}</td>
       <td class="amber">${fmtUSD(t.cost_usd)}</td>
       <td>${fmtTok(t.input_tokens + t.cache_creation_tokens)}</td>
