@@ -9,16 +9,16 @@ All notable changes to tokenol are documented here. The format follows
 Initial public release.
 
 ### Added
-- **CLI** (`tokenol`): `today`, `week`, `window`, `verdicts`, `models`, `projects`,
-  `assumptions`, `doctor`, `watch`, `serve`.
+- **CLI** (`tokenol`): `daily`, `hourly`, `live`, `sessions`, `projects`,
+  `models`, `verify`, `serve`.
 - **Ingestion**: discovery across `~/.claude*` dirs (honours `CLAUDE_CONFIG_DIR`),
-  JSONL parsing with per-file mtime cache, compound-key deduplication,
+  JSONL parsing, compound-key deduplication (`message.id:requestId`),
   Windows cwd normalization.
 - **Metrics**: cost rollups with full 4-component billing (input, output,
   cache_read, cache_creation); 5-hour rolling-window cost; context growth,
   cache hit rate, cache reuse, cost-per-kW output; session verdicts
   (`OK`, `CONTEXT_CREEP`, `RUNAWAY_WINDOW`, `TOOL_ERROR_STORM`,
-  `SIDECHAIN_HEAVY`, `DUAL_SESSION_CONFLICT`).
+  `SIDECHAIN_HEAVY`).
 - **Pattern detection** on session drill-down: `idle_expiry`,
   `compaction_reinflation`, `context_ceiling_plateau`, `sidechain_explosion`,
   `tool_error_storm` with severity escalation.
@@ -37,4 +37,4 @@ Initial public release.
 ### Tested
 - 184 unit + integration tests on Python 3.10 / 3.11 / 3.12.
 
-[0.1.0]: https://github.com/yourorg/tokenol/releases/tag/v0.1.0
+[0.1.0]: https://github.com/farhanferoz/tokenol/releases/tag/v0.1.0

@@ -21,9 +21,9 @@ These surface in three places:
 
 ---
 
-## New tags added in Phase 2
+## Firing Semantics
 
-`WINDOW_BOUNDARY_HEURISTIC` was defined in Phase 1 but first fired in Phase 2 when `align_windows()` is called. It fires once per `align_windows()` call, not once per turn.
+`WINDOW_BOUNDARY_HEURISTIC` fires once per `align_windows()` call, not once per turn.
 
 ---
 
