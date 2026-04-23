@@ -1,509 +1,1168 @@
-// ---- helpers ----
+import { fmtUSD, fmtTok, fmtRelTime, fmtRatio, cwdBasename, shortModel, verdictPill, esc, GLOSSARY } from './components.js';
+import { drawChart }                             from './chart.js';
 
+// ---- DOM helpers ----
 const $ = id => document.getElementById(id);
 
-const CV = {};
-function _initCssVars() {
-  const s = getComputedStyle(document.documentElement);
-  ['--amber','--cool','--alarm','--mute','--rule'].forEach(n => {
-    CV[n] = s.getPropertyValue(n).trim();
+function _initGlossary() {
+  const dl = $('glossary-list');
+  if (dl) dl.innerHTML = GLOSSARY.map(e => `<dt>${esc(e.term)}</dt><dd>${esc(e.def)}</dd>`).join('');
+  const byTerm = Object.fromEntries(GLOSSARY.map(e => [e.term, e.def]));
+  // Tile labels map ids → terms; everything else tags itself with data-term.
+  const _TILE_GLOSSARY_MAP = {
+    'tile-hit-lbl':   'Hit% (cache hit rate)',
+    'tile-cost-lbl':  '$/kW (cost per 1k out)',
+    'tile-ctx-lbl':   'Ctx (context ratio)',
+    'tile-cache-lbl': 'Cache reuse',
+  };
+  for (const [id, term] of Object.entries(_TILE_GLOSSARY_MAP)) {
+    const el = $(id);
+    if (el && byTerm[term]) el.title = byTerm[term];
+  }
+  // Stamp any element tagged with data-term.
+  document.querySelectorAll('[data-term]').forEach(el => {
+    const def = byTerm[el.dataset.term];
+    if (def) el.title = def;
   });
 }
-_initCssVars();
 
-const fmtUSD  = v => `$${(+v || 0).toFixed(2)}`;
-const fmtRate = v => `${fmtUSD(v)} / hr`;
-const fmtPct  = v => `${(100 * (+v || 0)).toFixed(1)}%`;
-const fmtDate = s => s ? s.slice(5, 10) : '–';
-const fmtTok  = v => +v >= 1e6 ? `${(+v/1e6).toFixed(1)}M` : +v >= 1e3 ? `${(+v/1e3).toFixed(0)}k` : String(+v || 0);
-
-function fmtDur(secs) {
-  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
+function _wireModalBackdrops() {
+  document.querySelectorAll('.modal-bg').forEach(bg => {
+    bg.addEventListener('click', e => {
+      if (e.target.closest('.modal-inner')) return;
+      const id = [...bg.classList].find(c => c.startsWith('m-'));
+      if (id) { const el = document.getElementById(id); if (el) el.checked = false; }
+    });
+  });
 }
 
-function shortModel(m) {
-  return (m || '–').replace(/^claude-/, '').replace(/-\d{8}$/, '').slice(0, 14);
+const _toLocalDate = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+// ---- period state ----
+const _LS_PERIOD     = 'tokenol.prefs.period';
+const _VALID_PERIODS = new Set(['today', '7d', '30d', 'all']);
+
+function _getPeriod() {
+  const v = localStorage.getItem(_LS_PERIOD);
+  return _VALID_PERIODS.has(v) ? v : 'today';
+}
+function _setPeriod(p) { localStorage.setItem(_LS_PERIOD, p); }
+
+// ---- SSE dot ----
+const _dot = $('sse-dot');
+function _dotState(cls, title) {
+  _dot.className = 'sse-dot' + (cls ? ' ' + cls : '');
+  _dot.title = title;
 }
 
-function modelColor(name) {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return `hsl(${h % 360},50%,55%)`;
+// ---- SSE connection ----
+let _es = null;
+let _reconnectDelay = 1_000;
+let _fiveXXSince    = null;
+
+function _connect(period) {
+  if (_es) { _es.close(); _es = null; }
+  _dotState('', 'SSE connecting…');
+  _es = new EventSource(`/api/stream?period=${period}`);
+
+  _es.onopen = () => {
+    _dotState('connected', 'Live — connected');
+    _reconnectDelay = 1_000;
+    _fiveXXSince    = null;
+    _resetIdleTimer();
+  };
+
+  _es.onmessage = ev => {
+    try { _applyPayload(JSON.parse(ev.data)); }
+    catch (e) { console.error('SSE parse', e); }
+  };
+
+  _es.onerror = () => {
+    _dotState('amber', 'SSE disconnected — reconnecting…');
+    _es.close(); _es = null;
+    setTimeout(() => _connect(_getPeriod()), _reconnectDelay);
+    _reconnectDelay = Math.min(_reconnectDelay * 2, 30_000);
+  };
 }
 
-const AMBER_RGB = '255,182,71';
-
-function hmColor(t) {
-  if (t <= 0.001) return 'var(--rule)';
-  return `rgba(${AMBER_RGB},${Math.min(0.12 + t * 0.88, 1).toFixed(2)})`;
+// ---- initial fetch ----
+async function _fetchSnapshot(period) {
+  try {
+    const res = await fetch(`/api/snapshot?period=${period}`);
+    if (res.ok) {
+      _fiveXXSince = null;
+      _applyPayload(await res.json());
+    } else if (res.status >= 500) {
+      if (_fiveXXSince === null) _fiveXXSince = Date.now();
+      if (Date.now() - _fiveXXSince > 30_000) _dotState('alarm', 'Server error — check logs');
+    }
+  } catch (_e) { /* network error; SSE will reconnect */ }
 }
 
-// ---- state ----
-
+// ---- state + render ----
 let S = {};
-const charts    = {};
-const chartMeta = {};  // keyed by chart id → opts key; controls setData vs rebuild
 
-let _idleTimer      = null;
-let _todayTimestamp = 0;
-let _isIdle         = false;
-let _staleToday     = false;
+function _applyPayload(payload) {
+  // SSE delivers a full payload first, then shallow diffs (only changed top-level keys).
+  // Merge so stable keys (e.g. projects_30d, models_30d) survive across ticks.
+  S = { ...S, ...payload };
+  _resetIdleTimer();
+  _render();
+}
 
-const prefs = {
-  burnLookback: '5m',
-  sessionsRange: '24h',
-  projectsRange: '24h',
-  modelsRange:   '24h',
-  dailyRange:    14,
-  hideSidechain: false,
+function _render() {
+  _renderTopbar(S);
+  _renderTiles(S);
+  _renderAnomalyStrip(S);
+  _renderHourly(S);
+  _renderDaily(S);
+  _renderModels(S);
+  _renderRecent(S);
+  _loadSettings(S);
+}
+
+// ---- topbar summary ----
+const _topbarEl = $('topbar-summary');
+let   _topbarHtml = '';
+
+function _renderTopbar(payload) {
+  const ts = payload.topbar_summary;
+  if (!ts || !_topbarEl) return;
+  const parts = [];
+  if (ts.today_cost     != null) parts.push(`<span class="k">cost</span> <span class="v">${fmtUSD(ts.today_cost)}</span>`);
+  if (ts.sessions_count != null) parts.push(`<span class="k">sessions</span> <span class="v">${ts.sessions_count}</span>`);
+  if (ts.output_tokens  != null) parts.push(`<span class="k">output</span> <span class="v">${fmtTok(ts.output_tokens)}</span>`);
+  if (ts.last_active) parts.push(`<span class="k">last active</span> <span class="v">${fmtRelTime(ts.last_active)}</span>`);
+  const html = parts.join('<span class="sep">·</span>');
+  if (html === _topbarHtml) return;
+  _topbarHtml = html;
+  _topbarEl.innerHTML = html;
+}
+
+// ---- efficiency tiles ----
+const _TILE_CFG = {
+  hit_pct: {
+    dom:        'hit',
+    fmt:        v => `${(+v || 0).toFixed(1)}%`,
+    higherGood: true,
+    colour:     (v, g) => v == null ? 'mute' : v >= g.good_gte ? 'good' : v < g.red_lt  ? 'alarm' : 'warn',
+    goalText:   g => `≥${g.good_gte}% good · <${g.red_lt}% red`,
+  },
+  cost_per_kw: {
+    dom:        'cost',
+    fmt:        fmtUSD,
+    higherGood: false,
+    colour:     (v, g) => v == null ? 'mute' : v <= g.good_lte ? 'good' : v > g.red_gt  ? 'alarm' : 'warn',
+    goalText:   g => `<${fmtUSD(g.good_lte)} good · >${fmtUSD(g.red_gt)} red`,
+  },
+  ctx_ratio: {
+    dom:        'ctx',
+    fmt:        fmtRatio,
+    higherGood: false,
+    colour:     (v, g) => v == null ? 'mute' : v > g.red_gt ? 'alarm' : 'mute',
+    goalText:   g => `<${Math.round(g.red_gt)}:1 ok`,
+  },
+  cache_reuse: {
+    dom:        'cache',
+    fmt:        fmtRatio,
+    higherGood: true,
+    colour:     (v, g) => v == null ? 'mute' : v >= g.good_gte ? 'good' : v < g.red_lt ? 'alarm' : 'warn',
+    goalText:   g => `≥${Math.round(g.good_gte)}:1 good · <${Math.round(g.red_lt)}:1 red`,
+  },
 };
 
-window.PREFS = prefs;
-window.rerender = keys => render(new Set(keys));
-
-// ---- merge + render ----
-
-function mergeState(diff) {
-  Object.assign(S, diff);
-  resetIdleTimer();
-  render(new Set(Object.keys(diff)));
+// Cache DOM refs once (module runs after DOM is ready)
+for (const [, cfg] of Object.entries(_TILE_CFG)) {
+  cfg.numEl    = $(`tile-${cfg.dom}-num`);
+  cfg.dltEl    = $(`tile-${cfg.dom}-delta`);
+  cfg.goalEl   = $(`tile-${cfg.dom}-goal`);
+  cfg.recentEl = $(`tile-${cfg.dom}-recent`);
 }
 
-function render(keys) {
-  if (keys.has('active_window') || keys.has('config')) { renderGauge(); renderBurnHistory(); }
-  if (keys.has('today'))         { renderToday(); renderHourlyBars(); }
-  if (keys.has('daily_90d'))     { renderDailyArea(); }
-  if (keys.has('sessions')) renderSessions();
-  if (keys.has('models'))   renderModels();
-  if (keys.has('projects')) renderProjects();
-  if (keys.has('heatmap_14d'))   renderHeatmap();
-  if (keys.has('recent_turns'))  renderFeed();
-}
+let _tileGoals = {};
 
-// ---- gauge ----
-
-function renderGauge() {
-  const win = S.active_window;
-  const ref  = S.config?.reference_usd ?? 50;
-  const rate = win?.[`burn_rate_usd_per_hour_${prefs.burnLookback}`] ?? 0;
-  const proj = win?.projected_window_cost ?? 0;
-
-  $('main-gauge').setAll(
-    rate.toFixed(4),
-    proj.toFixed(4),
-    ref,
-    Math.max(rate * 1.5, ref * 2.2, 60).toFixed(0)
-  );
-
-  $('burn-rate-display').textContent = fmtRate(rate);
-  $('projected-cost').textContent    = fmtUSD(proj);
-  $('over-ref-badge').classList.toggle('visible', !!(win?.over_reference));
-
-  if (win) {
-    $('window-range').textContent =
-      `${fmtDur(win.elapsed_seconds ?? 0)} elapsed · ${fmtDur(win.remaining_seconds ?? 0)} remaining`;
-  }
-
-  updateTitle();
-}
-
-// ---- burn history chart ----
-
-function renderBurnHistory() {
-  const series = S.active_window?.burn_rate_series;
-  if (!series?.length) return;
-
-  const ref = S.config?.reference_usd ?? 50;
-  const xs  = series.map(d => new Date(d.t).getTime() / 1000);
-  const ys  = series.map(d => d.usd_per_hour);
-
-  _chart('burn-history-chart', {
-    _key: ref,
-    height: 60,
-    cursor: { show: false },
-    legend: { show: false },
-    axes: [
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 24 },
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 34 },
-    ],
-    series: [
-      {},
-      { stroke: CV['--amber'], width: 1.5, fill: `rgba(${AMBER_RGB},0.12)`, label: '$/hr' },
-      { stroke: CV['--alarm'], width: 1,   label: 'ref' },
-    ],
-    scales: { y: { range: (_, _min, max) => [0, Math.max(max, ref) * 1.15] } },
-  }, [xs, ys, xs.map(() => ref)]);
-}
-
-// ---- today ----
-
-function renderToday() {
-  const t = S.today;
-  if (!t) return;
-  _todayTimestamp = Date.now();
-  _staleToday = false;
-  $('panel-today')?.classList.remove('stale');
-  $('today-cost').setAttribute('value', (t.cost_usd ?? 0).toFixed(4));
-  $('today-turns').textContent       = t.turns ?? 0;
-  $('today-output').textContent      = fmtTok(t.output_tokens);
-  $('today-cost-per-kw').textContent = t.cost_per_kw > 0 ? fmtUSD(t.cost_per_kw) : '–';
-  $('today-hit-rate').textContent    = fmtPct(t.hit_rate);
-}
-
-// ---- hourly bars ----
-
-function renderHourlyBars() {
-  const hourly = S.today?.hourly;
-  if (!hourly?.length) return;
-
-  // hour field is an ISO datetime string like "2026-04-20T14:00:00+00:00"
-  const byHour = {};
-  for (const h of hourly) {
-    const hr = parseInt((h.hour.split('T')[1] ?? h.hour).slice(0, 2));
-    byHour[hr] = h;
-  }
-
-  const maxCost = Math.max(...Object.values(byHour).map(h => h.cost_usd), 0.0001);
-  const nowHour = new Date().getUTCHours();
-  const cont = $('hourly-bars');
-  cont.innerHTML = '';
-
-  for (let hr = 0; hr < 24; hr++) {
-    const h = byHour[hr] ?? { cost_usd: 0, turns: 0 };
-    const pct = Math.max(h.cost_usd / maxCost * 100, h.cost_usd > 0 ? 4 : 2);
-    const bar = document.createElement('div');
-    bar.className = 'hour-bar' + (hr === nowHour ? ' current' : '');
-    bar.style.height = `${pct}%`;
-    bar.title = `${String(hr).padStart(2, '0')}:00 — ${fmtUSD(h.cost_usd)} · ${h.turns} turns`;
-    cont.appendChild(bar);
+function _renderTiles(payload) {
+  const tiles = payload.tiles;
+  if (!tiles) return;
+  for (const [key, cfg] of Object.entries(_TILE_CFG)) {
+    const tile = tiles[key];
+    _tileGoals[key] = tile?.goal ?? {};
+    if (!cfg.numEl) continue;
+    const v = tile?.value;
+    cfg.numEl.className   = `num ${cfg.colour(v, tile?.goal ?? {})}`;
+    cfg.numEl.textContent = v != null ? cfg.fmt(v) : '—';
+    if (cfg.dltEl) _setTileDelta(cfg.dltEl, tile, cfg.higherGood);
+    if (cfg.goalEl && tile?.goal) cfg.goalEl.textContent = cfg.goalText(tile.goal);
+    if (cfg.recentEl) {
+      const lhv = tile?.last_hour_value;
+      cfg.recentEl.textContent = lhv == null ? '' : `last hour: ${cfg.fmt(lhv)}`;
+    }
   }
 }
 
-// ---- daily area (stats + charts together) ----
-
-function renderDailyArea() {
-  const daily = S.daily_90d;
-  if (!daily?.length) return;
-
-  const cutDate = new Date();
-  cutDate.setUTCDate(cutDate.getUTCDate() - prefs.dailyRange + 1);
-  const cutStr = cutDate.toISOString().slice(0, 10);
-  const slice  = daily.filter(d => d.date >= cutStr);
-
-  if (!slice.length) return;
-
-  const total    = slice.reduce((s, d) => s + d.cost_usd, 0);
-  const bestDay  = slice.reduce((a, d) => d.cost_usd < a.cost_usd ? d : a);
-  const worstDay = slice.reduce((a, d) => d.cost_usd > a.cost_usd ? d : a);
-
-  $('daily-range-label').textContent = prefs.dailyRange;
-  $('daily-total').textContent  = fmtUSD(total);
-  $('daily-best').textContent   = `${fmtDate(bestDay.date)}  ${fmtUSD(bestDay.cost_usd)}`;
-  $('daily-worst').textContent  = `${fmtDate(worstDay.date)} ${fmtUSD(worstDay.cost_usd)}`;
-
-  const xs  = slice.map(d => new Date(d.date + 'T00:00:00Z').getTime() / 1000);
-  const ys  = slice.map(d => d.cost_usd);
-  const kws = slice.map(d => d.cost_per_kw);
-
-  _chart('daily-chart', {
-    height: 70,
-    cursor: { show: false }, legend: { show: false },
-    axes: [
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 24 },
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 34 },
-    ],
-    series: [{}, { stroke: CV['--amber'], width: 1.5, fill: `rgba(${AMBER_RGB},0.14)`, label: 'cost' }],
-  }, [xs, ys]);
-
-  _chart('kw-drift-chart', {
-    height: 50,
-    cursor: { show: false }, legend: { show: false },
-    axes: [
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { show: false }, size: 24 },
-      { stroke: CV['--mute'], ticks: { show: false }, grid: { stroke: CV['--rule'], width: 1 }, size: 34 },
-    ],
-    series: [{}, { stroke: CV['--cool'], width: 1.5, label: '$/kW' }],
-  }, [xs, kws]);
-}
-
-// ---- sessions table ----
-
-function renderSessions() {
-  const sessions = S.sessions?.[prefs.sessionsRange] ?? [];
-  $('sessions-tbody').innerHTML = sessions.map(s => {
-    const vc = `verdict-${s.verdict}`;
-    return `<tr data-id="${s.id}" style="cursor:pointer">
-      <td title="${s.cwd ?? ''}">${s.id.slice(0, 8)}</td>
-      <td>${shortModel(s.model)}</td>
-      <td>${fmtUSD(s.cost_usd)}</td>
-      <td>${s.turns}</td>
-      <td>${fmtTok(s.max_input)}</td>
-      <td><span class="verdict-pill ${vc}">${s.verdict}</span></td>
-    </tr>`;
-  }).join('');
-}
-
-$('sessions-tbody').addEventListener('click', ev => {
-  const row = ev.target.closest('tr[data-id]');
-  if (row) location.href = `/session/${row.dataset.id}`;
-});
-
-// ---- models bars ----
-
-function renderModels() {
-  const models = S.models?.[prefs.modelsRange] ?? [];
-  const total  = models.reduce((s, m) => s + m.cost_usd, 0) || 1;
-  $('models-bars').innerHTML = models.map(m => {
-    const pct   = (m.cost_usd / total * 100).toFixed(1);
-    const color = modelColor(m.model);
-    return `<div class="model-bar-row">
-      <span class="model-name" title="${m.model}">${shortModel(m.model)}</span>
-      <div class="model-bar-track">
-        <div class="model-bar-fill" style="width:${pct}%;background:${color}"></div>
-      </div>
-      <span class="model-pct">${pct}%</span>
-    </div>`;
-  }).join('');
-}
-
-// ---- projects table ----
-
-function renderProjects() {
-  const projects = S.projects?.[prefs.projectsRange] ?? [];
-  $('projects-tbody').innerHTML = projects.map(p => {
-    const dir = p.cwd?.split('/').pop() || p.cwd || '–';
-    return `<tr>
-      <td title="${p.cwd ?? ''}">${dir}</td>
-      <td>${fmtUSD(p.cost_usd)}</td>
-      <td>${p.sessions}</td>
-      <td>${fmtPct(p.cache_reuse_ratio)}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ---- heatmap ----
-
-function renderHeatmap() {
-  const hm = S.heatmap_14d;
-  if (!hm) return;
-
-  // Hour label row (one blank + 24 hour labels)
-  $('heatmap-hour-labels').innerHTML = '<span></span>' +
-    Array.from({ length: 24 }, (_, h) => {
-      const vis = [0, 4, 8, 12, 16, 20].includes(h) ? '' : 'style="visibility:hidden"';
-      return `<span ${vis}>${String(h).padStart(2, '0')}</span>`;
-    }).join('');
-
-  const maxCost = Math.max(...hm.cells.flat(), 0.0001);
-  const grid = $('heatmap-grid');
-  grid.innerHTML = '';
-
-  hm.dates.forEach((date, di) => {
-    const lbl = document.createElement('div');
-    lbl.className = 'hm-row-label';
-    lbl.textContent = date.slice(5);
-    grid.appendChild(lbl);
-
-    hm.hours.forEach((h, hi) => {
-      const cost = hm.cells[di][hi];
-      const cell = document.createElement('div');
-      cell.className = 'hm-cell';
-      cell.style.background = hmColor(cost / maxCost);
-      if (cost > 0) {
-        cell.setAttribute('data-tip',
-          `${date} ${String(h).padStart(2, '0')}:00 — ${fmtUSD(cost)}`);
-      }
-      grid.appendChild(cell);
-    });
-  });
-}
-
-// ---- live feed ----
-
-function buildFeedItem(t) {
-  const d   = new Date(t.ts);
-  const hms = [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()]
-                .map(n => String(n).padStart(2, '0')).join(':');
-  const li  = document.createElement('li');
-  li.dataset.key = `${t.session_id}|${t.ts}`;
-  li.innerHTML = `<span class="feed-ts">${hms}</span>` +
-    `<span class="feed-model">${shortModel(t.model)}</span>` +
-    `<span class="feed-sess">${t.session_id.slice(0, 8)}</span>` +
-    `<span class="feed-cost">${fmtUSD(t.cost_usd)}</span>` +
-    `<span class="feed-meta">${fmtTok(t.output_tokens)} out ` +
-    `${t.is_sidechain ? '<span class="sidechain-pill">sc</span>' : ''}` +
-    `${t.tool_use_count > 0 ? `<span>${t.tool_use_count}t</span>` : ''}</span>`;
-  return li;
-}
-
-function renderFeed() {
-  const turns = S.recent_turns;
-  const list  = $('live-feed-list');
-
-  if (!turns?.length) {
-    $('feed-idle-msg').classList.add('visible');
-    list.innerHTML = '';
+function _setTileDelta(el, tile, higherGood) {
+  if (!tile) { el.className = 'delta'; el.textContent = ''; return; }
+  const { delta_ratio: dr, baseline_label: lbl } = tile;
+  if (lbl === 'cold') {
+    el.className   = 'cold';
+    el.textContent = '— first day (need 3d for baseline)';
     return;
   }
-  $('feed-idle-msg').classList.remove('visible');
-
-  const items   = turns.filter(t => !prefs.hideSidechain || !t.is_sidechain).slice(0, 20);
-  const liveKeys = new Set(items.map(t => `${t.session_id}|${t.ts}`));
-
-  const existing = new Set();
-  [...list.children].forEach(li => {
-    if (liveKeys.has(li.dataset.key)) existing.add(li.dataset.key);
-    else li.remove();
-  });
-  for (let i = items.length - 1; i >= 0; i--) {
-    const t = items[i];
-    const k = `${t.session_id}|${t.ts}`;
-    if (!existing.has(k)) list.prepend(buildFeedItem(t));
-  }
-
-  // trim to 20
-  while (list.children.length > 20) list.lastElementChild.remove();
+  el.className = 'delta';
+  if (dr == null) { el.textContent = lbl ? `vs ${lbl} median` : ''; return; }
+  const pct = Math.round((dr - 1) * 100);
+  const abs = Math.abs(pct);
+  el.textContent = `${pct >= 0 ? '↑' : '↓'}${abs}% vs ${lbl} median`;
+  if (abs >= 20) el.className = `delta ${(higherGood ? pct > 0 : pct < 0) ? 'good' : 'alarm'}`;
 }
 
-// ---- uPlot chart helper ----
+// ---- anomaly strip ----
+const _anomalyEl    = $('anomaly-strip');
+let   _lastAnomalyKey = null;
 
-function _chart(id, opts, data) {
-  const cont = $(id);
-  if (!cont) return;
-  const { _key: key, ...plotOpts } = opts;
-  const w = cont.offsetWidth || 320;
+function _renderAnomalyStrip(payload) {
+  if (!_anomalyEl) return;
+  const a   = payload.anomaly;
+  const key = a ? `${a.severity}:${a.message}` : null;
+  if (key === _lastAnomalyKey) return;
+  _lastAnomalyKey = key;
+  if (!a) { _anomalyEl.innerHTML = ''; return; }
+  const isRed = a.severity === 'red';
+  const div   = document.createElement('div');
+  div.className = `anomaly${isRed ? ' red' : ''} fade-in`;
+  div.setAttribute('role', 'alert');
+  const glyph = document.createElement('span'); glyph.className = 'glyph'; glyph.textContent = isRed ? '●' : '⚠';
+  const msg   = document.createElement('span'); msg.className   = 'msg';   msg.textContent   = a.message;
+  const arrow = document.createElement('span'); arrow.className = 'arrow'; arrow.textContent = 'inspect →';
+  div.append(glyph, msg, arrow);
+  if (a.drilldown_href) div.addEventListener('click', () => { location.href = a.drilldown_href; });
+  _anomalyEl.replaceChildren(div);
+}
 
-  if (charts[id]) {
-    const canUpdate = charts[id].series.length === data.length && chartMeta[id] === key;
-    if (canUpdate) {
-      try { charts[id].setData(data); return; } catch (_) {}
-    }
-    try { charts[id].destroy(); } catch (_) {}
-    cont.innerHTML = '';
+// ---- filter state ----
+// Each filter holds { mode: 'all' | 'compare' | 'specific', selected: Set<string> }.
+// Converted to an API param string via _filterParam().
+function _newFilterState() { return { mode: 'all', selected: new Set() }; }
+
+function _filterParam(fs) {
+  if (fs.mode === 'specific' && fs.selected.size) return [...fs.selected].join(',');
+  return 'all';
+}
+
+function _filterLabel(fs, items, noun) {
+  if (fs.mode === 'all') return 'all';
+  if (fs.selected.size === 1) {
+    const only = [...fs.selected][0];
+    const hit = items.find(it => it.value === only);
+    return hit ? hit.label : _shortSeriesLabel(only);
   }
+  return `${fs.selected.size} ${noun}`;
+}
 
+function _loadFilter(key) {
   try {
-    charts[id] = new uPlot({ width: w, padding: [4, 4, 0, 0], select: { show: false }, ...plotOpts }, data, cont);
-    chartMeta[id] = key;
-  } catch (e) { console.warn('uPlot', id, e); }
+    const raw = localStorage.getItem(key);
+    if (!raw) return _newFilterState();
+    const p = JSON.parse(raw);
+    // Back-compat: older builds stored mode='compare'; collapse it to 'all'.
+    const mode = (p.mode === 'all' || p.mode === 'specific') ? p.mode : 'all';
+    return { mode, selected: new Set(p.selected ?? []) };
+  } catch { return _newFilterState(); }
 }
 
-// ---- range selectors ----
+function _saveFilter(key, fs) {
+  localStorage.setItem(key, JSON.stringify({ mode: fs.mode, selected: [...fs.selected] }));
+}
 
-function wireRange(selId, onChange) {
-  $(selId)?.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      $(selId).querySelectorAll('button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      onChange(btn.dataset.r ?? btn.dataset.lb ?? btn.dataset.v);
-      window.savePrefs?.();
+// Each panel owns its own project/model filter state.
+const _hProjFs  = _loadFilter('tokenol.filter.hourly.project');
+const _hModelFs = _loadFilter('tokenol.filter.hourly.model');
+const _dProjFs  = _loadFilter('tokenol.filter.daily.project');
+const _dModelFs = _loadFilter('tokenol.filter.daily.model');
+
+// ---- shared chart-data builders ----
+// Produce a chart-data bundle from an array of snapshot points keyed by time.
+function _buildSnapshotData({ points, field, yUnit, timeOf, overlay }) {
+  if (!points.length) return { xs: new Float64Array(0), ySeries: [], labels: [], yUnit };
+  const xs      = new Float64Array(points.map(timeOf));
+  const ySeries = [new Float64Array(points.map(p => p[field] ?? NaN))];
+  const labels  = ['all'];
+  const turnsByX = new Map(points.map((p, i) => [xs[i], p.turns ?? 0]));
+  if (overlay?.points?.length) {
+    const lookup = Object.fromEntries(overlay.points.map(p => [p[overlay.keyField], p.value]));
+    ySeries.push(new Float64Array(points.map(p => lookup[p[overlay.keyField]] ?? NaN)));
+    labels.push(overlay.label);
+  }
+  return { xs, ySeries, labels, yUnit, turnsByX };
+}
+
+function _shortSeriesLabel(lbl) {
+  if (typeof lbl !== 'string') return lbl;
+  if (lbl.startsWith('/'))       return cwdBasename(lbl);
+  if (lbl.startsWith('claude-')) return shortModel(lbl);
+  return lbl;
+}
+
+function _normApiSeries(d, keyOf, tsOf, cmp) {
+  const keys = [...new Set(d.series.flatMap(s => s.points.map(keyOf)))].sort(cmp);
+  const xs = new Float64Array(keys.map(tsOf));
+  const turnsByX = new Map();
+  keys.forEach((k, i) => {
+    const total = d.series.reduce((sum, s) => {
+      const pt = s.points.find(p => keyOf(p) === k);
+      return sum + (pt?.turns ?? 0);
+    }, 0);
+    turnsByX.set(xs[i], total);
+  });
+  return {
+    xs,
+    ySeries: d.series.map(s => {
+      const byK = Object.fromEntries(s.points.map(p => [keyOf(p), p.value]));
+      return new Float64Array(keys.map(k => byK[k] ?? NaN));
+    }),
+    labels:  d.series.map(s => _shortSeriesLabel(s.label)),
+    yUnit:   d.y_unit,
+    turnsByX,
+  };
+}
+
+// Paint a timeline chart into a container, rendering an empty-state placeholder when
+// data is absent. Shared by both hourly and daily panels.
+function _paintTimeline(containerId, data, emptyText, drawOpts) {
+  const cont = $(containerId);
+  if (!cont) return;
+  if (!data.xs.length) {
+    if (cont._uplot) { cont._uplot.destroy(); cont._uplot = null; }
+    cont.innerHTML = `<div class="tl-insufficient">${emptyText}</div>`;
+    return;
+  }
+  drawChart(cont, { ...data, ...drawOpts });
+}
+
+// Guarded async fetcher: skips when already in-flight, paints on 2xx.
+function _makeFetcher({ urlFn, xform, paint }) {
+  let busy = false;
+  return async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const res = await fetch(urlFn());
+      if (res.ok) paint(xform(await res.json()));
+    } finally { busy = false; }
+  };
+}
+
+// ---- hourly timeline ----
+let _hMetric    = 'hit_pct';
+let _hDay       = null;   // null = today
+let _hEarliest  = null;
+
+function _snapshotToChartData(ht) {
+  return _buildSnapshotData({
+    points: ht.series,
+    field:  'hit_pct',
+    yUnit:  'percent',
+    timeOf: p => new Date(p.hour).getTime() / 1000,
+  });
+}
+
+function _apiToChartData(d) {
+  const chart = _normApiSeries(d, p => p.hour, iso => new Date(iso).getTime() / 1000, (a, b) => a < b ? -1 : a > b ? 1 : 0);
+  chart._activeProjects = d.active_projects ?? [];
+  chart._activeModels   = d.active_models   ?? [];
+  return chart;
+}
+
+function _renderHourly(payload) {
+  const ht = payload.hourly_today;
+  if (!ht) return;
+  if (_hEarliest === null) _hEarliest = ht.earliest_available;
+  const canUseSnapshot = _hMetric === 'hit_pct' && _hDay === null
+    && _hProjFs.mode === 'all' && _hModelFs.mode === 'all';
+  if (canUseSnapshot) {
+    // Snapshot is today-scoped → its active lists are today's cwds/models.
+    _hActiveProjects = ht.active_projects ?? [];
+    _hActiveModels   = ht.active_models   ?? [];
+    _paintHourly(_snapshotToChartData(ht));
+  } else {
+    _fetchHourly();
+  }
+}
+
+const _fetchHourly = _makeFetcher({
+  urlFn: () => {
+    const day = _hDay ?? _toLocalDate(new Date());
+    const p = new URLSearchParams({
+      metric: _hMetric,
+      project: _filterParam(_hProjFs),
+      model:   _filterParam(_hModelFs),
+    });
+    return `/api/hourly/${day}?${p}`;
+  },
+  xform: _apiToChartData,
+  paint: data => {
+    _hActiveProjects = data._activeProjects ?? _hActiveProjects;
+    _hActiveModels   = data._activeModels   ?? _hActiveModels;
+    _paintHourly(data);
+  },
+});
+
+function _paintHourly(data) {
+  _paintTimeline('hourly-chart', data, 'No data for this selection.', {
+    stepped: true,
+    onPointClick: ts => {
+      const d = new Date(ts * 1000);
+      location.href = `/day/${_toLocalDate(d)}#hour=${d.getHours()}`;
+    },
+  });
+}
+
+// ---- dropdown ----
+let _activeDropdown = null;
+
+function _closeDropdown() {
+  if (_activeDropdown) { _activeDropdown.remove(); _activeDropdown = null; }
+}
+
+document.addEventListener('click', e => {
+  if (_activeDropdown && !_activeDropdown.contains(e.target)) _closeDropdown();
+});
+
+function _pickDropdown(anchor, items, onPick) {
+  _closeDropdown();
+  const rect = anchor.getBoundingClientRect();
+  const dd   = document.createElement('div');
+  dd.className = 'tl-dropdown';
+  dd.style.top  = `${rect.bottom + window.scrollY + 4}px`;
+  dd.style.left = `${rect.left  + window.scrollX}px`;
+  items.forEach(({ label, value }) => {
+    const li = document.createElement('div');
+    li.className = 'tl-dd-item';
+    li.textContent = label;
+    li.addEventListener('click', () => { _closeDropdown(); onPick(value, label); });
+    dd.appendChild(li);
+  });
+  document.body.appendChild(dd);
+  _activeDropdown = dd;
+}
+
+// Multi-select dropdown: 'all' radio + individual checkbox list. Commits via onChange.
+function _pickMultiDropdown(anchor, { mode, selected, items, noun, onChange }) {
+  _closeDropdown();
+  const rect = anchor.getBoundingClientRect();
+  const dd   = document.createElement('div');
+  dd.className = 'tl-dropdown tl-dropdown-multi';
+  dd.style.top  = `${rect.bottom + window.scrollY + 4}px`;
+  dd.style.left = `${rect.left  + window.scrollX}px`;
+
+  const emit = () => onChange({ mode, selected: new Set(selected) });
+
+  // 'all' radio resets everything.
+  const allRow = document.createElement('label');
+  allRow.className = 'tl-dd-mode';
+  allRow.innerHTML = `<input type="radio" name="ddmode"${mode === 'all' ? ' checked' : ''}><span>all</span>`;
+  allRow.querySelector('input').addEventListener('change', () => {
+    mode = 'all';
+    selected.clear();
+    dd.querySelectorAll('.tl-dd-check input').forEach(cb => { cb.checked = false; });
+    emit();
+  });
+  dd.appendChild(allRow);
+
+  // Ensure currently-selected values appear as togglable rows even if they're
+  // no longer present in the 30d items list.
+  const itemValues = new Set(items.map(it => it.value));
+  const stragglers = [...selected]
+    .filter(v => !itemValues.has(v))
+    .map(v => ({ label: _shortSeriesLabel(v), value: v }));
+  const allItems = [...stragglers, ...items];
+
+  const sep = document.createElement('div');
+  sep.className = 'tl-dd-sep';
+  sep.textContent = `pick specific ${noun}`;
+  dd.appendChild(sep);
+
+  if (!allItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'tl-dd-empty';
+    empty.textContent = `no ${noun} active in this view`;
+    dd.appendChild(empty);
+    document.body.appendChild(dd);
+    _activeDropdown = dd;
+    return;
+  }
+
+  const listEl = document.createElement('div');
+  listEl.className = 'tl-dd-list';
+  allItems.forEach(({ label, value }) => {
+    const row = document.createElement('label');
+    row.className = 'tl-dd-check';
+    row.innerHTML = `<input type="checkbox"${selected.has(value) ? ' checked' : ''}><span>${esc(label)}</span>`;
+    row.querySelector('input').addEventListener('change', e => {
+      if (e.target.checked) selected.add(value);
+      else                  selected.delete(value);
+      if (selected.size > 0) {
+        mode = 'specific';
+        allRow.querySelector('input').checked = false;
+      } else {
+        mode = 'all';
+        allRow.querySelector('input').checked = true;
+      }
+      emit();
+    });
+    listEl.appendChild(row);
+  });
+  dd.appendChild(listEl);
+
+  document.body.appendChild(dd);
+  _activeDropdown = dd;
+}
+
+function _dayItems() {
+  const items = [{ label: 'today', value: null }];
+  if (_hEarliest) {
+    const d = new Date();
+    for (let i = 1; i < 30; i++) {
+      d.setDate(d.getDate() - 1);
+      const iso = _toLocalDate(d);
+      if (iso < _hEarliest) break;
+      items.push({ label: iso, value: iso });
+    }
+  }
+  return items;
+}
+
+// Bind a single button to a filter state. One button → one state → one fetch.
+function _wireMultiFilter(btn, { storageKey, noun, state, getItems, fetchFn }) {
+  if (!btn) return;
+  const refresh = () => { btn.textContent = _filterLabel(state, getItems(), noun) + ' ▾'; };
+  refresh();
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    _pickMultiDropdown(btn, {
+      mode: state.mode,
+      selected: state.selected,
+      items: getItems(),
+      noun,
+      onChange: next => {
+        state.mode = next.mode;
+        state.selected = next.selected;
+        _saveFilter(storageKey, state);
+        refresh();
+        fetchFn();
+      },
     });
   });
 }
 
-function spmKey(r) { return r === '1' ? '24h' : r === '7' ? '7d' : '14d'; }
+// Per-panel active lists. Each panel keeps its own list matching the panel's
+// current view (hourly = today's turns; daily = range's turns). Updated every
+// time the panel paints (from snapshot or from a fetch response).
+let _hActiveProjects = [];
+let _hActiveModels   = [];
+let _dActiveProjects = [];
+let _dActiveModels   = [];
 
-wireRange('burn-lookback', lb => {
-  prefs.burnLookback = lb;
-  renderGauge();
-});
-wireRange('sessions-range-sel', r => {
-  prefs.sessionsRange = spmKey(r);
-  renderSessions();
-});
-wireRange('models-range-sel', r => {
-  prefs.modelsRange = spmKey(r);
-  renderModels();
-});
-wireRange('projects-range-sel', r => {
-  prefs.projectsRange = spmKey(r);
-  renderProjects();
-});
-wireRange('daily-range-sel', r => {
-  prefs.dailyRange = parseInt(r);
-  renderDailyArea();
+const _hProjectItems = () => _hActiveProjects;
+const _hModelItems   = () => _hActiveModels;
+const _dProjectItems = () => _dActiveProjects;
+const _dModelItems   = () => _dActiveModels;
+
+function _initTzLabel() {
+  const tz = new Date().toLocaleTimeString(undefined, { timeZoneName: 'short' }).split(' ').pop();
+  document.querySelectorAll('.tl-y-lbl').forEach(el => {
+    if (tz && !el.textContent.includes(tz)) el.textContent = `${el.textContent} · times ${tz}`;
+  });
+}
+
+function _wireHourly() {
+  _wireRange('hourly-metric-pills', m => { _hMetric = m; _fetchHourly(); });
+
+  const dayBtn = $('hourly-day-picker');
+  dayBtn?.addEventListener('click', e => {
+    e.stopPropagation();
+    _pickDropdown(dayBtn, _dayItems(), v => {
+      _hDay = v;
+      dayBtn.textContent = v ?? 'today ▾';
+      _fetchHourly();
+    });
+  });
+
+  _wireMultiFilter($('hourly-project-filter'), {
+    storageKey: 'tokenol.filter.hourly.project', noun: 'projects',
+    state: _hProjFs, getItems: _hProjectItems, fetchFn: _fetchHourly,
+  });
+  _wireMultiFilter($('hourly-model-filter'), {
+    storageKey: 'tokenol.filter.hourly.model', noun: 'models',
+    state: _hModelFs, getItems: _hModelItems, fetchFn: _fetchHourly,
+  });
+}
+
+// ---- daily timeline ----
+const _DAILY_META = {
+  hit_pct:    { field: 'hit_pct',       yUnit: 'percent' },
+  cost_per_kw:{ field: 'cost_per_kw',   yUnit: 'usd' },
+  ctx_ratio:  { field: 'ctx_ratio',     yUnit: 'ratio' },
+  cache_reuse:{ field: 'cache_reuse',   yUnit: 'ratio' },
+  output:     { field: 'output_tokens', yUnit: 'tokens' },
+  cost:       { field: 'cost_usd',      yUnit: 'usd' },
+};
+
+let _dMetric   = 'hit_pct';
+let _dRange    = '30d';
+let _dEarliest = null;
+
+const _xFmtDate = v => { const d = new Date(v * 1000); return `${d.getMonth()+1}/${d.getDate()}`; };
+
+function _snapshotToDailyData(daily, metric) {
+  const { field, yUnit } = _DAILY_META[metric] ?? { field: metric, yUnit: 'usd' };
+  return _buildSnapshotData({
+    points: daily.series,
+    field,
+    yUnit,
+    timeOf: p => new Date(p.date + 'T00:00:00').getTime() / 1000,
+    overlay: metric === 'hit_pct' && daily.moving_avg_7d?.length
+      ? { points: daily.moving_avg_7d, keyField: 'date', label: '7d avg' }
+      : null,
+  });
+}
+
+function _apiToDailyChartData(d) {
+  const chart = _normApiSeries(d, p => p.date, dt => new Date(dt + 'T00:00:00').getTime() / 1000);
+  chart._activeProjects = d.active_projects ?? [];
+  chart._activeModels   = d.active_models   ?? [];
+  return chart;
+}
+
+const _RANGE_DISABLE_DAYS = { '30d': 7, '90d': 30 };
+
+function _updateDailyRangePills() {
+  const group = $('daily-range-pills');
+  if (!group || !_dEarliest) return;
+  const daysAvail = Math.floor((Date.now() - new Date(_dEarliest)) / 86_400_000);
+  group.querySelectorAll('[data-range]').forEach(btn => {
+    const threshold = _RANGE_DISABLE_DAYS[btn.dataset.range];
+    btn.classList.toggle('disabled', threshold != null && daysAvail <= threshold);
+  });
+}
+
+function _renderDaily(payload) {
+  const daily = payload.daily;
+  if (!daily) return;
+  if (daily.earliest_available && daily.earliest_available !== _dEarliest) {
+    _dEarliest = daily.earliest_available;
+    _updateDailyRangePills();
+  }
+  const canUseSnapshot = _dMetric === 'hit_pct' && _dRange === '30d'
+    && _dProjFs.mode === 'all' && _dModelFs.mode === 'all';
+  if (canUseSnapshot) {
+    // Snapshot daily is 30-day-scoped → its active lists are last-30d cwds/models.
+    _dActiveProjects = daily.active_projects ?? [];
+    _dActiveModels   = daily.active_models   ?? [];
+    _paintDaily(_snapshotToDailyData(daily, _dMetric));
+  } else {
+    _fetchDaily();
+  }
+}
+
+const _fetchDaily = _makeFetcher({
+  urlFn: () => {
+    const p = new URLSearchParams({
+      range: _dRange, metric: _dMetric,
+      project: _filterParam(_dProjFs),
+      model:   _filterParam(_dModelFs),
+    });
+    return `/api/daily?${p}`;
+  },
+  xform: _apiToDailyChartData,
+  paint: data => {
+    _dActiveProjects = data._activeProjects ?? _dActiveProjects;
+    _dActiveModels   = data._activeModels   ?? _dActiveModels;
+    _paintDaily(data);
+  },
 });
 
-// ---- wall clock + stale-today detector ----
+function _paintDaily(data) {
+  _paintTimeline('daily-chart', data, 'No history yet — check back after a few days.', {
+    xFmt: _xFmtDate,
+    stepped: data.labels.map(lbl => lbl !== '7d avg'),
+    dashes: [null, [4, 4]],
+    onPointClick: ts => { location.href = `/day/${_toLocalDate(new Date(ts * 1000))}`; },
+  });
+}
 
-function updateClock() {
-  $('wall-clock').textContent = new Date().toLocaleTimeString(undefined, {
+function _wireDaily() {
+  _wireRange('daily-range-pills',  r => { _dRange  = r; _fetchDaily(); });
+  _wireRange('daily-metric-pills', m => { _dMetric = m; _fetchDaily(); });
+
+  _wireMultiFilter($('daily-project-filter'), {
+    storageKey: 'tokenol.filter.daily.project', noun: 'projects',
+    state: _dProjFs, getItems: _dProjectItems, fetchFn: _fetchDaily,
+  });
+  _wireMultiFilter($('daily-model-filter'), {
+    storageKey: 'tokenol.filter.daily.model', noun: 'models',
+    state: _dModelFs, getItems: _dModelItems, fetchFn: _fetchDaily,
+  });
+}
+
+// ---- period pills ----
+function _wirePeriodPills() {
+  const group = $('period-pills');
+  if (!group) return;
+  const current = _getPeriod();
+  group.querySelectorAll('[data-period]').forEach(el => {
+    el.classList.toggle('on', el.dataset.period === current);
+    el.addEventListener('click', () => {
+      const p = el.dataset.period;
+      if (p === _getPeriod()) return;
+      _setPeriod(p);
+      group.querySelectorAll('[data-period]').forEach(b => b.classList.toggle('on', b.dataset.period === p));
+      S = {};
+      _render();
+      _fetchSnapshot(p);
+      _connect(p);
+    });
+  });
+}
+
+// ---- wall clock ----
+const _clockEl = $('wall-clock');
+function _updateClock() {
+  if (_clockEl) _clockEl.textContent = new Date().toLocaleTimeString(undefined, {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false, timeZoneName: 'short',
   });
-  if (!_staleToday && _todayTimestamp && Date.now() - _todayTimestamp > 300_000) {
-    _staleToday = true;
-    $('panel-today')?.classList.add('stale');
-  }
 }
-updateClock();
-setInterval(updateClock, 1000);
+_updateClock();
+setInterval(_updateClock, 1000);
 
-// ---- title bar ----
-
-function updateTitle() {
-  const win  = S.active_window;
-  const ref  = S.config?.reference_usd ?? 50;
-  const rate = win?.[`burn_rate_usd_per_hour_${prefs.burnLookback}`] ?? 0;
-  if (win?.over_reference)   document.title = `tokenol — ⚠ over $${ref}`;
-  else if (rate > 0.001)     document.title = `tokenol — ${fmtRate(rate)}`;
-  else                       document.title = 'tokenol — live';
-}
-
-// ---- idle / dead-feed detection ----
+// ---- idle detection ----
+let _idleTimer = null;
+let _isIdle    = false;
 
 function _setIdle(idle) {
   if (_isIdle === idle) return;
   _isIdle = idle;
-  $('panel-feed')?.classList.toggle('feed-idle', idle);
-  if (idle) {
-    $('feed-idle-msg').classList.add('visible');
-    $('live-feed-list').innerHTML = '';
-    document.title = 'tokenol — IDLE';
-  } else {
-    updateTitle();
-  }
+  if (!idle) document.title = 'tokenol — live';
 }
 
-function resetIdleTimer() {
+function _resetIdleTimer() {
   clearTimeout(_idleTimer);
   _setIdle(false);
   _idleTimer = setTimeout(() => _setIdle(true), 30_000);
 }
 
 // ---- keyboard shortcuts ----
+let _kbLastKey = null, _kbLastKeyTimer = null;
+const _modalOpen  = id => { const el = $(id); if (el) el.checked = true; };
+const _modalClose = id => { const el = $(id); if (el) el.checked = false; };
+const _anyModalOpen = () => !!document.querySelector('.modal-toggle:checked');
+const _closeAllModals = () => document.querySelectorAll('.modal-toggle').forEach(t => { t.checked = false; });
 
 document.addEventListener('keydown', e => {
-  if (e.target.matches('input,textarea')) return;
-  if (e.key === 'g') $('panel-gauge')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (e.key === 'l') $('panel-feed')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (e.key === '/') { e.preventDefault(); $('sessions-table')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  const tag = e.target.tagName;
+  const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'LABEL';
+
+  if (e.key === 'Escape') {
+    if (_anyModalOpen()) { _closeAllModals(); return; }
+    if (!inInput && location.pathname !== '/') history.back();
+    return;
+  }
+
+  if (!inInput) {
+    if (e.key === '?') { _modalOpen('m-gl'); return; }
+    if (e.key === '/') { e.preventDefault(); _modalOpen('m-search'); return; }
+    if (e.key === ',') { _modalOpen('m-set'); return; }
+
+    clearTimeout(_kbLastKeyTimer);
+    if (_kbLastKey === 'g' && e.key === 't') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      _kbLastKey = null; return;
+    }
+    _kbLastKey = e.key;
+    _kbLastKeyTimer = setTimeout(() => { _kbLastKey = null; }, 800);
+  }
+
+  // Table row keyboard nav
+  const focused = document.activeElement;
+  if (focused?.matches('tr[tabindex]')) {
+    const rows = [...focused.closest('tbody').querySelectorAll('tr[tabindex]')];
+    const idx  = rows.indexOf(focused);
+    if (e.key === 'ArrowDown')  { e.preventDefault(); rows[Math.min(idx + 1, rows.length - 1)]?.focus(); return; }
+    if (e.key === 'ArrowUp')    { e.preventDefault(); rows[Math.max(idx - 1, 0)]?.focus(); return; }
+    if (e.key === 'Home')       { e.preventDefault(); rows[0]?.focus(); return; }
+    if (e.key === 'End')        { e.preventDefault(); rows[rows.length - 1]?.focus(); return; }
+    if (e.key === 'Enter') {
+      const href = focused.dataset.href ?? (focused.dataset.model ? `/model/${encodeURIComponent(focused.dataset.model)}` : null);
+      if (href) location.href = href;
+    }
+  }
 });
 
-// ---- SSE connection ----
+// ---- pill / range selector helper ----
+const _PILL_SEL = '[data-range],[data-metric],[data-window]';
 
-const dot = $('conn-dot');
-let es, _reconnectDelay = 1000;
-
-function connect() {
-  es = new EventSource('/api/stream');
-
-  es.onopen = () => { dot.className = 'pulse'; _reconnectDelay = 1000; resetIdleTimer(); };
-
-  es.onmessage = ev => {
-    try { mergeState(JSON.parse(ev.data)); }
-    catch (e) { console.error('SSE parse', e); }
-  };
-
-  es.onerror = () => {
-    dot.className = 'alarm';
-    es.close();
-    setTimeout(connect, _reconnectDelay);
-    _reconnectDelay = Math.min(_reconnectDelay * 2, 30000);
-  };
+function _wireRange(groupId, onChange) {
+  const group = $(groupId);
+  if (!group) return;
+  group.querySelectorAll(_PILL_SEL).forEach(btn => {
+    btn.addEventListener('click', () => {
+      group.querySelectorAll(_PILL_SEL).forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      onChange(btn.dataset.range ?? btn.dataset.metric ?? btn.dataset.window);
+    });
+  });
 }
 
-connect();
+// ---- models panel ----
+let _mRange    = 'today';
+let _mFetching = false;
+
+const _FAMILY_COLOR = { opus: 'var(--cool)', sonnet: 'var(--amber)', haiku: 'var(--green)' };
+const _familyColor  = n => _FAMILY_COLOR[Object.keys(_FAMILY_COLOR).find(k => n.includes(k))] ?? 'var(--mute)';
+const _metricCls    = (field, v) => { const c = _TILE_CFG[field]; return c ? c.colour(v, _tileGoals[field] ?? {}) : ''; };
+
+function _shareBarTd(share) {
+  if (share == null) return '<td>–</td>';
+  const pct = Math.round(share * 100);
+  return `<td><div class="inline-bar-wrap"><div class="inline-bar-track"><div class="inline-bar-fill bar-good" style="width:${pct}%"></div></div><span>${pct}%</span></div></td>`;
+}
+
+function _paintModels(data) {
+  const tbody = $('models-tbody');
+  const emptyEl = $('models-empty');
+  const sumEl   = $('models-summary');
+  if (!tbody) return;
+  const { rows = [], aggregate = {} } = data;
+  if (sumEl) {
+    const parts = [];
+    if (aggregate.active_count != null) parts.push(`<span class="k">models</span> <span class="v">${aggregate.active_count}</span>`);
+    if (aggregate.dominant) {
+      const pct = aggregate.dominant_share != null ? ` ${Math.round(aggregate.dominant_share * 100)}%` : '';
+      parts.push(`<span class="k">dominant</span> <span class="v">${esc(aggregate.dominant)}${pct}</span>`);
+    }
+    if (aggregate.cost_split) {
+      const segs = Object.entries(aggregate.cost_split).map(([n, s]) =>
+        `<span style="display:inline-block;width:${(s*100).toFixed(1)}%;height:8px;background:${_familyColor(n)};border-radius:1px" title="${esc(n)}: ${Math.round(s*100)}%"></span>`
+      ).join('');
+      if (segs) parts.push(`<span class="k">split</span> <span class="cost-split-bar">${segs}</span>`);
+    }
+    sumEl.innerHTML = parts.join('<span class="sep">·</span>');
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '';
+    emptyEl?.classList.remove('hidden');
+    return;
+  }
+  emptyEl?.classList.add('hidden');
+  tbody.innerHTML = rows.map(r => {
+    const win      = r.context_window_k != null ? `<span class="mute"> ${r.context_window_k}k</span>` : '';
+    const toolTd   = r.tool_error_rate
+      ? `<td class="num ${r.tool_error_rate >= 0.25 ? 'alarm' : 'amber'}">${(r.tool_error_rate*100).toFixed(1)}%</td>`
+      : '<td class="mute">—</td>';
+    return `<tr data-model="${esc(r.model)}" tabindex="0">
+      <td>${esc(r.short_name)}${win}</td>
+      <td class="num">${r.turns}</td>
+      <td class="num">${fmtTok(r.output_tokens)}</td>
+      <td class="num">${fmtUSD(r.cost_usd)}</td>
+      ${_shareBarTd(r.cost_share)}
+      <td class="num ${_metricCls('cost_per_kw', r.cost_per_kw)}">${r.cost_per_kw != null ? fmtUSD(r.cost_per_kw) : '–'}</td>
+      <td class="num ${_metricCls('ctx_ratio',   r.ctx_ratio)}">${r.ctx_ratio   != null ? fmtRatio(r.ctx_ratio) : '–'}</td>
+      <td class="num ${_metricCls('cache_reuse', r.cache_reuse)}">${r.cache_reuse != null ? fmtRatio(r.cache_reuse) : '–'}</td>
+      <td class="num ${_metricCls('hit_pct',     r.hit_pct)}">${r.hit_pct != null ? r.hit_pct.toFixed(1) + '%' : '–'}</td>
+      ${toolTd}
+    </tr>`;
+  }).join('');
+  tbody.querySelectorAll('tr[data-model]').forEach(row =>
+    row.addEventListener('click', () => { location.href = `/model/${encodeURIComponent(row.dataset.model)}`; })
+  );
+}
+
+function _renderModels(payload) {
+  const models = payload.models;
+  if (!models || _mRange !== 'today') return;
+  _paintModels(models);
+}
+
+async function _fetchModels() {
+  if (_mFetching) return;
+  _mFetching = true;
+  try {
+    const res = await fetch(`/api/models?range=${_mRange}`);
+    if (res.ok) _paintModels(await res.json());
+  } finally { _mFetching = false; }
+}
+
+function _wireModels() {
+  _wireRange('models-range-pills', r => { _mRange = r; _fetchModels(); });
+}
+
+// ---- recent activity panel ----
+let _raWindow   = '60m';
+let _raFetching = false;
+let _raData     = null;
+let _raSortCol  = null;
+let _raSortDir  = -1;  // -1 = desc (most recent first by default)
+
+function _paintRecent(data) {
+  _raData = data;
+  _drawRecentTable();
+}
+
+function _drawRecentTable() {
+  if (!_raData) return;
+  const { rows = [], aggregate = {} } = _raData;
+  const sumEl   = $('recent-summary');
+  const tbody   = $('recent-tbody');
+  const emptyEl = $('recent-empty');
+  if (!tbody) return;
+
+  if (sumEl) {
+    const parts = [];
+    if (aggregate.projects   != null) parts.push(`<span class="k">projects</span> <span class="v">${aggregate.projects}</span>`);
+    if (aggregate.turns      != null) parts.push(`<span class="k">turns</span> <span class="v">${aggregate.turns}</span>`);
+    if (aggregate.cost       != null) parts.push(`<span class="k">cost</span> <span class="v">${fmtUSD(aggregate.cost)}</span>`);
+    if (aggregate.cost_per_kw != null) parts.push(`<span class="k">$/kW</span> <span class="v ${_metricCls('cost_per_kw', aggregate.cost_per_kw)}">${fmtUSD(aggregate.cost_per_kw)}</span>`);
+    if (aggregate.hit_pct    != null) parts.push(`<span class="k">hit%</span> <span class="v ${_metricCls('hit_pct', aggregate.hit_pct)}">${aggregate.hit_pct.toFixed(1)}%</span>`);
+    if (aggregate.output     != null) parts.push(`<span class="k">output</span> <span class="v">${fmtTok(aggregate.output)}</span>`);
+    if (aggregate.model_mix) {
+      const top = Object.entries(aggregate.model_mix).sort((a, b) => b[1] - a[1])[0];
+      if (top) parts.push(`<span class="k">model</span> <span class="v">${esc(top[0])} ${Math.round(top[1] * 100)}%</span>`);
+    }
+    sumEl.innerHTML = parts.join('<span class="sep">·</span>');
+  }
+
+  // Sort
+  const sorted = [...rows];
+  if (_raSortCol) {
+    sorted.sort((a, b) => {
+      const va = a[_raSortCol] ?? (_raSortDir > 0 ? -Infinity : Infinity);
+      const vb = b[_raSortCol] ?? (_raSortDir > 0 ? -Infinity : Infinity);
+      return va < vb ? -_raSortDir : va > vb ? _raSortDir : 0;
+    });
+  }
+
+  // Update sort indicators
+  const tbl = $('recent-tbl');
+  tbl?.querySelectorAll('th[data-sort]').forEach(th => {
+    th.classList.toggle('sort-asc',  th.dataset.sort === _raSortCol && _raSortDir > 0);
+    th.classList.toggle('sort-desc', th.dataset.sort === _raSortCol && _raSortDir < 0);
+  });
+
+  if (!sorted.length) {
+    tbody.innerHTML = '';
+    emptyEl?.classList.remove('hidden');
+    return;
+  }
+  emptyEl?.classList.add('hidden');
+
+  tbody.innerHTML = sorted.map(r => {
+    const ctxPct = r.ctx_used != null ? Math.round(r.ctx_used * 100) : null;
+    const ctxCls = ctxPct != null ? (ctxPct >= 85 ? 'alarm' : ctxPct >= 70 ? 'amber' : '') : '';
+    const sessLink = r.latest_session_id
+      ? `<td><a href="/session/${r.latest_session_id}" class="ext-link" title="Latest session" tabindex="-1">↗</a></td>`
+      : '<td></td>';
+    return `<tr data-href="/project/${r.cwd_b64}" tabindex="0" title="${esc(r.cwd ?? '')}">
+      <td>${cwdBasename(r.cwd)}</td>
+      <td>${esc(r.model_primary)}</td>
+      <td>${fmtRelTime(r.last_turn_at)}</td>
+      <td class="num">${r.turns}</td>
+      <td class="num">${fmtTok(r.output)}</td>
+      <td class="num ${ctxCls}">${ctxPct != null ? ctxPct + '%' : '–'}</td>
+      <td class="num ${_metricCls('cost_per_kw', r.cost_per_kw)}">${r.cost_per_kw != null ? fmtUSD(r.cost_per_kw) : '–'}</td>
+      <td class="num ${_metricCls('ctx_ratio',   r.ctx_ratio)}">${r.ctx_ratio   != null ? fmtRatio(r.ctx_ratio) : '–'}</td>
+      <td class="num ${_metricCls('cache_reuse', r.cache_reuse)}">${r.cache_reuse != null ? fmtRatio(r.cache_reuse) : '–'}</td>
+      <td class="num ${_metricCls('hit_pct',     r.hit_pct)}">${r.hit_pct != null ? r.hit_pct.toFixed(1) + '%' : '–'}</td>
+      <td>${verdictPill(r.verdict)}</td>
+      ${sessLink}
+    </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('tr[data-href]').forEach(row =>
+    row.addEventListener('click', e => {
+      if (e.target.closest('a')) return;
+      location.href = row.dataset.href;
+    })
+  );
+}
+
+function _renderRecent(payload) {
+  const ra = payload.recent_activity;
+  if (!ra || _raWindow !== '60m') return;
+  _paintRecent(ra);
+}
+
+async function _fetchRecent() {
+  if (_raFetching) return;
+  _raFetching = true;
+  try {
+    const res = await fetch(`/api/recent?window=${_raWindow}`);
+    if (res.ok) _paintRecent(await res.json());
+  } finally { _raFetching = false; }
+}
+
+function _wireRecent() {
+  _wireRange('recent-window-pills', w => { _raWindow = w; _fetchRecent(); });
+
+  $('recent-expand-link')?.addEventListener('click', () => {
+    _raWindow = '24h';
+    const group = $('recent-window-pills');
+    group?.querySelectorAll(_PILL_SEL).forEach(b => b.classList.toggle('on', b.dataset.window === '24h'));
+    _fetchRecent();
+  });
+
+  $('recent-tbl')?.querySelectorAll('th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      _raSortDir = _raSortCol === col ? -_raSortDir : -1;
+      _raSortCol = col;
+      _drawRecentTable();
+    });
+  });
+}
+
+// ---- settings ----
+const _THRESH_INPUTS = {
+  hit_rate_good_pct: 'pref-hit-good',
+  hit_rate_red_pct:  'pref-hit-red',
+  cost_per_kw_good:  'pref-cost-good',
+  cost_per_kw_red:   'pref-cost-red',
+  ctx_ratio_red:     'pref-ctx-red',
+  cache_reuse_good:  'pref-cache-good',
+  cache_reuse_red:   'pref-cache-red',
+};
+
+const _ASSUMPTION_LABELS = {
+  window_boundary_heuristic: 'Window boundary heuristic',
+  unknown_model_fallback:    'Unknown model fallback',
+  dedup_passthrough:         'Dedup passthrough',
+  interrupted_turn_skipped:  'Interrupted turn skipped',
+  gemini_unpriced:           'Gemini unpriced',
+};
+
+function _loadSettings(payload) {
+  if (payload.config?.tick_seconds) {
+    const ticks = $('pref-tick-pills');
+    ticks?.querySelectorAll('[data-tick]').forEach(btn =>
+      btn.classList.toggle('on', +btn.dataset.tick === payload.config.tick_seconds)
+    );
+  }
+  if (payload.thresholds) {
+    for (const [key, id] of Object.entries(_THRESH_INPUTS)) {
+      const el = $(id);
+      if (el) el.value = payload.thresholds[key] ?? '';
+    }
+  }
+  if (payload.assumptions_summary) {
+    const el = $('assumptions-summary');
+    if (el) {
+      const rows = Object.entries(payload.assumptions_summary)
+        .filter(([, v]) => v > 0)
+        .map(([k, v]) => `<div class="assumption-row"><span>${_ASSUMPTION_LABELS[k] ?? k}</span><span class="num">${v}</span></div>`)
+        .join('');
+      el.innerHTML = rows || '<div class="mute">None fired this session.</div>';
+    }
+  }
+}
+
+async function _postPrefs(body) {
+  const res = await fetch('/api/prefs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.ok ? res.json() : null;
+}
+
+function _wireSettings() {
+  $('pref-tick-pills')?.querySelectorAll('[data-tick]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      $('pref-tick-pills').querySelectorAll('[data-tick]').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      await _postPrefs({ tick_seconds: +btn.dataset.tick });
+    });
+  });
+
+  $('pref-save-btn')?.addEventListener('click', async () => {
+    const thresholds = {};
+    for (const [key, id] of Object.entries(_THRESH_INPUTS)) {
+      const el = $(id);
+      if (el) thresholds[key] = +el.value;
+    }
+    const prefs = await _postPrefs({ thresholds });
+    if (prefs?.thresholds) {
+      for (const [key, id] of Object.entries(_THRESH_INPUTS)) {
+        const el = $(id);
+        if (el) el.value = prefs.thresholds[key] ?? '';
+      }
+    }
+  });
+
+  $('pref-reset-btn')?.addEventListener('click', async () => {
+    const prefs = await _postPrefs({ thresholds: 'reset' });
+    if (prefs?.thresholds) {
+      for (const [key, id] of Object.entries(_THRESH_INPUTS)) {
+        const el = $(id);
+        if (el) el.value = prefs.thresholds[key] ?? '';
+      }
+    }
+  });
+}
+
+// ---- find / search ----
+let _searchTimer = null;
+
+function _wireFind() {
+  const input   = $('search-input');
+  const results = $('search-results');
+  if (!input || !results) return;
+
+  $('m-search')?.addEventListener('change', e => { if (e.target.checked) input.focus(); });
+
+  const _getFocused = () => results.querySelector('.search-result-item.focused');
+  const _getItems   = () => [...results.querySelectorAll('.search-result-item')];
+
+  input.addEventListener('input', () => {
+    clearTimeout(_searchTimer);
+    const q = input.value.trim();
+    if (!q) { results.innerHTML = ''; return; }
+    _searchTimer = setTimeout(async () => {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      if (!res.ok) return;
+      const { hits } = await res.json();
+      results.innerHTML = hits.length
+        ? hits.map((h, i) => `<div class="search-result-item${i === 0 ? ' focused' : ''}" data-href="${esc(h.href)}">
+            <span class="search-result-kind">${esc(h.kind)}</span>
+            <span class="search-result-label">${esc(h.label)}</span>
+          </div>`).join('')
+        : '<div class="mute" style="padding:8px">No results</div>';
+      results.querySelectorAll('.search-result-item').forEach(el =>
+        el.addEventListener('click', () => { location.href = el.dataset.href; })
+      );
+    }, 250);
+  });
+
+  input.addEventListener('keydown', e => {
+    const items = _getItems();
+    if (!items.length) return;
+    const focused = _getFocused();
+    const idx = focused ? items.indexOf(focused) : -1;
+    if (e.key === 'ArrowDown')  { e.preventDefault(); focused?.classList.remove('focused'); items[Math.min(idx + 1, items.length - 1)]?.classList.add('focused'); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); focused?.classList.remove('focused'); items[Math.max(idx - 1, 0)]?.classList.add('focused'); }
+    else if (e.key === 'Enter' && focused) { location.href = focused.dataset.href; }
+  });
+}
+
+// ---- boot ----
+_initGlossary();
+_initTzLabel();
+_wireModalBackdrops();
+_wirePeriodPills();
+_wireHourly();
+_wireDaily();
+_wireModels();
+_wireRecent();
+_wireSettings();
+_wireFind();
+const _p0 = _getPeriod();
+_fetchSnapshot(_p0);
+_connect(_p0);

@@ -325,23 +325,41 @@ def _build_topbar(today_turns: list[Turn], today_date: date, now: datetime) -> d
     }
 
 
-def _build_tiles(
-    period_turns: list[Turn],
-    daily_90d: list[dict],
-    today_date: date,
-    thresholds: dict,
-) -> dict:
-    billable = [t for t in period_turns if not t.is_interrupted]
+def _tile_metrics(turns: list[Turn]) -> dict[str, float | None]:
+    """Compute the 4 headline metrics over a slice of turns."""
+    billable = [t for t in turns if not t.is_interrupted]
     cr = sum(t.usage.cache_read_input_tokens for t in billable)
     cc = sum(t.usage.cache_creation_input_tokens for t in billable)
     inp = sum(t.usage.input_tokens for t in billable)
     out = sum(t.usage.output_tokens for t in billable)
     cost = sum(t.cost_usd for t in billable)
+    return {
+        "hit_pct":     cache_hit_pct(cr, cc, inp),
+        "cost_per_kw": cost_per_kw(cost, out),
+        "ctx_ratio":   ctx_ratio_n_to_1(cr, out),
+        "cache_reuse": cache_reuse_n_to_1(cr, cc),
+    }
 
-    hit_val = cache_hit_pct(cr, cc, inp)
-    cpk_val = cost_per_kw(cost, out)
-    ctx_val = ctx_ratio_n_to_1(cr, out)
-    reuse_val = cache_reuse_n_to_1(cr, cc)
+
+def _build_tiles(
+    period_turns: list[Turn],
+    daily_90d: list[dict],
+    today_date: date,
+    thresholds: dict,
+    now: datetime,
+) -> dict:
+    m = _tile_metrics(period_turns)
+    hit_val, cpk_val, ctx_val, reuse_val = m["hit_pct"], m["cost_per_kw"], m["ctx_ratio"], m["cache_reuse"]
+
+    # Last-hour slice: shows whether the period aggregate still reflects current
+    # behaviour or is dominated by an early-period spike (e.g. cache thrashing
+    # at 8am pulls the today-total cache_reuse down and keeps it low even after
+    # recovery, because subsequent turns have tiny absolute cache_creation).
+    last_hour_cutoff = now - timedelta(hours=1)
+    last_hour_turns = [t for t in period_turns if t.timestamp >= last_hour_cutoff]
+    lh = _tile_metrics(last_hour_turns) if last_hour_turns else {
+        "hit_pct": None, "cost_per_kw": None, "ctx_ratio": None, "cache_reuse": None,
+    }
 
     b_hit, hit_lbl = baseline_median(_series_for_key(daily_90d, "hit_pct"), today_date, key="hit_pct")
     b_cpk, cpk_lbl = baseline_median(_series_for_key(daily_90d, "cost_per_kw"), today_date, key="cost_per_kw")
@@ -356,24 +374,28 @@ def _build_tiles(
     return {
         "hit_pct": {
             "value": hit_val,
+            "last_hour_value": lh["hit_pct"],
             "delta_ratio": _delta(hit_val, b_hit),
             "baseline_label": hit_lbl,
             "goal": {"good_gte": thresholds["hit_rate_good_pct"], "red_lt": thresholds["hit_rate_red_pct"]},
         },
         "cost_per_kw": {
             "value": cpk_val,
+            "last_hour_value": lh["cost_per_kw"],
             "delta_ratio": _delta(cpk_val, b_cpk),
             "baseline_label": cpk_lbl,
             "goal": {"good_lte": thresholds["cost_per_kw_good"], "red_gt": thresholds["cost_per_kw_red"]},
         },
         "ctx_ratio": {
             "value": ctx_val,
+            "last_hour_value": lh["ctx_ratio"],
             "delta_ratio": _delta(ctx_val, b_ctx),
             "baseline_label": ctx_lbl,
             "goal": {"red_gt": thresholds["ctx_ratio_red"]},
         },
         "cache_reuse": {
             "value": reuse_val,
+            "last_hour_value": lh["cache_reuse"],
             "delta_ratio": _delta(reuse_val, b_reuse),
             "baseline_label": reuse_lbl,
             "goal": {"good_gte": thresholds["cache_reuse_good"], "red_lt": thresholds["cache_reuse_red"]},
@@ -686,7 +708,7 @@ def build_snapshot_full(
 
     thresholds = thresholds if thresholds is not None else dict(DEFAULTS)
 
-    tiles = _build_tiles(period_turns, daily_90d, today_date, thresholds)
+    tiles = _build_tiles(period_turns, daily_90d, today_date, thresholds, now)
     topbar = _build_topbar(today_turns, today_date, now)
     anomaly = _build_anomaly(tiles, today_date)
     # Daily default is a 30-day window regardless of global period.
@@ -1168,15 +1190,30 @@ def build_project_detail(
         t for s in project_sessions for t in s.turns
         if t.timestamp.date() >= since
     ]
-    daily_rollups = rollup_by_date(project_turns, since=since)
+    # Daily buckets collapse to 1-2 points on range=1d, which makes the cache-
+    # efficiency trend chart unusable (straight flat line or a single dot).
+    # Switch to hourly buckets for 1d so the reader sees the intraday curve.
     cache_trend = []
-    for r in daily_rollups:
-        denom = r.cache_read_tokens + r.cache_creation_tokens + r.input_tokens
-        cache_trend.append({
-            "date": str(r.date),
-            "hit_rate": r.cache_read_tokens / denom if denom > 0 else 0.0,
-            "cost_usd": r.cost_usd,
-        })
+    cache_trend_unit = "day"
+    if range_key == "1d":
+        cache_trend_unit = "hour"
+        hourly_rollups = rollup_by_hour(project_turns, target_date=today_date, fill_day=False)
+        for r in hourly_rollups:
+            denom = r.cache_read_tokens + r.cache_creation_tokens + r.input_tokens
+            cache_trend.append({
+                "date": r.hour.isoformat(),
+                "hit_rate": r.cache_read_tokens / denom if denom > 0 else 0.0,
+                "cost_usd": r.cost_usd,
+            })
+    else:
+        daily_rollups = rollup_by_date(project_turns, since=since)
+        for r in daily_rollups:
+            denom = r.cache_read_tokens + r.cache_creation_tokens + r.input_tokens
+            cache_trend.append({
+                "date": str(r.date),
+                "hit_rate": r.cache_read_tokens / denom if denom > 0 else 0.0,
+                "cost_usd": r.cost_usd,
+            })
 
     growths = [sr.context_growth_rate_val for sr in scoped_rollups]
     _GROWTH_EDGES = [500, 1000, 2000, 5000, 10000]
@@ -1208,6 +1245,7 @@ def build_project_detail(
         "verdict_distribution": verdict_dist,
         "sessions": [_session_rollup_to_dict(sr) for sr in scoped_rollups],
         "cache_trend": cache_trend,
+        "cache_trend_unit": cache_trend_unit,
         "context_growth_histogram": histogram,
         "top_turns_by_cost": [
             {

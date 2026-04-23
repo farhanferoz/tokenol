@@ -412,6 +412,7 @@ header.topbar {
 .tile .delta.alarm { color: var(--alarm); }
 .tile .cold  { font-size: 12px; color: var(--mute); font-style: italic; margin-top: 6px; }
 .tile .goal  { font-size: 11px; color: var(--mute); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.08em; }
+.tile .recent { font-size: 11px; color: var(--fg); margin-top: 4px; font-variant-numeric: tabular-nums; opacity: 0.85; }
 
 /* ===== Section headings ===== */
 .section-heading {

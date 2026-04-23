@@ -85,11 +85,14 @@ export function renderVerdictDist(containerId, dist) {
     ['TOOL_ERROR_STORM','vd-tool'], ['SIDECHAIN_HEAVY','vd-sidechain'],
   ];
   const total = Object.values(dist).reduce((s, v) => s + v, 0) || 1;
+  // Render every verdict label with a zero-width bar when its count is 0 so
+  // the panel stays visually stable across ranges (1D with a single session
+  // previously showed a one-row list that looked like a data loading bug).
   el.innerHTML = VERDICTS.map(([key, cls]) => {
     const cnt = dist[key] ?? 0;
-    if (cnt === 0) return '';
-    const w = (cnt / total * 100).toFixed(1);
-    return `<div class="vd-row ${cls}">
+    const w   = cnt > 0 ? (cnt / total * 100).toFixed(1) : 0;
+    const mute = cnt === 0 ? ' vd-empty' : '';
+    return `<div class="vd-row ${cls}${mute}">
       <span class="vd-label">${key.replace(/_/g,' ')}</span>
       <div class="vd-bar-track"><div class="vd-bar-fill" style="width:${w}%"></div></div>
       <span class="vd-count">${cnt}</span>

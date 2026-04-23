@@ -4,313 +4,321 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tokenol — live</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23ffb647' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23a66408' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/assets/styles.css">
-  <!-- uPlot -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 </head>
 <body>
 
-<!-- ===================== HEADER ===================== -->
-<header id="header">
-  <div class="brand serif">tokenol <span>— live</span></div>
+<!-- modal toggles: body-level siblings of modal-bg elements so CSS ~ selector works -->
+<input type="checkbox" class="modal-toggle" id="m-gl">
+<input type="checkbox" class="modal-toggle" id="m-set">
+<input type="checkbox" class="modal-toggle" id="m-search">
 
-  <div class="burn-lookback" id="burn-lookback" role="group" aria-label="Burn rate lookback">
-    <button data-lb="1m">1m</button>
-    <button data-lb="5m" class="active">5m</button>
-    <button data-lb="15m">15m</button>
-    <button data-lb="60m">60m</button>
-  </div>
-
-  <div id="header-right">
-    <span id="wall-clock">––:––:–– ···</span>
-    <div id="conn-dot" title="SSE connection"></div>
-    <button id="settings-btn" title="Settings (s or ?)" aria-label="Open settings">≡</button>
-  </div>
-</header>
-
-<!-- ===================== MAIN GRID ===================== -->
-<main id="main">
-
-  <!-- ---- Burn gauge ---- -->
-  <section class="panel panel-gauge" id="panel-gauge">
-    <div>
-      <div class="label">Burn rate</div>
-      <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px;">
-        <span id="burn-rate-display" class="num amber" style="font-size:28px;">$–.–– / hr</span>
-      </div>
-    </div>
-
-    <div id="gauge-container">
-      <burn-gauge id="main-gauge" rate="0" projected="0" reference="50" max-rate="120"
-        style="width:100%;max-width:340px;"></burn-gauge>
-    </div>
-
-    <div>
-      <div style="display:flex;align-items:baseline;gap:6px;">
-        <span class="label">Projected</span>
-        <span id="projected-cost" class="num">$–.––</span>
-        <span id="over-ref-badge">⚠ over limit</span>
-      </div>
-      <div id="window-range" class="mute" style="margin-top:4px;font-size:11px;">––</div>
-    </div>
-
-    <hr class="rule">
-
-    <div id="burn-history-wrap">
-      <div class="label">Burn history — last 60 min</div>
-      <div id="burn-history-chart" style="margin-top:6px;height:60px;"></div>
-    </div>
-  </section>
-
-  <!-- ---- Today ---- -->
-  <section class="panel panel-today" id="panel-today">
-    <div class="panel-title serif">Today</div>
-    <div class="today-stats">
-      <div>
-        <solari-number id="today-cost" class="big-num" value="0" format="$%.2f"></solari-number>
-        <div class="sub-stats">
-          <div class="sub-stat">
-            <span class="label">turns </span>
-            <span class="val" id="today-turns">–</span>
-          </div>
-          <div class="sub-stat">
-            <span class="label">output </span>
-            <span class="val" id="today-output">–</span>
-          </div>
-        </div>
-      </div>
-      <div>
-        <div class="sub-stat" style="margin-bottom:6px;">
-          <span class="label">$/kW </span>
-          <span class="val" id="today-cost-per-kw">–</span>
-        </div>
-        <div class="sub-stat">
-          <span class="label">Hit% </span>
-          <span class="val" id="today-hit-rate">–</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="label">Today by hour (UTC)</div>
-    <div id="hourly-bars" aria-label="Hourly cost bars" title=""></div>
-    <div id="hourly-bars-labels" style="display:flex;justify-content:space-between;margin-top:2px;font-size:9px;color:var(--mute);">
-      <span>00</span><span>06</span><span>12</span><span>18</span><span>23</span>
-    </div>
-  </section>
-
-  <!-- ---- Last N days ---- -->
-  <section class="panel panel-daily" id="panel-daily">
-    <div class="panel-title">
-      <span class="serif">Last <span id="daily-range-label">14</span> days</span>
-      <div class="range-selector" id="daily-range-sel" role="group">
-        <button data-r="7">7d</button>
-        <button data-r="14" class="active">14d</button>
-        <button data-r="30">30d</button>
-        <button data-r="90">90d</button>
-      </div>
-    </div>
-
-    <div id="daily-stats" class="daily-stats">
-      <div class="stat">
-        <div class="label">Total</div>
-        <div class="val" id="daily-total">$–.––</div>
-      </div>
-      <div class="stat">
-        <div class="label">Best day</div>
-        <div class="val" id="daily-best">–</div>
-      </div>
-      <div class="stat">
-        <div class="label">Worst day</div>
-        <div class="val" id="daily-worst">–</div>
-      </div>
-    </div>
-
-    <div id="daily-chart-wrap">
-      <div class="label" style="margin-bottom:4px;">Cost per day</div>
-      <div id="daily-chart" style="height:70px;"></div>
-    </div>
-
-    <div id="kw-drift-wrap" style="margin-top:8px;">
-      <div class="label" style="margin-bottom:4px;">$/kW drift</div>
-      <div id="kw-drift-chart" style="height:50px;"></div>
-    </div>
-  </section>
-
-  <!-- ---- Top sessions ---- -->
-  <section class="panel panel-sessions" id="panel-sessions">
-    <div class="panel-title">
-      <span class="serif">Top sessions</span>
-      <div class="range-selector" id="sessions-range-sel" role="group">
-        <button data-r="1" class="active">24h</button>
-        <button data-r="7">7d</button>
-        <button data-r="14">14d</button>
-      </div>
-    </div>
-    <table class="data-table" id="sessions-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Model</th>
-          <th>Cost</th>
-          <th>Turns</th>
-          <th>MaxIn</th>
-          <th>Verdict</th>
-        </tr>
-      </thead>
-      <tbody id="sessions-tbody"></tbody>
-    </table>
-  </section>
-
-  <!-- ---- Models ---- -->
-  <section class="panel panel-models" id="panel-models">
-    <div class="panel-title">
-      <span class="serif">Models</span>
-      <div class="range-selector" id="models-range-sel" role="group">
-        <button data-r="1" class="active">24h</button>
-        <button data-r="7">7d</button>
-        <button data-r="14">14d</button>
-      </div>
-    </div>
-    <div id="models-bars"></div>
-  </section>
-
-  <!-- ---- Top projects ---- -->
-  <section class="panel panel-projects" id="panel-projects">
-    <div class="panel-title">
-      <span class="serif">Top projects</span>
-      <div class="range-selector" id="projects-range-sel" role="group">
-        <button data-r="1" class="active">24h</button>
-        <button data-r="7">7d</button>
-        <button data-r="14">14d</button>
-      </div>
-    </div>
-    <table class="data-table" id="projects-table">
-      <thead>
-        <tr>
-          <th>Project</th>
-          <th>Cost</th>
-          <th>Sessions</th>
-          <th>Cache%</th>
-        </tr>
-      </thead>
-      <tbody id="projects-tbody"></tbody>
-    </table>
-  </section>
-
-  <!-- ---- Heatmap ---- -->
-  <section class="panel panel-heatmap" id="panel-heatmap">
-    <div class="panel-title serif">Cost heatmap — 14d × 24h</div>
-    <div id="heatmap-hour-labels" aria-hidden="true">
-      <!-- populated by app.js: 1 row-label slot + 24 hour labels (only every 4th shown) -->
-    </div>
-    <div id="heatmap-grid"></div>
-  </section>
-
-  <!-- ---- Live feed ---- -->
-  <section class="panel panel-feed" id="panel-feed">
-    <div class="panel-title serif" style="margin-bottom:8px;">
-      Live feed — last 20 turns
-    </div>
-    <div id="feed-idle-msg">IDLE — no activity</div>
-    <ul id="live-feed-list" aria-label="Recent turns" aria-live="polite" aria-atomic="false"></ul>
-  </section>
-
-</main>
-
-<!-- ===================== SETTINGS DRAWER ===================== -->
-<div id="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
-  <div id="settings-backdrop"></div>
-  <div id="settings-panel">
-    <h2>Settings</h2>
-
-    <div class="setting-row">
-      <div class="label">Reference threshold</div>
-      <div class="options" id="ref-opts">
-        <button data-v="10">$10</button>
-        <button data-v="25">$25</button>
-        <button data-v="50" class="active">$50</button>
-        <button data-v="100">$100</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Burn lookback</div>
-      <div class="options" id="lb-opts">
-        <button data-v="1m">1m</button>
-        <button data-v="5m" class="active">5m</button>
-        <button data-v="15m">15m</button>
-        <button data-v="60m">60m</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Daily range</div>
-      <div class="options" id="daily-range-opts">
-        <button data-v="7">7d</button>
-        <button data-v="14" class="active">14d</button>
-        <button data-v="30">30d</button>
-        <button data-v="90">90d</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Sessions / Projects / Models range</div>
-      <div class="options" id="spm-range-opts">
-        <button data-v="1" class="active">24h</button>
-        <button data-v="7">7d</button>
-        <button data-v="14">14d</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Tick interval</div>
-      <div class="options" id="tick-opts">
-        <button data-v="2">2s</button>
-        <button data-v="5" class="active">5s</button>
-        <button data-v="10">10s</button>
-        <button data-v="30">30s</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Idle back-off</div>
-      <div class="options" id="idle-opts">
-        <button data-v="on" class="active">on</button>
-        <button data-v="off">off</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Hide sidechain in feed</div>
-      <div class="options" id="sidechain-opts">
-        <button data-v="off" class="active">off</button>
-        <button data-v="on">on</button>
-      </div>
-    </div>
-
-    <div class="setting-row">
-      <div class="label">Reduce motion</div>
-      <div class="options" id="motion-opts">
-        <button data-v="auto" class="active">auto</button>
-        <button data-v="on">on</button>
-        <button data-v="off">off</button>
-      </div>
-    </div>
-
-    <button id="settings-reset" title="Reset all settings to defaults">Reset to defaults</button>
+<!-- ===== Glossary modal ===== -->
+<div class="modal-bg m-gl" role="dialog" aria-labelledby="gl-title" aria-modal="true">
+  <div class="modal-inner">
+    <label for="m-gl" class="modal-close" aria-label="Close glossary">✕ Close</label>
+    <h3 id="gl-title">What do these mean?</h3>
+    <dl id="glossary-list"></dl>
   </div>
 </div>
 
-<!-- ===================== SCRIPTS ===================== -->
-<script type="module" src="/assets/solari.js"></script>
-<script type="module" src="/assets/gauge.js"></script>
+<!-- ===== Settings modal ===== -->
+<div class="modal-bg m-set" role="dialog" aria-labelledby="set-title" aria-modal="true">
+  <div class="modal-inner">
+    <label for="m-set" class="modal-close" aria-label="Close settings">✕ Close</label>
+    <h3 id="set-title">Settings</h3>
+    <div class="set-group">
+      <h4>Live updates</h4>
+      <div class="set-row">
+        <div class="lbl">Tick cadence</div>
+        <div class="pill-group" id="pref-tick-pills">
+          <span data-tick="60">1M</span>
+          <span data-tick="300" class="on">5M</span>
+          <span data-tick="900">15M</span>
+          <span data-tick="3600">60M</span>
+        </div>
+      </div>
+    </div>
+    <div class="set-group">
+      <h4>Thresholds (colour-coding)</h4>
+      <div class="set-row">
+        <div class="lbl">Hit% green ≥</div>
+        <input type="number" id="pref-hit-good" value="95" step="1" min="0" max="100">
+        <div class="sub">%</div>
+      </div>
+      <div class="set-row">
+        <div class="lbl">Hit% red &lt;</div>
+        <input type="number" id="pref-hit-red" value="85" step="1" min="0" max="100">
+        <div class="sub">%</div>
+      </div>
+      <div class="set-row">
+        <div class="lbl">$/kW green &lt;</div>
+        <input type="number" id="pref-cost-good" value="0.20" step="0.01" min="0">
+        <div class="sub">USD</div>
+      </div>
+      <div class="set-row">
+        <div class="lbl">$/kW red &gt;</div>
+        <input type="number" id="pref-cost-red" value="0.40" step="0.01" min="0">
+        <div class="sub">USD</div>
+      </div>
+      <div class="set-row">
+        <div class="lbl">Ctx ratio red &gt;</div>
+        <input type="number" id="pref-ctx-red" value="400" step="10" min="0">
+        <div class="sub">: 1</div>
+      </div>
+      <div class="set-row">
+        <div class="lbl">Cache reuse green &gt;</div>
+        <input type="number" id="pref-cache-good" value="50" step="1" min="0">
+        <div class="sub">: 1</div>
+      </div>
+      <div class="set-row">
+        <div class="lbl">Cache reuse red &lt;</div>
+        <input type="number" id="pref-cache-red" value="20" step="1" min="0">
+        <div class="sub">: 1 (dual-session tripwire)</div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="pref-save-btn">Save</button>
+        <button class="btn" id="pref-reset-btn">Reset to defaults</button>
+      </div>
+    </div>
+    <div class="set-group" id="assumptions-group">
+      <h4>Parser assumptions</h4>
+      <div id="assumptions-summary" class="assumptions-body"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Find modal ===== -->
+<div class="modal-bg m-search" role="dialog" aria-labelledby="find-title" aria-modal="true">
+  <div class="modal-inner">
+    <label for="m-search" class="modal-close" aria-label="Close find">✕ Close</label>
+    <h3 id="find-title">Find</h3>
+    <div class="search-box">
+      <span class="mute" aria-hidden="true">/</span>
+      <input id="search-input" type="text" placeholder="cwd:automl   or   session id   or   date:2026-04-16" autocomplete="off" spellcheck="false">
+    </div>
+    <div id="search-results"></div>
+    <div class="search-hints">
+      Prefixes: <code>cwd:</code> <code>session:</code> <code>model:</code> <code>date:</code> <code>verdict:</code>. No prefix = fuzzy match across cwds and session ids.
+    </div>
+  </div>
+</div>
+
+<!-- ===== App ===== -->
+<div class="app">
+
+  <!-- ========== Topbar ========== -->
+  <header class="topbar">
+    <div class="topbar-row1">
+      <div class="brand">tokenol <span class="dim">— live</span></div>
+      <div class="topbar-icons">
+        <span class="sse-dot" id="sse-dot" title="SSE connecting…"></span>
+        <span id="wall-clock" aria-live="off">––:––</span>
+        <label for="m-search" class="icon-btn" title="Find (/)" tabindex="0">⌕</label>
+        <label for="m-gl"     class="icon-btn" title="Glossary (?)" tabindex="0">?</label>
+        <label for="m-set"    class="icon-btn" title="Settings (,)" tabindex="0">⚙</label>
+      </div>
+    </div>
+    <div class="topbar-row2">
+      <div class="summary-strip" id="topbar-summary" aria-live="polite"></div>
+      <div class="topbar-controls">
+        <span class="pill-group-label">period</span>
+        <div class="pill-group" id="period-pills" role="group" aria-label="Global period">
+          <span data-period="today" class="on">Today</span>
+          <span data-period="7d">7D</span>
+          <span data-period="30d">30D</span>
+          <span data-period="all">All</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ========== Anomaly strip (conditional) ========== -->
+  <div id="anomaly-strip" aria-live="polite"></div>
+
+  <!-- ========== Efficiency tiles ========== -->
+  <section class="eff-grid" id="tiles" aria-label="Efficiency tiles">
+
+    <div class="tile" id="tile-hit" role="group" aria-labelledby="tile-hit-lbl">
+      <span class="lbl" id="tile-hit-lbl" title="cache_read / (cache_read + cache_creation + input). Higher = better. Green ≥ 95%, red &lt; 85%.">
+        <span class="abbr">Hit%</span> cache hit rate
+      </span>
+      <div class="num mute" id="tile-hit-num">—</div>
+      <div class="delta" id="tile-hit-delta"></div>
+      <div class="goal" id="tile-hit-goal"></div>
+      <div class="recent" id="tile-hit-recent"></div>
+    </div>
+
+    <div class="tile" id="tile-cost" role="group" aria-labelledby="tile-cost-lbl">
+      <span class="lbl" id="tile-cost-lbl" title="cost × 1000 / output_tokens. Lower = more efficient. Green &lt; $0.20, red &gt; $0.40.">
+        <span class="abbr">$/kW</span> cost per 1k out
+      </span>
+      <div class="num mute" id="tile-cost-num">—</div>
+      <div class="delta" id="tile-cost-delta"></div>
+      <div class="goal" id="tile-cost-goal"></div>
+      <div class="recent" id="tile-cost-recent"></div>
+    </div>
+
+    <div class="tile" id="tile-ctx" role="group" aria-labelledby="tile-ctx-lbl">
+      <span class="lbl" id="tile-ctx-lbl" title="cache_read / output, as N:1. Lower is better. Green &lt; 150:1, red &gt; 400:1.">
+        <span class="abbr">Ctx</span> context ratio
+      </span>
+      <div class="num mute" id="tile-ctx-num">—</div>
+      <div class="delta" id="tile-ctx-delta"></div>
+      <div class="goal" id="tile-ctx-goal"></div>
+      <div class="recent" id="tile-ctx-recent"></div>
+    </div>
+
+    <div class="tile" id="tile-cache" role="group" aria-labelledby="tile-cache-lbl">
+      <span class="lbl" id="tile-cache-lbl" title="cache_read / cache_creation, as N:1. Low = cache thrashing. Green &gt; 50:1, red &lt; 20:1 (dual-session tripwire).">
+        <span class="abbr">Cache reuse</span>
+      </span>
+      <div class="num mute" id="tile-cache-num">—</div>
+      <div class="delta" id="tile-cache-delta"></div>
+      <div class="goal" id="tile-cache-goal"></div>
+      <div class="recent" id="tile-cache-recent"></div>
+    </div>
+
+  </section>
+
+  <!-- ========== Hour By Hour ========== -->
+  <div class="section-heading">
+    <h2 id="sh-hourly">Hour By Hour</h2>
+    <span class="sub">click a point to open that hour</span>
+  </div>
+  <div class="tl-panel" id="panel-hourly">
+    <div class="tl-controls" id="hourly-controls">
+      <span class="filter-group">day <button class="cur" id="hourly-day-picker">today ▾</button></span>
+      <span class="pill-row" id="hourly-metric-pills" role="group" aria-label="Metric">
+        <span data-metric="hit_pct"     data-term="Hit% (cache hit rate)"    class="on">Hit%</span>
+        <span data-metric="cost_per_kw" data-term="$/kW (cost per 1k out)">$/kW</span>
+        <span data-metric="ctx_ratio"   data-term="Ctx (context ratio)">Ctx</span>
+        <span data-metric="cache_reuse" data-term="Cache reuse">Cache reuse</span>
+        <span data-metric="output"      data-term="Output">Output</span>
+        <span data-metric="cost"        data-term="Cost">Cost</span>
+      </span>
+      <span class="filter-group">project <button class="cur" id="hourly-project-filter">all ▾</button></span>
+      <span class="filter-group">model <button class="cur" id="hourly-model-filter">all ▾</button></span>
+      <span class="tl-y-lbl">y auto-fits data · hover for exact values</span>
+    </div>
+    <div id="hourly-chart" class="tl-chart">
+      <div class="tl-insufficient">No data yet — waiting for first turn.</div>
+    </div>
+  </div>
+
+  <!-- ========== Daily History ========== -->
+  <div class="section-heading">
+    <h2 id="sh-daily">Daily History</h2>
+    <span class="sub">click a point to open that day</span>
+  </div>
+  <div class="tl-panel" id="panel-daily">
+    <div class="tl-controls" id="daily-controls">
+      <span class="pill-row" id="daily-range-pills" role="group" aria-label="Range">
+        <span data-range="7d">7D</span>
+        <span data-range="30d" class="on">30D</span>
+        <span data-range="90d">90D</span>
+        <span data-range="all">All</span>
+      </span>
+      <span class="pill-row" id="daily-metric-pills" role="group" aria-label="Metric">
+        <span data-metric="hit_pct"     data-term="Hit% (cache hit rate)"    class="on">Hit%</span>
+        <span data-metric="cost_per_kw" data-term="$/kW (cost per 1k out)">$/kW</span>
+        <span data-metric="ctx_ratio"   data-term="Ctx (context ratio)">Ctx</span>
+        <span data-metric="cache_reuse" data-term="Cache reuse">Cache reuse</span>
+        <span data-metric="output"      data-term="Output">Output</span>
+        <span data-metric="cost"        data-term="Cost">Cost</span>
+      </span>
+      <span class="filter-group">project <button class="cur" id="daily-project-filter">all ▾</button></span>
+      <span class="filter-group">model <button class="cur" id="daily-model-filter">all ▾</button></span>
+      <span class="tl-y-lbl">y auto-fits data · hover for exact values</span>
+    </div>
+    <div id="daily-chart" class="tl-chart">
+      <div class="tl-insufficient">No history yet — check back after a few days.</div>
+    </div>
+  </div>
+
+  <!-- ========== Models ========== -->
+  <div class="section-heading">
+    <h2 id="sh-models">Models</h2>
+    <div class="right">
+      <span class="pill-row" id="models-range-pills" role="group" aria-label="Models range">
+        <span data-range="today" class="on">Today</span>
+        <span data-range="7d">7D</span>
+        <span data-range="30d">30D</span>
+        <span data-range="90d">90D</span>
+        <span data-range="all">All</span>
+      </span>
+      <span class="sub">click a row for model drilldown</span>
+    </div>
+  </div>
+  <div class="ra-summary" id="models-summary" aria-live="polite"></div>
+  <table class="ra-tbl" id="models-tbl" aria-labelledby="sh-models">
+    <thead>
+      <tr>
+        <th          class="help"     data-term="Model">Model</th>
+        <th          class="num help" data-term="Turns">Turns</th>
+        <th          class="num help" data-term="Output">Output</th>
+        <th          class="num help" data-term="Cost">Cost</th>
+        <th          class="help"     data-term="Share">Share</th>
+        <th          class="num help" data-term="$/kW (cost per 1k out)">$/kW</th>
+        <th          class="num help" data-term="Ctx (context ratio)">Ctx</th>
+        <th          class="num help" data-term="Cache reuse">Cache reuse</th>
+        <th          class="num help" data-term="Hit% (cache hit rate)">Hit%</th>
+        <th          class="num help" data-term="Tool err">Tool err</th>
+      </tr>
+    </thead>
+    <tbody id="models-tbody"></tbody>
+  </table>
+  <div id="models-empty" class="ra-empty hidden">No model data for this period.</div>
+
+  <!-- ========== Recent Activity ========== -->
+  <div class="section-heading">
+    <h2 id="sh-recent">Recent Activity</h2>
+    <div class="right">
+      <span class="pill-row" id="recent-window-pills" role="group" aria-label="Activity window">
+        <span data-window="15m">15M</span>
+        <span data-window="60m" class="on">60M</span>
+        <span data-window="4h">4H</span>
+        <span data-window="24h">24H</span>
+      </span>
+      <span class="sub">click a row for project drilldown</span>
+    </div>
+  </div>
+  <div class="ra-summary" id="recent-summary" aria-live="polite"></div>
+  <div id="recent-body">
+    <table class="ra-tbl" id="recent-tbl" aria-labelledby="sh-recent">
+      <thead>
+        <tr>
+          <th class="help" data-term="Project">Project</th>
+          <th class="help" data-term="Model">Model</th>
+          <th class="help" data-term="Last turn" data-sort="last_turn_at">Last turn</th>
+          <th class="num help" data-term="Turns"    data-sort="turns">Turns</th>
+          <th class="num help" data-term="Output"   data-sort="output">Output</th>
+          <th class="num help" data-term="Ctx used" data-sort="ctx_used">Ctx used</th>
+          <th class="num help" data-term="$/kW (cost per 1k out)" data-sort="cost_per_kw">$/kW</th>
+          <th class="num help" data-term="Ctx (context ratio)"    data-sort="ctx_ratio">Ctx</th>
+          <th class="num help" data-term="Cache reuse"            data-sort="cache_reuse">Cache reuse</th>
+          <th class="num help" data-term="Hit% (cache hit rate)"  data-sort="hit_pct">Hit%</th>
+          <th class="help" data-term="Verdict">Verdict</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="recent-tbody"></tbody>
+    </table>
+    <div id="recent-empty" class="ra-empty hidden">
+      No activity in the last 60 minutes. <button id="recent-expand-link" class="expand-link">Show last 24h →</button>
+    </div>
+  </div>
+
+</div><!-- /.app -->
+
+<script type="module" src="/assets/components.js"></script>
 <script type="module" src="/assets/app.js"></script>
-<script type="module" src="/assets/settings.js"></script>
 
 </body>
 </html>

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — project</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23ffb647' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <style>
+    #proj-main { max-width: 1200px; margin: 0 auto; padding: 24px 24px 60px; display: flex; flex-direction: column; gap: 28px; }
+    .proj-section { border-top: 1px solid var(--rule); padding-top: 20px; }
+    #proj-meta { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 32px; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
+    #proj-cwd { font-size: 12px; color: var(--mute); max-width: 700px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .proj-totals { display: flex; gap: 28px; margin-left: auto; align-items: flex-end; }
+    .total-item .label { display: block; margin-bottom: 2px; }
+    .total-item .val   { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    #proj-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--rule); }
+    .proj-card { background: var(--bg); padding: 16px; }
+    #histogram-bars { display: flex; align-items: flex-end; gap: 4px; height: 80px; margin-top: 8px; }
+    .hist-bar { flex: 1; background: var(--amber-dim); min-width: 8px; transition: height 0.3s; cursor: default; }
+    .hist-bar:hover { background: var(--amber); }
+    #verdict-dist { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .vd-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .vd-label { width: 130px; color: var(--mute); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .vd-bar-track { flex: 1; height: 8px; background: var(--rule); }
+    .vd-bar-fill { height: 100%; }
+    .vd-count { width: 24px; text-align: right; color: var(--mute); }
+    .vd-ok      .vd-bar-fill { background: var(--mute); }
+    .vd-creep   .vd-bar-fill { background: #f5a623; }
+    .vd-runaway .vd-bar-fill { background: var(--alarm); }
+    .vd-tool    .vd-bar-fill { background: #e74c3c; }
+    .vd-sidechain .vd-bar-fill { background: var(--amber-dim); }
+    .vd-empty { opacity: 0.35; }
+    .vd-empty .vd-count { color: var(--mute); }
+    #proj-error { color: var(--alarm); font-size: 13px; padding: 24px 0; }
+  </style>
+</head>
+<body>
+
+<header id="header">
+  <a href="/" class="back-link" style="font-size:12px;color:var(--mute);text-decoration:none;">← tokenol</a>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span id="proj-name" class="serif" style="font-style:italic;font-size:18px;color:var(--fg);"></span>
+    <span id="proj-flagged-badge" style="display:none;font-size:10px;font-weight:600;color:var(--alarm);text-transform:uppercase;letter-spacing:0.08em;border:1px solid var(--alarm);padding:1px 5px;">⚠ flagged</span>
+  </div>
+</header>
+
+<main id="proj-main">
+
+  <div id="proj-meta">
+    <div>
+      <div class="label">cwd</div>
+      <div id="proj-cwd">–</div>
+    </div>
+    <div class="proj-totals">
+      <div class="total-item">
+        <span class="label">cost</span>
+        <span class="val amber" id="proj-cost">–</span>
+      </div>
+      <div class="total-item">
+        <span class="label">sessions</span>
+        <span class="val" id="proj-sessions">–</span>
+      </div>
+    </div>
+  </div>
+
+  <span class="pill-row" id="proj-range-pills" role="group" aria-label="Range">
+    <span data-range="1d">1D</span>
+    <span data-range="7d">7D</span>
+    <span data-range="14d" class="on">14D</span>
+    <span data-range="30d">30D</span>
+    <span data-range="all">All</span>
+  </span>
+
+  <div id="proj-grid">
+    <div class="proj-card">
+      <div class="panel-title serif" style="font-size:16px;" id="cache-trend-title">Cache efficiency — 14d</div>
+      <div id="cache-trend-chart"></div>
+    </div>
+    <div class="proj-card">
+      <div class="panel-title serif" style="font-size:16px;">Context growth distribution</div>
+      <div style="font-size:10px;color:var(--mute);margin-bottom:4px;">tokens/turn buckets (sessions)</div>
+      <div id="histogram-bars"></div>
+      <div id="histogram-labels" style="display:flex;justify-content:space-between;margin-top:4px;font-size:9px;color:var(--mute);"></div>
+    </div>
+    <div class="proj-card">
+      <div class="panel-title serif" style="font-size:16px;">Verdict distribution</div>
+      <div id="verdict-dist"></div>
+    </div>
+    <div class="proj-card">
+      <div class="panel-title serif" style="font-size:16px;">Top turns by cost</div>
+      <table class="data-table" style="font-size:11px;">
+        <thead><tr>
+          <th>When</th>
+          <th>Session</th>
+          <th data-term="Cost">Cost</th>
+          <th data-term="Hit% (cache hit rate)">Hit%</th>
+          <th data-term="$/kW (cost per 1k out)">$/kW</th>
+          <th data-term="Ctx (context ratio)">Ctx</th>
+          <th data-term="Output">Output</th>
+        </tr></thead>
+        <tbody id="top-turns-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <section class="proj-section">
+    <div class="panel-title serif">Sessions</div>
+    <table class="data-table" id="proj-sessions-table">
+      <thead>
+        <tr>
+          <th>Started</th>
+          <th>Duration</th>
+          <th>Model</th>
+          <th data-term="Cost">Cost</th>
+          <th data-term="Turns">Turns</th>
+          <th data-term="Hit% (cache hit rate)">Hit%</th>
+          <th data-term="$/kW (cost per 1k out)">$/kW</th>
+          <th data-term="Ctx (context ratio)">Ctx</th>
+          <th data-term="Tool err">Tool err</th>
+          <th data-term="Verdict">Verdict</th>
+          <th>ID</th>
+        </tr>
+      </thead>
+      <tbody id="proj-sessions-tbody"></tbody>
+    </table>
+  </section>
+
+  <div id="proj-error" style="display:none;"></div>
+
+</main>
+
+<script type="module" src="/assets/project.js"></script>
+</body>
+</html>
