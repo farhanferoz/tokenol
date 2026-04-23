@@ -23,7 +23,13 @@ from tokenol import assumptions as assumption_recorder
 from tokenol.enums import AssumptionTag, BlowUpVerdict
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs
 from tokenol.ingest.parser import dedup_key, parse_file
-from tokenol.metrics.context import cache_hit_pct, cache_reuse_n_to_1, cost_per_kw, ctx_ratio_n_to_1
+from tokenol.metrics.context import (
+    cache_hit_pct,
+    cache_hit_rate,
+    cache_reuse_n_to_1,
+    cost_per_kw,
+    ctx_ratio_n_to_1,
+)
 from tokenol.metrics.cost import cost_for_turn, rollup_by_date, rollup_by_hour
 from tokenol.metrics.history import baseline_median, trailing_median
 from tokenol.metrics.rollups import (
@@ -173,8 +179,7 @@ def decode_cwd(cwd_b64: str) -> str:
 
 
 def _session_rollup_to_dict(sr: SessionRollup) -> dict:
-    total = sr.cache_read_tokens + sr.cache_creation_tokens + sr.input_tokens
-    cache_hit_rate = sr.cache_read_tokens / total if total > 0 else 0.0
+    hit = cache_hit_rate(sr.cache_read_tokens, sr.cache_creation_tokens, sr.input_tokens)
     tool_error_rate = sr.tool_error_count / sr.tool_use_count if sr.tool_use_count > 0 else 0.0
 
     return {
@@ -187,7 +192,7 @@ def _session_rollup_to_dict(sr: SessionRollup) -> dict:
         "verdict": sr.verdict.value,
         "cwd": sr.cwd or "",
         "context_growth_rate": sr.context_growth_rate_val,
-        "cache_hit_rate": cache_hit_rate,
+        "cache_hit_rate": hit if hit is not None else 0.0,
         "tool_error_rate": tool_error_rate,
         "cost_per_kw": sr.cost_per_kw_val,
         "ctx_ratio": sr.ctx_ratio_n_to_1,
@@ -277,7 +282,7 @@ def _series_for_key(series: list[dict], key: str) -> list[dict]:
     return [{"date": r["date"], key: r[key]} for r in series if r.get(key) is not None]
 
 
-def _build_daily_series(turns: list[Turn], since: date, today_date: date) -> list[dict]:
+def _build_daily_series(turns: list[Turn], since: date) -> list[dict]:
     result = []
     for r in rollup_by_date(turns, since=since):
         result.append({
@@ -287,8 +292,8 @@ def _build_daily_series(turns: list[Turn], since: date, today_date: date) -> lis
             "turns": r.turns,
             "hit_pct": cache_hit_pct(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens),
             "cost_per_kw": cost_per_kw(r.cost_usd, r.output_tokens),
-            "ctx_ratio": r.cache_read_tokens / r.output_tokens if r.output_tokens > 0 else None,
-            "cache_reuse": r.cache_read_tokens / r.cache_creation_tokens if r.cache_creation_tokens > 0 else None,
+            "ctx_ratio": ctx_ratio_n_to_1(r.cache_read_tokens, r.output_tokens),
+            "cache_reuse": cache_reuse_n_to_1(r.cache_read_tokens, r.cache_creation_tokens),
         })
     first_active = next((i for i, r in enumerate(result) if r["turns"] > 0), len(result))
     return result[first_active:]
@@ -303,23 +308,32 @@ def _moving_avg_7d(series: list[dict], key: str) -> list[dict]:
     return result
 
 
-def _build_topbar(today_turns: list[Turn], today_date: date, now: datetime) -> dict:
-    billable = [t for t in today_turns if not t.is_interrupted]
+def _build_topbar(today_turns: list[Turn]) -> dict:
     model_costs: defaultdict[str, float] = defaultdict(float)
+    session_ids: set[str] = set()
+    today_cost = 0.0
+    billable_out = billable_inp = 0
+    last_active: datetime | None = None
     for t in today_turns:
+        today_cost += t.cost_usd
+        session_ids.add(t.session_id)
         if t.model:
             model_costs[t.model] += t.cost_usd
+        if not t.is_interrupted:
+            billable_out += t.usage.output_tokens
+            billable_inp += t.usage.input_tokens
+        if last_active is None or t.timestamp > last_active:
+            last_active = t.timestamp
     total_mc = sum(model_costs.values()) or 1.0
     model_mix = {
         _short_model(m): c / total_mc
         for m, c in sorted(model_costs.items(), key=lambda x: -x[1])
     }
-    last_active = max((t.timestamp for t in today_turns), default=None)
     return {
-        "today_cost": sum(t.cost_usd for t in today_turns),
-        "sessions_count": len({t.session_id for t in today_turns}),
-        "output_tokens": sum(t.usage.output_tokens for t in billable),
-        "input_tokens": sum(t.usage.input_tokens for t in billable),
+        "today_cost": today_cost,
+        "sessions_count": len(session_ids),
+        "output_tokens": billable_out,
+        "input_tokens": billable_inp,
         "model_mix": model_mix,
         "last_active": last_active.isoformat() if last_active else None,
     }
@@ -327,12 +341,17 @@ def _build_topbar(today_turns: list[Turn], today_date: date, now: datetime) -> d
 
 def _tile_metrics(turns: list[Turn]) -> dict[str, float | None]:
     """Compute the 4 headline metrics over a slice of turns."""
-    billable = [t for t in turns if not t.is_interrupted]
-    cr = sum(t.usage.cache_read_input_tokens for t in billable)
-    cc = sum(t.usage.cache_creation_input_tokens for t in billable)
-    inp = sum(t.usage.input_tokens for t in billable)
-    out = sum(t.usage.output_tokens for t in billable)
-    cost = sum(t.cost_usd for t in billable)
+    cr = cc = inp = out = 0
+    cost = 0.0
+    for t in turns:
+        if t.is_interrupted:
+            continue
+        u = t.usage
+        cr += u.cache_read_input_tokens
+        cc += u.cache_creation_input_tokens
+        inp += u.input_tokens
+        out += u.output_tokens
+        cost += t.cost_usd
     return {
         "hit_pct":     cache_hit_pct(cr, cc, inp),
         "cost_per_kw": cost_per_kw(cost, out),
@@ -572,19 +591,19 @@ def _build_models(period_turns: list[Turn], range_label: str) -> dict:
 
 def _build_recent_activity(
     all_turns: list[Turn],
-    all_sessions: list[Session],
+    cwd_by_sid: dict[str, str],
     now: datetime,
     window_minutes: int = 60,
 ) -> dict:
     window_since = now - timedelta(minutes=window_minutes)
     window_turns = [t for t in all_turns if t.timestamp >= window_since]
 
-    cwd_by_sid = _grouped_cwd_by_sid(all_sessions)
     proj_turns: dict[str, list[Turn]] = defaultdict(list)
     for t in window_turns:
         proj_turns[cwd_by_sid.get(t.session_id, "(unknown)")].append(t)
 
-    cr_all = cc_all = inp_all = out_all = cost_all = 0
+    cr_all = cc_all = inp_all = out_all = 0
+    cost_all = 0.0
     model_costs_all: defaultdict[str, float] = defaultdict(float)
     for t in window_turns:
         if not t.is_interrupted:
@@ -601,18 +620,34 @@ def _build_recent_activity(
         for m, c in sorted(model_costs_all.items(), key=lambda x: -x[1])
     }
 
-    proj_order = {cwd: sum(t.cost_usd for t in turns) for cwd, turns in proj_turns.items()}
-    rows = []
-    for cwd, turns in sorted(proj_turns.items(), key=lambda x: -proj_order[x[0]]):
-        billable = [t for t in turns if not t.is_interrupted]
-        cr = sum(t.usage.cache_read_input_tokens for t in billable)
-        cc = sum(t.usage.cache_creation_input_tokens for t in billable)
-        inp = sum(t.usage.input_tokens for t in billable)
-        out = sum(t.usage.output_tokens for t in billable)
-        cost = sum(t.cost_usd for t in billable)
+    proj_stats: dict[str, dict] = {}
+    for cwd, turns in proj_turns.items():
+        cr = cc = inp = out = 0
+        cost = 0.0
+        model_ctr: Counter = Counter()
+        last_turn: Turn | None = None
+        for t in turns:
+            if not t.is_interrupted:
+                cr += t.usage.cache_read_input_tokens
+                cc += t.usage.cache_creation_input_tokens
+                inp += t.usage.input_tokens
+                out += t.usage.output_tokens
+                cost += t.cost_usd
+            if t.model:
+                model_ctr[t.model] += 1
+            if last_turn is None or t.timestamp > last_turn.timestamp:
+                last_turn = t
+        proj_stats[cwd] = {
+            "turns": turns, "cr": cr, "cc": cc, "inp": inp, "out": out, "cost": cost,
+            "model_ctr": model_ctr, "last_turn": last_turn,
+        }
 
-        model_ctr: Counter = Counter(t.model for t in turns if t.model)
-        last_turn = max(turns, key=lambda t: t.timestamp)
+    rows = []
+    for cwd, s in sorted(proj_stats.items(), key=lambda x: -x[1]["cost"]):
+        turns = s["turns"]
+        cr, cc, inp, out, cost = s["cr"], s["cc"], s["inp"], s["out"], s["cost"]
+        model_ctr = s["model_ctr"]
+        last_turn = s["last_turn"]
         cw = context_window(last_turn.model or "")
         visible = (
             last_turn.usage.input_tokens
@@ -694,7 +729,7 @@ def build_snapshot_full(
     all_turns, all_sessions = _build_turns_and_sessions(all_raw_events, paths)
 
     turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
-    daily_90d = _build_daily_series(turns_90d, since_90d, today_date)
+    daily_90d = _build_daily_series(turns_90d, since_90d)
 
     cwd_by_sid = _grouped_cwd_by_sid(all_sessions)
 
@@ -709,7 +744,7 @@ def build_snapshot_full(
     thresholds = thresholds if thresholds is not None else dict(DEFAULTS)
 
     tiles = _build_tiles(period_turns, daily_90d, today_date, thresholds, now)
-    topbar = _build_topbar(today_turns, today_date, now)
+    topbar = _build_topbar(today_turns)
     anomaly = _build_anomaly(tiles, today_date)
     # Daily default is a 30-day window regardless of global period.
     daily_default_since = today_date - timedelta(days=29)
@@ -717,7 +752,7 @@ def build_snapshot_full(
     hourly = _build_hourly(today_turns, today_date, all_turns, cwd_by_sid)
     daily = _build_daily(daily_90d, period, today_date, daily_default_turns, cwd_by_sid)
     models = _build_models(period_turns, period)
-    recent_activity = _build_recent_activity(all_turns, all_sessions, now)
+    recent_activity = _build_recent_activity(all_turns, cwd_by_sid, now)
 
     _fired = assumption_recorder.fired()
     payload = {
@@ -966,7 +1001,7 @@ def build_recent_activity_panel(
     now: datetime,
     window_minutes: int = 60,
 ) -> dict:
-    return _build_recent_activity(all_turns, all_sessions, now, window_minutes)
+    return _build_recent_activity(all_turns, _grouped_cwd_by_sid(all_sessions), now, window_minutes)
 
 
 def build_model_detail(
@@ -1199,19 +1234,17 @@ def build_project_detail(
         cache_trend_unit = "hour"
         hourly_rollups = rollup_by_hour(project_turns, target_date=today_date, fill_day=False)
         for r in hourly_rollups:
-            denom = r.cache_read_tokens + r.cache_creation_tokens + r.input_tokens
             cache_trend.append({
                 "date": r.hour.isoformat(),
-                "hit_rate": r.cache_read_tokens / denom if denom > 0 else 0.0,
+                "hit_rate": cache_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens) or 0.0,
                 "cost_usd": r.cost_usd,
             })
     else:
         daily_rollups = rollup_by_date(project_turns, since=since)
         for r in daily_rollups:
-            denom = r.cache_read_tokens + r.cache_creation_tokens + r.input_tokens
             cache_trend.append({
                 "date": str(r.date),
-                "hit_rate": r.cache_read_tokens / denom if denom > 0 else 0.0,
+                "hit_rate": cache_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens) or 0.0,
                 "cost_usd": r.cost_usd,
             })
 
@@ -1231,9 +1264,8 @@ def build_project_detail(
     )[:20]
 
     def _turn_hit_rate(t: Turn) -> float | None:
-        cr = t.usage.cache_read_input_tokens
-        denom = cr + t.usage.cache_creation_input_tokens + t.usage.input_tokens
-        return cr / denom if denom > 0 else None
+        u = t.usage
+        return cache_hit_rate(u.cache_read_input_tokens, u.cache_creation_input_tokens, u.input_tokens)
 
     return {
         "cwd": cwd,
@@ -1277,13 +1309,12 @@ def build_day_detail(
     turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
     daily_90d_raw: list[dict] = []
     for r in rollup_by_date(turns_90d, since=since_90d):
-        denom = r.cache_read_tokens + r.cache_creation_tokens + r.input_tokens
-        kw = r.cost_usd * 1000 / r.output_tokens if r.output_tokens > 0 else 0.0
+        kw = cost_per_kw(r.cost_usd, r.output_tokens) or 0.0
         daily_90d_raw.append({
             "date": str(r.date),
             "cost_usd": r.cost_usd,
             "cost_per_kw": kw,
-            "hit_rate": r.cache_read_tokens / denom if denom > 0 else 0.0,
+            "hit_rate": cache_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens) or 0.0,
         })
 
     cost_7d_median = trailing_median(daily_90d_raw, 7, target_date + timedelta(days=1), "cost_usd")

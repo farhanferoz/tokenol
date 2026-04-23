@@ -76,7 +76,6 @@ export function verdictPill(v) {
   return `<span class="verdict-pill verdict-${v}">${v.replace(/_/g,' ')}</span>`;
 }
 
-/** Render a verdict distribution list. */
 const VERDICT_DEFS = {
   OK:                'No blow-up detected. Session stayed within all cost, context, and tool-error thresholds.',
   CONTEXT_CREEP:     'Max single-turn input ≥ 500k AND context growth ≥ 2k/turn — session is slowly pushing toward the context ceiling.',
@@ -86,6 +85,7 @@ const VERDICT_DEFS = {
   DUAL_SESSION_CONFLICT: 'Two concurrent sessions in the same project within one 5-hour window dropped cache reuse below 20:1 — sessions were thrashing each other\'s cache.',
 };
 
+/** Render a verdict distribution list. */
 export function renderVerdictDist(containerId, dist) {
   const el = document.getElementById(containerId);
   if (!el) return;

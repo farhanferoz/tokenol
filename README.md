@@ -4,6 +4,25 @@ Audit [Claude Code](https://claude.com/claude-code) JSONL session logs for cost,
 
 `tokenol` parses the session transcripts that Claude Code writes to `~/.claude*/projects/**/*.jsonl` and produces per-day, per-session, per-project, and per-model rollups — plus a live burn-rate view for the active 5-hour window.
 
+## Why tokenol
+
+Claude Code bills you for everything the model reads — input, output, **and** cache creation/reads. When the prompt cache is working, 95%+ of your context tokens cost a tenth of full input price. When it isn't — idle gaps past the 5-minute TTL, context compaction, two sessions in the same repo thrashing each other — the same conversation can cost 10× more without looking any different.
+
+`tokenol` tells you which sessions, projects, and hours did that, and usually why. You run it locally over the JSONL logs Claude Code already writes; nothing is uploaded anywhere.
+
+## Dashboard
+
+![Main dashboard](docs/screenshots/main.jpg)
+
+Session drill-down — pattern detection + cost-per-turn small multiples:
+
+![Session drill-down, top](docs/screenshots/session_top.jpg)
+![Session drill-down, lower panels](docs/screenshots/session_bottom.jpg)
+
+Project page — cache efficiency trend, verdict distribution, top turns:
+
+![Project page](docs/screenshots/project.jpg)
+
 ## Install
 
 ```bash

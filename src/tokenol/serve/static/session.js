@@ -32,8 +32,7 @@ function hmsUTC(isoStr) {
     .map(n => String(n).padStart(2, '0')).join(':');
 }
 
-// True when the session spans multiple UTC calendar days — triggers date-aware
-// tick labels on charts and the turns table so '23:00 → 00:00' stops ambiguating.
+// True when the session spans multiple UTC calendar days (disambiguates '23:00 → 00:00' on axes).
 let _multiDay = false;
 
 function _dateShort(d) {
@@ -60,14 +59,33 @@ function _xFmtTurn(v) {
 
 const sessionId = location.pathname.split('/').pop();
 
-fetch(`/api/session/${sessionId}`)
-  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-  .then(render)
-  .catch(err => {
-    const el = $('session-error');
-    el.style.display = '';
-    el.textContent = `Failed to load session ${esc(sessionId)}: ${esc(String(err.message))}`;
+function loadSession() {
+  fetch(`/api/session/${sessionId}`)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(render)
+    .catch(err => {
+      const el = $('session-error');
+      el.style.display = '';
+      el.textContent = `Failed to load session ${esc(sessionId)}: ${esc(String(err.message))}`;
+    });
+}
+
+loadSession();
+
+// Force a canvas redraw when the tab wakes from sleep or is restored from
+// bfcache — browsers may evict the <canvas> bitmap while axes/DOM stay
+// intact, leaving charts whose grid is drawn but whose data lines have
+// vanished. Re-fetch as a fallback for bfcache (where JS state may be frozen).
+function _wakeRedrawAllCharts() {
+  ['turn-chart', 'output-chart', 'context-chart', 'cachehit-chart'].forEach(id => {
+    const u = document.getElementById(id)?._uplot;
+    if (u) u.redraw(false, true);
   });
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _wakeRedrawAllCharts();
+});
+window.addEventListener('pageshow', e => { e.persisted ? loadSession() : _wakeRedrawAllCharts(); });
 
 // ---- top-level render ----
 
@@ -291,10 +309,8 @@ document.addEventListener('keydown', ev => {
 
 // ---- cost per turn: small multiples ----
 
-// Four strip charts stacked vertically. Each strip has its own Y-scale so a
-// rare $2 cache_creation spike doesn't flatten a turn's $0.03 input component.
-// A shared vertical cursor ties the rows together; hovering any bar highlights
-// the turn across all four strips.
+// Independent per-strip Y-scales so a rare $2 cache_creation spike doesn't flatten
+// a turn's $0.03 input component into invisibility.
 const _CBAR_STRIPS = [
   { key: 'cache_creation', label: 'cache creation', color: 'var(--alarm)'     },
   { key: 'cache_read',     label: 'cache read',     color: 'var(--amber-dim)' },
@@ -351,11 +367,7 @@ function _drawCostBars(turns, cont, top30) {
   const stripTop = si => si * (STRIP_H + GAP_Y);
   const plotAreaH = activeStrips.length * (STRIP_H + GAP_Y);
   const TOTAL_H = plotAreaH + AXIS_H;
-  // Fill the full container width. Use a float stride (plotW / n) to position
-  // bars; this keeps the plot area visually consistent with the Cache-read /
-  // Output charts below and avoids a 200-400px dead margin on sessions with
-  // few turns. Bar width is capped at 24px so a 30-turn view doesn't look like
-  // a stretched row of slabs; center each bar inside its stride slot.
+  // Cap bar width at 24px so a 30-turn view doesn't render as stretched slabs.
   const W = cont.offsetWidth || 800;
   const plotW = Math.max(200, W - LABEL_W - 8);
   const strideFloat = plotW / n;

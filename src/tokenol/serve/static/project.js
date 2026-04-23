@@ -1,6 +1,6 @@
 import {
   fmtUSD, fmtTok, fmtPct, fmtRatio, fmtAbsTime, shortModel, esc,
-  verdictPill, renderVerdictDist, GLOSSARY,
+  cwdBasename, verdictPill, renderVerdictDist, GLOSSARY,
 } from '/assets/components.js';
 
 const $ = id => document.getElementById(id);
@@ -76,7 +76,7 @@ function renderAll(d) {
   if (sec) sec.style.display = '';
   $('proj-error').style.display = 'none';
 
-  const name = d.cwd?.split('/').pop() || d.cwd || 'project';
+  const name = cwdBasename(d.cwd) || 'project';
   document.title = `tokenol — ${name}`;
   $('proj-name').textContent = name;
   $('proj-cwd').textContent  = d.cwd || '–';
@@ -226,3 +226,15 @@ document.querySelectorAll('#proj-range-pills [data-range]').forEach(el => {
 });
 
 loadData();
+
+// Force a canvas redraw when the tab wakes from sleep or is restored from
+// bfcache — browsers may evict the <canvas> bitmap while axes/DOM stay
+// intact, leaving a chart whose grid is drawn but whose data line has
+// vanished. Re-fetch as a fallback for bfcache (where JS state may be frozen).
+function _wakeRedraw() {
+  if (_chartInst) _chartInst.redraw(false, true);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _wakeRedraw();
+});
+window.addEventListener('pageshow', e => { e.persisted ? loadData() : _wakeRedraw(); });
