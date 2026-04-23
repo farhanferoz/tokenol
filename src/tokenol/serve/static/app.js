@@ -837,7 +837,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---- pill / range selector helper ----
-const _PILL_SEL = '[data-range],[data-metric],[data-window]';
+const _PILL_SEL = '[data-range],[data-metric],[data-window],[data-scale]';
 
 function _wireRange(groupId, onChange) {
   const group = $(groupId);
