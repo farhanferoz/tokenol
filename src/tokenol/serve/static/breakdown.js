@@ -158,7 +158,16 @@ function renderDailyWork(data) {
     `total ${fmtUSD(totalCost)} · avg ${fmtUSD(totalCost / days)}/d`;
 
   const canvas = document.getElementById('chart-daily-work');
-  if (_chartDailyWork) { _chartDailyWork.destroy(); _chartDailyWork = null; }
+  if (_chartDailyWork) {
+    // In-place update: avoids canvas destroy/recreate flicker on SSE tick.
+    _chartDailyWork.data.labels = labels;
+    for (let i = 0; i < datasets.length; i++) {
+      _chartDailyWork.data.datasets[i].data = datasets[i].data;
+      _chartDailyWork.data.datasets[i].backgroundColor = datasets[i].backgroundColor;
+    }
+    _chartDailyWork.update('none');
+    return;
+  }
   _chartDailyWork = new window.Chart(canvas, {
     type: 'bar',
     data: { labels, datasets },
@@ -196,7 +205,14 @@ function renderDailyCache(data) {
       : `total ${fmtTok(totalReads)}`;
 
   const canvas = document.getElementById('chart-daily-cache');
-  if (_chartDailyCache) { _chartDailyCache.destroy(); _chartDailyCache = null; }
+  if (_chartDailyCache) {
+    // In-place update: avoids canvas destroy/recreate flicker on SSE tick.
+    _chartDailyCache.data.labels = labels;
+    _chartDailyCache.data.datasets[0].data = datasets[0].data;
+    _chartDailyCache.data.datasets[0].backgroundColor = datasets[0].backgroundColor;
+    _chartDailyCache.update('none');
+    return;
+  }
   _chartDailyCache = new window.Chart(canvas, {
     type: 'bar',
     data: { labels, datasets },
