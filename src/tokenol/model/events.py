@@ -75,6 +75,7 @@ class Turn:
     is_interrupted: bool = False
     tool_use_count: int = 0
     tool_error_count: int = 0
+    tool_names: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass

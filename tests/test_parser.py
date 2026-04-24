@@ -204,3 +204,29 @@ def test_parse_zero_tools(tmp_path):
     events = list(parse_file(FIXTURES / "basic.jsonl"))
     assert events[0].tool_names == Counter()
     assert events[0].tool_use_count == 0
+
+
+def test_builder_propagates_tool_names(tmp_path):
+    """tool_names on RawEvent must survive through build_turns to Turn."""
+    import json
+    from tokenol.ingest.builder import build_turns
+    p = tmp_path / "sess.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
+        "model": "claude-opus-4-7",
+        "message": {
+            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            "content": [
+                {"type": "tool_use", "name": "Grep", "input": {}},
+                {"type": "tool_use", "name": "Grep", "input": {}},
+            ],
+        },
+    }) + "\n")
+
+    turns = build_turns([p])
+    assert len(turns) == 1
+    assert turns[0].tool_names == Counter({"Grep": 2})
+    assert turns[0].tool_use_count == 2

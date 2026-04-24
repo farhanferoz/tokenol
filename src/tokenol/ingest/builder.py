@@ -39,6 +39,7 @@ def build_turns(paths: list[Path]) -> list[Turn]:
                 is_interrupted=is_interrupted,
                 tool_use_count=ev.tool_use_count,
                 tool_error_count=ev.tool_error_count,
+                tool_names=ev.tool_names,
             )
         )
 
