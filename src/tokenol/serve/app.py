@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from tokenol.metrics.cost import cache_saved_usd
+from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
@@ -339,6 +339,37 @@ def create_app(
             "cache_creation_tokens": sum(t.usage.cache_creation_input_tokens for t in turns),
             "cost_usd": sum(t.cost_usd for t in turns),
             "cache_saved_usd": cache_saved_usd(turns),
+        })
+
+    @app.get("/api/breakdown/daily-tokens")
+    async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
+        if range not in ("7d", "30d", "90d", "all"):
+            raise HTTPException(
+                status_code=400,
+                detail="range must be 7d, 30d, 90d, or all",
+            )
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+        if since is None:
+            turns = list(result.turns)
+            rollups = rollup_by_date(turns)
+        else:
+            turns = [t for t in result.turns if t.timestamp.date() >= since]
+            rollups = rollup_by_date(turns, since=since)
+
+        return JSONResponse({
+            "range": range,
+            "days": [
+                {
+                    "date": r.date.isoformat(),
+                    "input": r.input_tokens,
+                    "output": r.output_tokens,
+                    "cache_creation": r.cache_creation_tokens,
+                    "cache_read": r.cache_read_tokens,
+                    "cost_usd": r.cost_usd,
+                }
+                for r in rollups
+            ],
         })
 
     return app

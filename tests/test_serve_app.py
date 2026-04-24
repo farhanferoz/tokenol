@@ -777,3 +777,40 @@ async def test_breakdown_summary_rejects_unknown_range(tmp_path: Path) -> None:
             resp = await client.get("/api/breakdown/summary?range=14d")
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_daily_tokens_returns_day_array(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/daily-tokens?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "days" in data
+    assert len(data["days"]) >= 1
+    day = data["days"][0]
+    for key in ["date", "input", "output", "cache_creation", "cache_read", "cost_usd"]:
+        assert key in day, f"Missing field: {key}"
+    # Dates are ISO strings (YYYY-MM-DD).
+    assert len(day["date"]) == 10 and day["date"][4] == "-" and day["date"][7] == "-"
+
+
+@pytest.mark.asyncio
+async def test_breakdown_daily_tokens_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/daily-tokens?range=14d")
+
+    assert resp.status_code == 400
