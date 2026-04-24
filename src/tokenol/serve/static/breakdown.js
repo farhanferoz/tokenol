@@ -342,6 +342,66 @@ function renderByModel(data) {
   });
 }
 
+async function fetchTools(range) {
+  const resp = await fetch(`/api/breakdown/tools?range=${encodeURIComponent(range)}`);
+  if (!resp.ok) throw new Error(`tools ${resp.status}`);
+  return resp.json();
+}
+
+let _chartTools = null;
+
+function renderToolMix(data) {
+  const pal = tokenolPalette();
+  const tools = data.tools || [];
+  const labels = tools.map(t => t.tool);
+  const counts = tools.map(t => t.count);
+
+  const subEl = document.getElementById('bp-tools-sub');
+  const totalCalls = counts.reduce((s, n) => s + n, 0);
+  subEl.textContent = tools.length === 0
+    ? 'no tool calls'
+    : `${tools.length} tool${tools.length === 1 ? '' : 's'} · ${fmtInt(totalCalls)} calls`;
+
+  const canvas = document.getElementById('chart-tools');
+  if (_chartTools) {
+    _chartTools.data.labels = labels;
+    _chartTools.data.datasets[0].data = counts;
+    _chartTools.update('none');
+    return;
+  }
+  _chartTools = new window.Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'calls',
+        data: counts,
+        backgroundColor: pal[0],
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { beginAtZero: true, ticks: { callback: v => fmtInt(v) } },
+        y: { ticks: { autoSkip: false } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              return `${ctx.label}: ${fmtInt(ctx.parsed.x)} calls`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
 let _chartDefaultsApplied = false;
 function configureChartDefaults() {
   if (_chartDefaultsApplied || typeof window.Chart === 'undefined') return;
@@ -502,17 +562,19 @@ async function refreshAll() {
   try {
     await whenChartReady();
     configureChartDefaults();
-    const [summary, daily, byProject, byModel] = await Promise.all([
+    const [summary, daily, byProject, byModel, tools] = await Promise.all([
       fetchSummary(range),
       fetchDailyTokens(range),
       fetchByProject(range),
       fetchByModel(range),
+      fetchTools(range),
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
     renderDailyCache(daily);
     renderByProject(byProject);
     renderByModel(byModel);
+    renderToolMix(tools);
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
