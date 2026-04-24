@@ -827,3 +827,43 @@ async def test_breakdown_route_returns_html(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-project?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "projects" in data
+    assert len(data["projects"]) >= 1
+    p = data["projects"][0]
+    for key in ["project", "cwd", "cwd_b64", "input", "output", "cache_hit_rate"]:
+        assert key in p, f"Missing field: {key}"
+    # Billable-token sort is descending.
+    billable = [pp["input"] + pp["output"] for pp in data["projects"]]
+    assert billable == sorted(billable, reverse=True)
+    # cache_hit_rate is a decimal or null.
+    assert p["cache_hit_rate"] is None or 0.0 <= p["cache_hit_rate"] <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_project_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-project?range=14d")
+
+    assert resp.status_code == 400

@@ -30,6 +30,7 @@ from tokenol.serve.state import (
     build_search_results,
     build_snapshot_full,
     decode_cwd,
+    encode_cwd,
     range_since,
 )
 
@@ -375,5 +376,46 @@ def create_app(
                 for r in rollups
             ],
         })
+
+    @app.get("/api/breakdown/by-project")
+    async def api_breakdown_by_project(request: Request, range: str = "30d"):
+        if range not in ("7d", "30d", "90d", "all"):
+            raise HTTPException(
+                status_code=400,
+                detail="range must be 7d, 30d, 90d, or all",
+            )
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+
+        buckets: dict[str, dict[str, int]] = {}
+        for s in result.sessions:
+            cwd = s.cwd or "(unknown)"
+            for t in s.turns:
+                if since is not None and t.timestamp.date() < since:
+                    continue
+                if t.is_interrupted:
+                    continue
+                b = buckets.setdefault(cwd, {
+                    "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+                })
+                b["input"] += t.usage.input_tokens
+                b["output"] += t.usage.output_tokens
+                b["cache_read"] += t.usage.cache_read_input_tokens
+                b["cache_creation"] += t.usage.cache_creation_input_tokens
+
+        projects = []
+        for cwd, b in buckets.items():
+            denom = b["cache_read"] + b["cache_creation"] + b["input"]
+            hit_rate = (b["cache_read"] / denom) if denom > 0 else None
+            projects.append({
+                "project": Path(cwd).name if cwd != "(unknown)" else "(unknown)",
+                "cwd": cwd,
+                "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
+                "input": b["input"],
+                "output": b["output"],
+                "cache_hit_rate": hit_rate,
+            })
+        projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
+        return JSONResponse({"range": range, "projects": projects})
 
     return app
