@@ -894,6 +894,7 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
 }
 .breakdown-grid--2 { grid-template-columns: 1fr 1fr; }
 .breakdown-grid--2-1 { grid-template-columns: 2fr 1fr; }
+.breakdown-grid--1 { grid-template-columns: 1fr; }
 
 .breakdown-panel {
   background: var(--bg-raised);
@@ -921,6 +922,7 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
   color: var(--mute);
 }
 .breakdown-chart { position: relative; min-height: 200px; }
+.breakdown-chart--tall { min-height: 320px; }
 
 .breakdown-caption {
   display: flex;
