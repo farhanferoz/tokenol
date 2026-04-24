@@ -43,6 +43,11 @@ function fmtUSD(n) {
   return `$${n.toFixed(2)}`;
 }
 
+function fmtPct(n, decimals = 1) {
+  if (!Number.isFinite(n)) return '—';
+  return `${n.toFixed(decimals)}%`;
+}
+
 // ---------------------------------------------------------------------------
 // Summary / scorecard
 // ---------------------------------------------------------------------------
@@ -117,6 +122,19 @@ function healthColorForHitRate(rate) {
   return cssVar('--alarm');
 }
 
+let _captionRendered = false;
+function renderByProjectCaption() {
+  if (_captionRendered) return;
+  const el = document.getElementById('bp-by-project-caption');
+  if (!el) return;
+  el.innerHTML =
+    `<span>cache hit rate</span>` +
+    `<span class="caption-swatch caption-swatch--green"></span><span>≥${HIT_PCT_GREEN}%</span>` +
+    `<span class="caption-swatch caption-swatch--amber"></span><span>${HIT_PCT_RED}–${HIT_PCT_GREEN}%</span>` +
+    `<span class="caption-swatch caption-swatch--alarm"></span><span>&lt;${HIT_PCT_RED}%</span>`;
+  _captionRendered = true;
+}
+
 // ---------------------------------------------------------------------------
 // Cache-health dots plugin for Chart.js.
 //
@@ -169,8 +187,10 @@ const BY_PROJECT_TOP_N = 10;
 
 let _chartByProject = null;
 let _byProjectCwdB64 = [];   // parallel to chart's x-axis order, for click-drill
+let _byProjectHitRate = [];
 
 function renderByProject(data) {
+  renderByProjectCaption();
   const pal = tokenolPalette();
   // Cap to a readable number of bars; tail is dropped (not collapsed) so the
   // chart stays legible. Subheading notes how many were shown vs. total.
@@ -178,6 +198,7 @@ function renderByProject(data) {
   const labels = projects.map(p => p.project);
   const dotColors = projects.map(p => healthColorForHitRate(p.cache_hit_rate));
   _byProjectCwdB64 = projects.map(p => p.cwd_b64);
+  _byProjectHitRate = projects.map(p => p.cache_hit_rate);
 
   const datasets = [
     { label: 'input',  data: projects.map(p => p.input),  backgroundColor: pal[0] },
@@ -224,6 +245,15 @@ function renderByProject(data) {
       plugins: {
         legend: { position: 'top', align: 'end' },
         cacheHealthDots: { colors: dotColors },
+        tooltip: {
+          callbacks: {
+            afterBody(items) {
+              if (!items.length) return '';
+              const rate = _byProjectHitRate[items[0].dataIndex];
+              return `cache hit rate: ${rate == null ? '—' : fmtPct(rate * 100)}`;
+            },
+          },
+        },
       },
       onClick: (_evt, elements) => {
         if (!elements.length) return;
@@ -297,8 +327,7 @@ function renderByModel(data) {
             label(ctx) {
               const total = ctx.dataset.data.reduce((s, v) => s + v, 0) || 1;
               const v = ctx.parsed;
-              const pct = ((v / total) * 100).toFixed(1);
-              return `${ctx.label}: ${fmtTok(v)} billable (${pct}%)`;
+              return `${ctx.label}: ${fmtTok(v)} billable (${fmtPct((v / total) * 100)})`;
             },
           },
         },

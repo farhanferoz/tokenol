@@ -922,6 +922,27 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
 }
 .breakdown-chart { position: relative; min-height: 200px; }
 
+.breakdown-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--mute);
+  margin-bottom: 8px;
+}
+.breakdown-caption .caption-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: -2px;
+}
+.breakdown-caption .caption-swatch--green { background: var(--green); }
+.breakdown-caption .caption-swatch--amber { background: var(--amber); }
+.breakdown-caption .caption-swatch--alarm { background: var(--alarm); }
+
 @media (max-width: 900px) {
   .scorecard { grid-template-columns: repeat(2, 1fr); }
   .breakdown-grid--2 { grid-template-columns: 1fr; }
