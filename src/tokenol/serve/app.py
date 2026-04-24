@@ -20,6 +20,7 @@ from tokenol.serve.state import (
     VALID_METRICS,
     ParseCache,
     SnapshotResult,
+    _grouped_cwd_by_sid,
     build_daily_panel,
     build_day_detail,
     build_hourly_panel,
@@ -384,9 +385,11 @@ def create_app(
         result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
         since = range_since(range, date.today()) if range != "all" else None
 
+        cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
+
         buckets: dict[str, dict[str, int]] = {}
         for s in result.sessions:
-            cwd = s.cwd or "(unknown)"
+            cwd = cwd_by_sid.get(s.session_id, "(unknown)")
             for t in s.turns:
                 if since is not None and t.timestamp.date() < since:
                     continue
