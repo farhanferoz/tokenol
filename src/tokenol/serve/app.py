@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
+from tokenol.metrics.rollups import _rank_counter_with_others
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
@@ -463,16 +464,7 @@ def create_app(
                 continue
             total.update(t.tool_names)
 
-        if not total:
-            return JSONResponse({"range": range, "tools": []})
-
-        ranked = total.most_common()
-        top_n = 10
-        head = ranked[:top_n]
-        tail = ranked[top_n:]
-        tools = [{"tool": name, "count": count} for name, count in head]
-        if tail:
-            tools.append({"tool": "others", "count": sum(c for _, c in tail)})
+        tools = _rank_counter_with_others(total, top_n=10)
         return JSONResponse({"range": range, "tools": tools})
 
     return app
