@@ -186,8 +186,6 @@ async function fetchByProject(range) {
 const BY_PROJECT_TOP_N = 10;
 
 let _chartByProject = null;
-let _byProjectCwdB64 = [];   // parallel to chart's x-axis order, for click-drill
-let _byProjectHitRate = [];
 
 function renderByProject(data) {
   renderByProjectCaption();
@@ -197,8 +195,8 @@ function renderByProject(data) {
   const projects = data.projects.slice(0, BY_PROJECT_TOP_N);
   const labels = projects.map(p => p.project);
   const dotColors = projects.map(p => healthColorForHitRate(p.cache_hit_rate));
-  _byProjectCwdB64 = projects.map(p => p.cwd_b64);
-  _byProjectHitRate = projects.map(p => p.cache_hit_rate);
+  const cwdB64 = projects.map(p => p.cwd_b64);
+  const hitRate = projects.map(p => p.cache_hit_rate);
 
   const datasets = [
     { label: 'input',  data: projects.map(p => p.input),  backgroundColor: pal[0] },
@@ -218,6 +216,7 @@ function renderByProject(data) {
   const canvas = document.getElementById('chart-by-project');
 
   if (_chartByProject) {
+    _chartByProject.$tokenol = { cwdB64, hitRate };
     _chartByProject.data.labels = labels;
     for (let i = 0; i < datasets.length; i++) {
       _chartByProject.data.datasets[i].data = datasets[i].data;
@@ -249,7 +248,7 @@ function renderByProject(data) {
           callbacks: {
             afterBody(items) {
               if (!items.length) return '';
-              const rate = _byProjectHitRate[items[0].dataIndex];
+              const rate = items[0].chart.$tokenol.hitRate[items[0].dataIndex];
               return `cache hit rate: ${rate == null ? '—' : fmtPct(rate * 100)}`;
             },
           },
@@ -258,11 +257,12 @@ function renderByProject(data) {
       onClick: (_evt, elements) => {
         if (!elements.length) return;
         const idx = elements[0].index;
-        const b64 = _byProjectCwdB64[idx];
+        const b64 = _chartByProject.$tokenol.cwdB64[idx];
         if (b64) window.location.href = `/project/${b64}`;
       },
     },
   });
+  _chartByProject.$tokenol = { cwdB64, hitRate };
 }
 
 async function fetchByModel(range) {
@@ -274,7 +274,6 @@ async function fetchByModel(range) {
 const BY_MODEL_TOP_N = 6;
 
 let _chartByModel = null;
-let _byModelNames = [];  // parallel to chart labels; 'others' entry is null
 
 function collapseModels(models) {
   // Keep top N−1, collapse the tail into 'others' only if it would exceed N.
@@ -295,7 +294,7 @@ function renderByModel(data) {
   const labels = collapsed.map(c => c.name);
   const values = collapsed.map(c => c.value);
   const colors = collapsed.map((_, i) => pal[i % pal.length]);
-  _byModelNames = collapsed.map(c => (c.isOthers ? null : c.name));
+  const names = collapsed.map(c => (c.isOthers ? null : c.name));
 
   document.getElementById('bp-by-model-sub').textContent =
     `${data.models.length} model${data.models.length === 1 ? '' : 's'}`;
@@ -303,6 +302,7 @@ function renderByModel(data) {
   const canvas = document.getElementById('chart-by-model');
 
   if (_chartByModel) {
+    _chartByModel.$tokenol = { names };
     _chartByModel.data.labels = labels;
     _chartByModel.data.datasets[0].data = values;
     _chartByModel.data.datasets[0].backgroundColor = colors;
@@ -335,11 +335,12 @@ function renderByModel(data) {
       onClick: (_evt, elements) => {
         if (!elements.length) return;
         const idx = elements[0].index;
-        const name = _byModelNames[idx];
+        const name = _chartByModel.$tokenol.names[idx];
         if (name) window.location.href = `/model/${encodeURIComponent(name)}`;
       },
     },
   });
+  _chartByModel.$tokenol = { names };
 }
 
 async function fetchTools(range) {
