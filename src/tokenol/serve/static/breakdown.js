@@ -256,5 +256,37 @@ async function refreshAll() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// SSE refresh
+//
+// The existing /api/stream stream is parameterised by 'period' (today/7d/30d/all),
+// not our 'range', and its payload is tailored to Overview. We ignore the payload
+// and only use the message event as a tick signal, then re-fetch our own endpoints
+// with the currently-selected range.
+// ---------------------------------------------------------------------------
+
+let _es = null;
+let _reconnectMs = 1000;
+
+function connectSSE() {
+  if (_es) { _es.close(); _es = null; }
+  _es = new EventSource('/api/stream?period=today');
+  _es.onopen = () => {
+    _reconnectMs = 1000;
+    const dot = document.getElementById('sse-dot');
+    if (dot) { dot.className = 'sse-dot connected'; dot.title = 'Live — connected'; }
+  };
+  _es.onmessage = () => { refreshAll().catch(err => console.error('[breakdown] sse refresh', err)); };
+  _es.onerror = () => {
+    if (_es) { _es.close(); _es = null; }
+    const dot = document.getElementById('sse-dot');
+    if (dot) { dot.className = 'sse-dot error'; dot.title = 'Live — reconnecting'; }
+    setTimeout(connectSSE, _reconnectMs);
+    _reconnectMs = Math.min(_reconnectMs * 2, 30_000);
+  };
+}
+
+connectSSE();
+
 wirePeriodPills();
 refreshAll();
