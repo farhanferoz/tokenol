@@ -886,3 +886,58 @@ async def test_breakdown_by_project_rejects_unknown_range(tmp_path: Path) -> Non
             resp = await client.get("/api/breakdown/by-project?range=14d")
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-model?range=all")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["range"] == "all"
+        assert "models" in data
+        assert len(data["models"]) >= 1
+        m = data["models"][0]
+        for key in ["model", "input", "output", "share"]:
+            assert key in m, f"Missing field: {key}"
+        # Shares sum to ~1 (floating point tolerance).
+        total = sum(mm["share"] for mm in data["models"])
+        assert abs(total - 1.0) < 1e-6
+        # Sort desc by billable tokens.
+        billable = [mm["input"] + mm["output"] for mm in data["models"]]
+        assert billable == sorted(billable, reverse=True)
+
+        # Oracle cross-check: sums of per-model input/output must match the
+        # raw non-interrupted turn totals from the cached snapshot. Cache
+        # tokens are deliberately NOT part of share math.
+        snap = app.state.snapshot_result
+        assert snap is not None
+        expected_input = sum(
+            t.usage.input_tokens for t in snap.turns if not t.is_interrupted
+        )
+        expected_output = sum(
+            t.usage.output_tokens for t in snap.turns if not t.is_interrupted
+        )
+        assert sum(mm["input"] for mm in data["models"]) == expected_input
+        assert sum(mm["output"] for mm in data["models"]) == expected_output
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_model_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-model?range=14d")
+
+    assert resp.status_code == 400

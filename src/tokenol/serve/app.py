@@ -415,4 +415,34 @@ def create_app(
         projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
         return JSONResponse({"range": range, "projects": projects})
 
+    @app.get("/api/breakdown/by-model")
+    async def api_breakdown_by_model(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+
+        buckets: dict[str, dict[str, int]] = {}
+        for t in result.turns:
+            if since is not None and t.timestamp.date() < since:
+                continue
+            if t.is_interrupted:
+                continue
+            name = t.model or "(unknown)"
+            b = buckets.setdefault(name, {"input": 0, "output": 0})
+            b["input"] += t.usage.input_tokens
+            b["output"] += t.usage.output_tokens
+
+        total_billable = sum(b["input"] + b["output"] for b in buckets.values()) or 1
+        models = []
+        for name, b in buckets.items():
+            billable = b["input"] + b["output"]
+            models.append({
+                "model": name,
+                "input": b["input"],
+                "output": b["output"],
+                "share": billable / total_billable,
+            })
+        models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
+        return JSONResponse({"range": range, "models": models})
+
     return app
