@@ -130,6 +130,49 @@ async function whenChartReady() {
 }
 
 // ---------------------------------------------------------------------------
+// Time-section charts
+// ---------------------------------------------------------------------------
+
+async function fetchDailyTokens(range) {
+  const resp = await fetch(`/api/breakdown/daily-tokens?range=${encodeURIComponent(range)}`);
+  if (!resp.ok) throw new Error(`daily-tokens ${resp.status}`);
+  return resp.json();
+}
+
+let _chartDailyWork = null;
+
+function renderDailyWork(data) {
+  const pal = tokenolPalette();
+  const labels = data.days.map(d => d.date);
+  const datasets = [
+    { label: 'input',          data: data.days.map(d => d.input),          backgroundColor: pal[0] },
+    { label: 'output',         data: data.days.map(d => d.output),         backgroundColor: pal[1] },
+    { label: 'cache created',  data: data.days.map(d => d.cache_creation), backgroundColor: pal[2] },
+  ];
+
+  const totalCost = data.days.reduce((s, d) => s + d.cost_usd, 0);
+  const days = Math.max(1, data.days.length);
+  document.getElementById('bp-daily-work-sub').textContent =
+    `total ${fmtUSD(totalCost)} · avg ${fmtUSD(totalCost / days)}/d`;
+
+  const canvas = document.getElementById('chart-daily-work');
+  if (_chartDailyWork) { _chartDailyWork.destroy(); _chartDailyWork = null; }
+  _chartDailyWork = new window.Chart(canvas, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { stacked: true, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+        y: { stacked: true, beginAtZero: true, ticks: { callback: v => fmtTok(v) } },
+      },
+      plugins: { legend: { position: 'top', align: 'end' } },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Pill wiring
 // ---------------------------------------------------------------------------
 
@@ -159,11 +202,14 @@ function wirePeriodPills() {
 async function refreshAll() {
   const range = getPeriod();
   try {
-    const [summary] = await Promise.all([
+    await whenChartReady();
+    configureChartDefaults();
+    const [summary, daily] = await Promise.all([
       fetchSummary(range),
-      whenChartReady().then(configureChartDefaults),
+      fetchDailyTokens(range),
     ]);
     renderScorecard(summary);
+    renderDailyWork(daily);
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
