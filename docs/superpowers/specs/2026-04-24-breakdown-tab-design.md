@@ -142,6 +142,25 @@ No cache-invalidation work is required. `ParseCache` (`src/tokenol/serve/state.p
 
 Backwards compat: every existing `tool_use_count` consumer keeps its value; nothing downstream breaks.
 
+## Visual consistency
+
+Every new surface must be visually indistinguishable from the existing pages. Non-negotiable shared rules across **all** pages (Overview, Day, Session, Project, Model, and the new Breakdown):
+
+- **CSS variables only.** Every color, border, background comes from the tokens defined in `styles.css:2–23` (`--bg`, `--bg-raised`, `--bg-soft`, `--fg`, `--fg-2`, `--mute`, `--mute-2`, `--rule`, `--rule-2`, `--amber`, `--amber-dim`, `--amber-bg`, `--green`, `--green-bg`, `--alarm`, `--alarm-bg`, `--cool`). No inline hex values in new HTML/CSS/JS.
+- **Font stack.** Titles and display numerics use `var(--font-serif)` (Instrument Serif). Labels, tick marks, numbers in tables, mono data use `var(--font-mono)` (JetBrains Mono).
+- **Chart.js defaults configured once.** `src/tokenol/serve/static/chart.js` sets `Chart.defaults.color`, `Chart.defaults.font.family`, grid color, tooltip background, and legend label color from the CSS variables at load time. Every Chart.js chart on any page inherits these — no per-chart overrides of color/font.
+- **Dataset color order.** The first dataset on any multi-series chart uses `--amber`, the second `--alarm`, the third `--green`, the fourth `--cool`, fifth `--mute`, sixth `--amber-dim`. This order is stable so that the same concept (e.g. "input tokens") reads the same color wherever it appears.
+- **Semantic color usage.**
+  - `--amber` (ochre) → input tokens, primary activity.
+  - `--alarm` (rust-red) → output tokens, attention states.
+  - `--green` (deep green) → cache, savings, healthy thresholds.
+  - `--cool` (slate blue) → secondary metadata, model axis.
+  - `--mute` / `--mute-2` → captions, disabled states.
+- **Section-heading pattern** shared between pages: `<div class="section-heading">` with an `<h2>` in Instrument Serif on the left and optional right-side subtitle. Breakdown reuses this unchanged.
+- **Pill group styling** (period pills, metric pills) reuses the existing `.pill-row` / `.pill-group` classes — Breakdown's page-level period pill is the same visual element as those on Daily History and Models.
+
+This section is binding: any divergence during implementation (ad-hoc hex, font import, chart library default) is a review-blocker.
+
 ## Frontend architecture
 
 New or changed files:
