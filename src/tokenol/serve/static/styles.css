@@ -795,3 +795,133 @@ hr.rule { border: none; border-top: 1px solid var(--rule); margin: 10px 0; }
 .jump-link:hover { color: var(--fg); }
 @keyframes bar-flash { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
 .bar-highlight { animation: bar-flash 0.4s ease-in-out 3; }
+
+/* ===== Nav tabs (shared across Overview/Breakdown) ===== */
+.nav-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 16px;
+  align-self: stretch;
+  align-items: center;
+}
+.nav-tab {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  color: var(--mute-2);
+  padding: 8px 14px;
+  border-bottom: 2px solid transparent;
+}
+.nav-tab:hover { color: var(--fg); }
+.nav-tab.is-active { color: var(--fg); border-bottom-color: var(--amber); }
+
+/* Hide the global period pills when on the Breakdown page —
+ * Breakdown carries its own page-level pill group. */
+body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
+
+/* ===== Breakdown: page heading ===== */
+.page-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 32px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.page-title {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 34px;
+  line-height: 1;
+  margin: 0;
+}
+.page-subtitle {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--mute);
+  margin-top: 4px;
+}
+
+/* ===== Breakdown: scorecard ===== */
+.scorecard {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  padding: 16px 32px 8px;
+}
+.scorecard-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 12px 16px;
+}
+.scorecard-card .sc-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mute-2);
+}
+.scorecard-card .sc-primary {
+  font-family: var(--font-serif);
+  font-size: 28px;
+  line-height: 1.1;
+  margin-top: 2px;
+  color: var(--fg);
+}
+.scorecard-card .sc-primary .sc-unit {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--mute-2);
+  margin-left: 2px;
+}
+.scorecard-card .sc-sub {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--mute-2);
+  margin-top: 4px;
+}
+.scorecard-card .sc-sub.good { color: var(--green); }
+
+/* ===== Breakdown: sections and panels ===== */
+.breakdown-section-heading { margin-top: 8px; }
+.breakdown-grid {
+  padding: 0 32px 24px;
+  display: grid;
+  gap: 16px;
+}
+.breakdown-grid--2 { grid-template-columns: 1fr 1fr; }
+
+.breakdown-panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 12px 16px 16px;
+}
+.breakdown-panel-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+}
+.breakdown-panel-heading h3 {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 19px;
+  margin: 0;
+}
+.chart-subheading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--mute);
+}
+.breakdown-chart { position: relative; min-height: 200px; }
+
+@media (max-width: 900px) {
+  .scorecard { grid-template-columns: repeat(2, 1fr); }
+  .breakdown-grid--2 { grid-template-columns: 1fr; }
+}
