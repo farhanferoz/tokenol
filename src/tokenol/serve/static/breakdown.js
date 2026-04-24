@@ -74,6 +74,8 @@ function renderScorecard(data) {
     data.cache_saved_usd > 0
       ? `cache saved ≈ ${fmtUSD(data.cache_saved_usd)}`
       : '';
+
+  window.__breakdownCacheSaved = data.cache_saved_usd;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +174,44 @@ function renderDailyWork(data) {
   });
 }
 
+let _chartDailyCache = null;
+
+function renderDailyCache(data) {
+  const pal = tokenolPalette();
+  const labels = data.days.map(d => d.date);
+  const datasets = [
+    { label: 'cache read', data: data.days.map(d => d.cache_read), backgroundColor: pal[2] },
+  ];
+
+  // "Savings per day" subheading — pulled from the summary endpoint, not
+  // daily-tokens, so this renderer reads it from the scorecard state.
+  // For PR1 we compute a simple total-reads figure and a "avg $X/d saved" only
+  // when the scorecard has already populated a cache_saved_usd number.
+  const totalReads = data.days.reduce((s, d) => s + d.cache_read, 0);
+  const days = Math.max(1, data.days.length);
+  const savedTotal = window.__breakdownCacheSaved ?? 0;
+  document.getElementById('bp-daily-cache-sub').textContent =
+    savedTotal > 0
+      ? `total ${fmtTok(totalReads)} · avg ${fmtUSD(savedTotal / days)}/d saved`
+      : `total ${fmtTok(totalReads)}`;
+
+  const canvas = document.getElementById('chart-daily-cache');
+  if (_chartDailyCache) { _chartDailyCache.destroy(); _chartDailyCache = null; }
+  _chartDailyCache = new window.Chart(canvas, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+        y: { beginAtZero: true, ticks: { callback: v => fmtTok(v) } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Pill wiring
 // ---------------------------------------------------------------------------
@@ -210,6 +250,7 @@ async function refreshAll() {
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
+    renderDailyCache(daily);
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
