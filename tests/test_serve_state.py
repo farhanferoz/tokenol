@@ -490,6 +490,26 @@ def test_grouped_cwd_siblings_stay_separate(tmp_path: Path) -> None:
     assert m["b"] == "/dev/StratSense/Frontend"
 
 
+def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None:
+    """A single JSONL file holding N sessions must set source_file on each.
+
+    Regression guard: earlier code keyed session_source by path.stem, which
+    broke for multi-session files (stem != sessionId for all but one).
+    """
+    from tokenol.ingest.parser import parse_file
+    from tokenol.serve.state import _build_turns_and_sessions
+
+    dst = tmp_path / "multi.jsonl"
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+
+    events = parse_file(dst)
+    _, sessions = _build_turns_and_sessions(events)
+
+    assert {s.session_id for s in sessions} == {"sess-a", "sess-b", "sess-c"}
+    for s in sessions:
+        assert s.source_file == str(dst), f"{s.session_id} has source_file={s.source_file!r}"
+
+
 # ---- build_tool_detail tests ------------------------------------------
 
 from collections import Counter
