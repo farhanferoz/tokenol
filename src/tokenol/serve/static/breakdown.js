@@ -106,12 +106,17 @@ function tokenolPalette() {
 }
 
 // ---------------------------------------------------------------------------
-// Cache-health thresholds (hard-coded from metrics/thresholds.DEFAULTS).
-// PR2 ships these inline; a later task can fetch /api/prefs for live values.
+// Cache-health thresholds (default from metrics/thresholds.DEFAULTS).
+// Overridden by /api/prefs on page load via loadThresholdsFromPrefs().
+// Mutable module-level so renderers see the latest value on SSE tick
+// without re-plumbing.
 // ---------------------------------------------------------------------------
 
-const HIT_PCT_GREEN = 95.0;
-const HIT_PCT_RED = 85.0;
+// Thresholds default to DEFAULTS from metrics/thresholds.py; overridden by
+// /api/prefs on page load. Mutable module-level so renderers see the latest
+// value on SSE tick without re-plumbing.
+let HIT_PCT_GREEN = 95.0;
+let HIT_PCT_RED = 85.0;
 
 function healthColorForHitRate(rate) {
   // `rate` is a decimal in [0, 1] or null/undefined.
@@ -122,17 +127,18 @@ function healthColorForHitRate(rate) {
   return cssVar('--alarm');
 }
 
-let _captionRendered = false;
+let _captionSignature = '';
 function renderByProjectCaption() {
-  if (_captionRendered) return;
   const el = document.getElementById('bp-by-project-caption');
   if (!el) return;
+  const sig = `${HIT_PCT_GREEN}|${HIT_PCT_RED}`;
+  if (sig === _captionSignature) return;
   el.innerHTML =
     `<span>cache hit rate</span>` +
     `<span class="caption-swatch caption-swatch--green"></span><span>≥${HIT_PCT_GREEN}%</span>` +
     `<span class="caption-swatch caption-swatch--amber"></span><span>${HIT_PCT_RED}–${HIT_PCT_GREEN}%</span>` +
     `<span class="caption-swatch caption-swatch--alarm"></span><span>&lt;${HIT_PCT_RED}%</span>`;
-  _captionRendered = true;
+  _captionSignature = sig;
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +353,19 @@ async function fetchTools(range) {
   const resp = await fetch(`/api/breakdown/tools?range=${encodeURIComponent(range)}`);
   if (!resp.ok) throw new Error(`tools ${resp.status}`);
   return resp.json();
+}
+
+async function loadThresholdsFromPrefs() {
+  try {
+    const resp = await fetch('/api/prefs');
+    if (!resp.ok) return;
+    const prefs = await resp.json();
+    const t = prefs.thresholds || {};
+    if (Number.isFinite(t.hit_rate_good_pct)) HIT_PCT_GREEN = t.hit_rate_good_pct;
+    if (Number.isFinite(t.hit_rate_red_pct))  HIT_PCT_RED   = t.hit_rate_red_pct;
+  } catch (err) {
+    console.warn('[breakdown] prefs fetch failed; using default thresholds', err);
+  }
 }
 
 let _chartTools = null;
@@ -614,4 +633,4 @@ function connectSSE() {
 connectSSE();
 
 wirePeriodPills();
-refreshAll();
+loadThresholdsFromPrefs().then(() => refreshAll());
