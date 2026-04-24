@@ -1074,12 +1074,10 @@ def build_tool_detail(
     proj_last_turn: dict[str, Turn] = {}
     model_counts: defaultdict[str, int] = defaultdict(int)
     total_invocations = 0
-    total_errors = 0
 
     for t in tool_turns:
         invocations = t.tool_names.get(name, 0)
         total_invocations += invocations
-        total_errors += t.tool_error_count
         cwd = cwd_by_sid.get(t.session_id, "(unknown)")
         proj_counts[cwd] += invocations
         if cwd not in proj_last_turn or t.timestamp > proj_last_turn[cwd].timestamp:
@@ -1100,13 +1098,10 @@ def build_tool_detail(
         [{"model": model, "count": model_counts[model]} for model in model_counts],
         key=lambda x: -x["count"],
     )
-    error_rate = (total_errors / total_invocations) if total_invocations > 0 else None
 
     return {
         "name": name,
         "total_invocations": total_invocations,
-        "total_error_count": total_errors,
-        "error_rate": error_rate,
         "projects_using_tool": projects,
         "models_using_tool": models,
     }
