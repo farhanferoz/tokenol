@@ -100,6 +100,141 @@ function tokenolPalette() {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Cache-health thresholds (hard-coded from metrics/thresholds.DEFAULTS).
+// PR2 ships these inline; a later task can fetch /api/prefs for live values.
+// ---------------------------------------------------------------------------
+
+const HIT_PCT_GREEN = 95.0;
+const HIT_PCT_RED = 85.0;
+
+function healthColorForHitRate(rate) {
+  // `rate` is a decimal in [0, 1] or null/undefined.
+  if (rate == null) return cssVar('--mute');
+  const pct = rate * 100;
+  if (pct >= HIT_PCT_GREEN) return cssVar('--green');
+  if (pct >= HIT_PCT_RED) return cssVar('--amber');
+  return cssVar('--alarm');
+}
+
+// ---------------------------------------------------------------------------
+// Cache-health dots plugin for Chart.js.
+//
+// Chart.js tick callbacks can only return strings, so we can't inject a dot
+// into the tick label. Instead we register a per-chart plugin that draws an
+// 8 px colored circle aligned to each x-tick, just below the axis baseline.
+//
+// Usage: register via `plugins: [cacheHealthDotsPlugin]` and pass
+// `options.plugins.cacheHealthDots.colors = [...]` aligned to the chart's
+// x-axis tick order.
+// ---------------------------------------------------------------------------
+
+const cacheHealthDotsPlugin = {
+  id: 'cacheHealthDots',
+  afterDatasetsDraw(chart) {
+    const opts = chart.options.plugins && chart.options.plugins.cacheHealthDots;
+    if (!opts || !Array.isArray(opts.colors)) return;
+    const xScale = chart.scales.x;
+    if (!xScale) return;
+    const ctx = chart.ctx;
+    // Rotated 45° labels sit between xScale.bottom and roughly xScale.bottom+30.
+    // Dots are drawn in a dedicated band below that. Keep in sync with
+    // `layout.padding.bottom` on the chart options.
+    const y = xScale.bottom + 38;
+    ctx.save();
+    for (let i = 0; i < xScale.ticks.length; i++) {
+      const color = opts.colors[i];
+      if (!color) continue;
+      const x = xScale.getPixelForTick(i);
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+    ctx.restore();
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Breakdowns-section charts
+// ---------------------------------------------------------------------------
+
+async function fetchByProject(range) {
+  const resp = await fetch(`/api/breakdown/by-project?range=${encodeURIComponent(range)}`);
+  if (!resp.ok) throw new Error(`by-project ${resp.status}`);
+  return resp.json();
+}
+
+const BY_PROJECT_TOP_N = 10;
+
+let _chartByProject = null;
+let _byProjectCwdB64 = [];   // parallel to chart's x-axis order, for click-drill
+
+function renderByProject(data) {
+  const pal = tokenolPalette();
+  // Cap to a readable number of bars; tail is dropped (not collapsed) so the
+  // chart stays legible. Subheading notes how many were shown vs. total.
+  const projects = data.projects.slice(0, BY_PROJECT_TOP_N);
+  const labels = projects.map(p => p.project);
+  const dotColors = projects.map(p => healthColorForHitRate(p.cache_hit_rate));
+  _byProjectCwdB64 = projects.map(p => p.cwd_b64);
+
+  const datasets = [
+    { label: 'input',  data: projects.map(p => p.input),  backgroundColor: pal[0] },
+    { label: 'output', data: projects.map(p => p.output), backgroundColor: pal[1] },
+  ];
+
+  const shownTotal = projects.reduce((s, p) => s + p.input + p.output, 0);
+  const allTotal = data.projects.reduce((s, p) => s + p.input + p.output, 0);
+  const subEl = document.getElementById('bp-by-project-sub');
+  if (data.projects.length > BY_PROJECT_TOP_N) {
+    const pct = Math.round((shownTotal / Math.max(allTotal, 1)) * 100);
+    subEl.textContent = `top ${BY_PROJECT_TOP_N} of ${data.projects.length} · ${pct}% of billable`;
+  } else {
+    subEl.textContent = `${data.projects.length} project${data.projects.length === 1 ? '' : 's'}`;
+  }
+
+  const canvas = document.getElementById('chart-by-project');
+
+  if (_chartByProject) {
+    _chartByProject.data.labels = labels;
+    for (let i = 0; i < datasets.length; i++) {
+      _chartByProject.data.datasets[i].data = datasets[i].data;
+      _chartByProject.data.datasets[i].backgroundColor = datasets[i].backgroundColor;
+    }
+    _chartByProject.options.plugins.cacheHealthDots.colors = dotColors;
+    _chartByProject.update('none');
+    return;
+  }
+
+  _chartByProject = new window.Chart(canvas, {
+    type: 'bar',
+    data: { labels, datasets },
+    plugins: [cacheHealthDotsPlugin],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { bottom: 46 } },  // room for rotated labels + dot band
+      scales: {
+        x: {
+          ticks: { maxRotation: 45, minRotation: 45, autoSkip: false, padding: 4 },
+        },
+        y: { beginAtZero: true, ticks: { callback: v => fmtTok(v) } },
+      },
+      plugins: {
+        legend: { position: 'top', align: 'end' },
+        cacheHealthDots: { colors: dotColors },
+      },
+      onClick: (_evt, elements) => {
+        if (!elements.length) return;
+        const idx = elements[0].index;
+        const b64 = _byProjectCwdB64[idx];
+        if (b64) window.location.href = `/project/${b64}`;
+      },
+    },
+  });
+}
+
 let _chartDefaultsApplied = false;
 function configureChartDefaults() {
   if (_chartDefaultsApplied || typeof window.Chart === 'undefined') return;
@@ -260,13 +395,15 @@ async function refreshAll() {
   try {
     await whenChartReady();
     configureChartDefaults();
-    const [summary, daily] = await Promise.all([
+    const [summary, daily, byProject] = await Promise.all([
       fetchSummary(range),
       fetchDailyTokens(range),
+      fetchByProject(range),
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
     renderDailyCache(daily);
+    renderByProject(byProject);
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
