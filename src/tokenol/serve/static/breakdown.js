@@ -77,6 +77,59 @@ function renderScorecard(data) {
 }
 
 // ---------------------------------------------------------------------------
+// Chart.js configuration (run once)
+// ---------------------------------------------------------------------------
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Tokenol dataset color cycle, semantic.
+// 0 → amber (input, primary), 1 → alarm (output), 2 → green (cache),
+// 3 → cool (model axis), 4 → mute, 5 → amber-dim.
+function tokenolPalette() {
+  return [
+    cssVar('--amber'),
+    cssVar('--alarm'),
+    cssVar('--green'),
+    cssVar('--cool'),
+    cssVar('--mute'),
+    cssVar('--amber-dim'),
+  ];
+}
+
+let _chartDefaultsApplied = false;
+function configureChartDefaults() {
+  if (_chartDefaultsApplied || typeof window.Chart === 'undefined') return;
+  const Chart = window.Chart;
+  Chart.defaults.font.family = "'JetBrains Mono', 'SF Mono', 'Courier New', monospace";
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = cssVar('--fg-2');
+  Chart.defaults.borderColor = cssVar('--rule');
+  Chart.defaults.plugins.tooltip.backgroundColor = cssVar('--bg-raised');
+  Chart.defaults.plugins.tooltip.titleColor = cssVar('--fg');
+  Chart.defaults.plugins.tooltip.bodyColor = cssVar('--fg-2');
+  Chart.defaults.plugins.tooltip.borderColor = cssVar('--rule-2');
+  Chart.defaults.plugins.tooltip.borderWidth = 1;
+  Chart.defaults.plugins.tooltip.titleFont = { family: "'Instrument Serif', serif", size: 14 };
+  Chart.defaults.plugins.legend.labels.color = cssVar('--fg-2');
+  Chart.defaults.plugins.legend.labels.boxWidth = 10;
+  Chart.defaults.plugins.legend.labels.boxHeight = 10;
+  _chartDefaultsApplied = true;
+}
+
+// Chart.js is loaded as a deferred UMD script; it may not be ready when this
+// module first evaluates. Poll briefly on a microtask until window.Chart shows up.
+async function whenChartReady() {
+  if (typeof window.Chart !== 'undefined') return window.Chart;
+  for (let i = 0; i < 50; i++) {
+    await new Promise(r => setTimeout(r, 40));
+    if (typeof window.Chart !== 'undefined') return window.Chart;
+  }
+  throw new Error('Chart.js did not load within 2s');
+}
+
+// ---------------------------------------------------------------------------
 // Pill wiring
 // ---------------------------------------------------------------------------
 
@@ -106,10 +159,13 @@ function wirePeriodPills() {
 async function refreshAll() {
   const range = getPeriod();
   try {
-    const summary = await fetchSummary(range);
+    const [summary] = await Promise.all([
+      fetchSummary(range),
+      whenChartReady().then(configureChartDefaults),
+    ]);
     renderScorecard(summary);
   } catch (err) {
-    console.error('[breakdown] summary failed', err);
+    console.error('[breakdown] refresh failed', err);
   }
 }
 
