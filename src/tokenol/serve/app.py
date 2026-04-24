@@ -50,6 +50,36 @@ def _validate_breakdown_range(range_: str) -> None:
         )
 
 
+def _bucket_turns(
+    sessions: list,
+    since,
+    key_fn,
+) -> dict[str, dict[str, int]]:
+    """Group non-interrupted turns into buckets and sum the usage fields.
+
+    `key_fn` receives `(session, turn)` and returns the bucket key; handlers
+    pass a lambda that closes over whatever grouping dict they precomputed
+    (e.g. `cwd_by_sid`). Returns `{key: {"input", "output", "cache_read",
+    "cache_creation"}}`. Callers may ignore unused fields.
+    """
+    buckets: dict[str, dict[str, int]] = {}
+    for s in sessions:
+        for t in s.turns:
+            if since is not None and t.timestamp.date() < since:
+                continue
+            if t.is_interrupted:
+                continue
+            key = key_fn(s, t)
+            b = buckets.setdefault(key, {
+                "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+            })
+            b["input"] += t.usage.input_tokens
+            b["output"] += t.usage.output_tokens
+            b["cache_read"] += t.usage.cache_read_input_tokens
+            b["cache_creation"] += t.usage.cache_creation_input_tokens
+    return buckets
+
+
 def _is_compare_form(param: str) -> bool:
     """Whether a project/model filter value produces multiple series."""
     return param == "compare" or "," in param
@@ -389,21 +419,10 @@ def create_app(
 
         cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
 
-        buckets: dict[str, dict[str, int]] = {}
-        for s in result.sessions:
-            cwd = cwd_by_sid.get(s.session_id, "(unknown)")
-            for t in s.turns:
-                if since is not None and t.timestamp.date() < since:
-                    continue
-                if t.is_interrupted:
-                    continue
-                b = buckets.setdefault(cwd, {
-                    "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
-                })
-                b["input"] += t.usage.input_tokens
-                b["output"] += t.usage.output_tokens
-                b["cache_read"] += t.usage.cache_read_input_tokens
-                b["cache_creation"] += t.usage.cache_creation_input_tokens
+        buckets = _bucket_turns(
+            result.sessions, since,
+            key_fn=lambda s, _t: cwd_by_sid.get(s.session_id, "(unknown)"),
+        )
 
         projects = []
         for cwd, b in buckets.items():
@@ -426,16 +445,10 @@ def create_app(
         result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
         since = range_since(range, date.today()) if range != "all" else None
 
-        buckets: dict[str, dict[str, int]] = {}
-        for t in result.turns:
-            if since is not None and t.timestamp.date() < since:
-                continue
-            if t.is_interrupted:
-                continue
-            name = t.model or "(unknown)"
-            b = buckets.setdefault(name, {"input": 0, "output": 0})
-            b["input"] += t.usage.input_tokens
-            b["output"] += t.usage.output_tokens
+        buckets = _bucket_turns(
+            result.sessions, since,
+            key_fn=lambda _s, t: t.model or "(unknown)",
+        )
 
         total_billable = sum(b["input"] + b["output"] for b in buckets.values()) or 1
         models = []
