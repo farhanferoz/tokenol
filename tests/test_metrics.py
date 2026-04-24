@@ -1,10 +1,13 @@
 """Cost metric unit tests with hand-computed expected values."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from tokenol.ingest.builder import build_turns
-from tokenol.metrics.cost import cost_for_turn, rollup_by_date
-from tokenol.model.events import Usage
+from tokenol.metrics.cost import cache_saved_usd, cost_for_turn, rollup_by_date
+from tokenol.model.events import Turn, Usage
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -70,3 +73,58 @@ def test_sidechain_cost():
     # haiku: input 300 * 1.00 + output 50 * 5.00 + cache_read 200 * 0.10 / 1M
     expected = (300 * 1.00 + 50 * 5.00 + 200 * 0.10) / _M
     assert abs(t.cost_usd - expected) < 1e-9
+
+
+# ---- cache_saved_usd --------------------------------------------------------
+
+
+def _turn_with_cache_read(model: str | None, cache_read: int) -> Turn:
+    return Turn(
+        dedup_key=f"t-{cache_read}",
+        timestamp=datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc),
+        session_id="s",
+        model=model,
+        usage=Usage(
+            input_tokens=0, output_tokens=0,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=0,
+        ),
+        is_sidechain=False,
+        stop_reason="end_turn",
+    )
+
+
+def test_cache_saved_usd_zero_reads_returns_zero():
+    turns = [_turn_with_cache_read("claude-sonnet-4-6", 0)]
+    assert cache_saved_usd(turns) == 0.0
+
+
+def test_cache_saved_usd_known_model_sonnet_four_six():
+    # Sonnet 4.6 pricing: input = $3.00/M, cache_read = $0.30/M.
+    # 1_000_000 cache read tokens → (1.00M × $3.00) − (1.00M × $0.30) = $2.70 saved.
+    turns = [_turn_with_cache_read("claude-sonnet-4-6", 1_000_000)]
+    assert cache_saved_usd(turns) == pytest.approx(2.70, rel=1e-6)
+
+
+def test_cache_saved_usd_unknown_model_contributes_zero():
+    # Completely unrecognised model: registry.resolve returns (None, tags).
+    # Those turns contribute 0, others still counted.
+    known = _turn_with_cache_read("claude-sonnet-4-6", 1_000_000)
+    unknown = _turn_with_cache_read("gpt-4", 1_000_000)
+    assert cache_saved_usd([known, unknown]) == pytest.approx(2.70, rel=1e-6)
+
+
+def test_cache_saved_usd_none_model_contributes_zero():
+    turns = [_turn_with_cache_read(None, 500_000)]
+    assert cache_saved_usd(turns) == 0.0
+
+
+def test_cache_saved_usd_sums_across_turns_and_models():
+    # Opus 4.7: input $5.00/M, cache_read $0.50/M. 200k reads → (0.2 × 5) − (0.2 × 0.5) = $0.90
+    # Sonnet 4.6: 500k reads → (0.5 × 3) − (0.5 × 0.3) = $1.35
+    # Total: $2.25
+    turns = [
+        _turn_with_cache_read("claude-opus-4-7",   200_000),
+        _turn_with_cache_read("claude-sonnet-4-6", 500_000),
+    ]
+    assert cache_saved_usd(turns) == pytest.approx(2.25, rel=1e-6)

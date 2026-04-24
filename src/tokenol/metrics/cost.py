@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -42,6 +43,28 @@ def cost_for_turn(model: str | None, usage: Usage) -> TurnCost:
     total = input_usd + output_usd + cache_read_usd + cache_creation_usd
 
     return TurnCost(input_usd, output_usd, cache_read_usd, cache_creation_usd, total, tags)
+
+
+def cache_saved_usd(turns: Iterable[Turn]) -> float:
+    """Sum of cache-read counterfactual savings across *turns*, in USD.
+
+    For each turn with a resolvable model: computes what its cache_read tokens
+    would have cost at that model's full input price, minus what they actually
+    cost at its cache_read price. Turns with model=None, an unknown model, or
+    zero cache_read_input_tokens contribute 0.
+    """
+    total = 0.0
+    for turn in turns:
+        cache_read = turn.usage.cache_read_input_tokens
+        if not turn.model or cache_read == 0:
+            continue
+        entry, _tags = registry.resolve(turn.model)
+        if entry is None:
+            continue
+        full_input_usd = cache_read * entry["input"] / _M
+        actual_cache_usd = cache_read * entry["cache_read"] / _M
+        total += full_input_usd - actual_cache_usd
+    return total
 
 
 @dataclass
