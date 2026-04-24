@@ -893,6 +893,7 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
   gap: 16px;
 }
 .breakdown-grid--2 { grid-template-columns: 1fr 1fr; }
+.breakdown-grid--2-1 { grid-template-columns: 2fr 1fr; }
 
 .breakdown-panel {
   background: var(--bg-raised);
@@ -924,4 +925,5 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
 @media (max-width: 900px) {
   .scorecard { grid-template-columns: repeat(2, 1fr); }
   .breakdown-grid--2 { grid-template-columns: 1fr; }
+  .breakdown-grid--2-1 { grid-template-columns: 1fr; }
 }

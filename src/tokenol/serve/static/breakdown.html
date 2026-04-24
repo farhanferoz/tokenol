@@ -89,6 +89,26 @@
     </section>
   </div>
 
+  <div class="section-heading breakdown-section-heading">
+    <h2>Breakdowns</h2>
+  </div>
+  <div class="breakdown-grid breakdown-grid--2-1">
+    <section class="breakdown-panel" aria-labelledby="bp-by-project-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-by-project-title">Tokens by project</h3>
+        <span class="chart-subheading" id="bp-by-project-sub"></span>
+      </div>
+      <div class="breakdown-chart"><canvas id="chart-by-project" height="260"></canvas></div>
+    </section>
+    <section class="breakdown-panel" aria-labelledby="bp-by-model-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-by-model-title">Model mix</h3>
+        <span class="chart-subheading" id="bp-by-model-sub"></span>
+      </div>
+      <div class="breakdown-chart"><canvas id="chart-by-model" height="260"></canvas></div>
+    </section>
+  </div>
+
 </div>
 
 <script type="module" src="/assets/breakdown.js"></script>
