@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
+from tokenol.metrics.cost import cache_saved_usd
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
@@ -308,5 +309,36 @@ def create_app(
 
         prefs.save(request.app.state.prefs_path)
         return JSONResponse(prefs.to_dict())
+
+    @app.get("/api/breakdown/summary")
+    async def api_breakdown_summary(request: Request, range: str = "30d"):
+        if range not in ("7d", "30d", "90d", "all"):
+            raise HTTPException(
+                status_code=400,
+                detail="range must be 7d, 30d, 90d, or all",
+            )
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+        if since is None:
+            turns = list(result.turns)
+            sessions = list(result.sessions)
+        else:
+            turns = [t for t in result.turns if t.timestamp.date() >= since]
+            sessions = [
+                s for s in result.sessions
+                if any(t.timestamp.date() >= since for t in s.turns)
+            ]
+
+        return JSONResponse({
+            "range": range,
+            "sessions": len(sessions),
+            "turns": len(turns),
+            "input_tokens": sum(t.usage.input_tokens for t in turns),
+            "output_tokens": sum(t.usage.output_tokens for t in turns),
+            "cache_read_tokens": sum(t.usage.cache_read_input_tokens for t in turns),
+            "cache_creation_tokens": sum(t.usage.cache_creation_input_tokens for t in turns),
+            "cost_usd": sum(t.cost_usd for t in turns),
+            "cache_saved_usd": cache_saved_usd(turns),
+        })
 
     return app

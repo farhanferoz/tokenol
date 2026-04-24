@@ -734,3 +734,46 @@ async def test_prefs_thresholds_reset_sentinel(tmp_path: Path) -> None:
     assert resp.status_code == 200
     got = resp.json()["thresholds"]
     assert got["hit_rate_good_pct"] == DEFAULTS["hit_rate_good_pct"]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_summary_returns_scorecard_fields(tmp_path: Path) -> None:
+    """GET /api/breakdown/summary returns all scorecard fields."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/summary?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    for key in [
+        "range", "sessions", "turns",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_creation_tokens",
+        "cost_usd", "cache_saved_usd",
+    ]:
+        assert key in data, f"Missing field: {key}"
+    assert data["range"] == "all"
+    assert data["sessions"] >= 1
+    assert data["turns"] >= 1
+    assert isinstance(data["cost_usd"], (int, float))
+    assert isinstance(data["cache_saved_usd"], (int, float))
+
+
+@pytest.mark.asyncio
+async def test_breakdown_summary_rejects_unknown_range(tmp_path: Path) -> None:
+    """GET /api/breakdown/summary with invalid range → 400."""
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/summary?range=14d")
+
+    assert resp.status_code == 400
