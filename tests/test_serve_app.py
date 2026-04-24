@@ -814,3 +814,16 @@ async def test_breakdown_daily_tokens_rejects_unknown_range(tmp_path: Path) -> N
             resp = await client.get("/api/breakdown/daily-tokens?range=14d")
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_route_returns_html(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/breakdown")
+
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]

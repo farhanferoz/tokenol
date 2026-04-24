@@ -91,6 +91,10 @@ def create_app(
     async def index_page():
         return FileResponse(str(STATIC_DIR / "index.html"))
 
+    @app.get("/breakdown", include_in_schema=False)
+    async def breakdown_page():
+        return FileResponse(str(STATIC_DIR / "breakdown.html"))
+
     @app.get("/session/{session_id}", include_in_schema=False)
     async def session_page(session_id: str):
         return FileResponse(str(STATIC_DIR / "session.html"))
