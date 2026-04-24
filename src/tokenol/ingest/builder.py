@@ -47,21 +47,23 @@ def build_turns(paths: list[Path]) -> list[Turn]:
 
 
 def build_sessions(turns: list[Turn], paths: list[Path] | None = None) -> list[Session]:
-    """Group turns by session_id. One Session per JSONL file.
+    """Group turns by session_id. Multiple sessions can exist in one JSONL file.
 
-    If *paths* is provided, scans each file once to extract cwd and source path.
+    If *paths* is provided, scans each file to extract cwd and source path for each session.
     """
     cwd_by_session: dict[str, str] = {}
     session_source: dict[str, str] = {}
 
     if paths:
         for path in paths:
-            sid = path.stem
-            session_source[sid] = str(path)
             for raw_ev in parse_file(path):
+                sid = raw_ev.session_id
+                # Map each session to its source file (first encounter wins).
+                if sid not in session_source:
+                    session_source[sid] = str(path)
+                # Extract first cwd for each session.
                 if raw_ev.cwd and sid not in cwd_by_session:
                     cwd_by_session[sid] = raw_ev.cwd
-                    break
 
     session_turns: dict[str, list[Turn]] = defaultdict(list)
     session_sidechain: dict[str, bool] = {}
