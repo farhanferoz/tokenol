@@ -280,7 +280,7 @@ function connectSSE() {
   _es.onerror = () => {
     if (_es) { _es.close(); _es = null; }
     const dot = document.getElementById('sse-dot');
-    if (dot) { dot.className = 'sse-dot error'; dot.title = 'Live — reconnecting'; }
+    if (dot) { dot.className = 'sse-dot amber'; dot.title = 'Live — reconnecting'; }
     setTimeout(connectSSE, _reconnectMs);
     _reconnectMs = Math.min(_reconnectMs * 2, 30_000);
   };
