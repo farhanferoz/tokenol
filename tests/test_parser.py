@@ -230,3 +230,20 @@ def test_builder_propagates_tool_names(tmp_path):
     assert len(turns) == 1
     assert turns[0].tool_names == Counter({"Grep": 2})
     assert turns[0].tool_use_count == 2
+
+
+def test_multi_fixture_shape():
+    """Sanity-check the multi.jsonl fixture's expected totals."""
+    from tokenol.ingest.builder import build_sessions, build_turns
+    p = FIXTURES / "multi.jsonl"
+    turns = build_turns([p])
+    sessions = build_sessions(turns, paths=[p])
+
+    assert len(sessions) == 3
+    assert {s.cwd for s in sessions} == {"/home/u/projA", "/home/u/projB"}
+    assert {t.model for t in turns} == {"claude-opus-4-7", "claude-sonnet-4-6"}
+
+    total_tools: Counter[str] = Counter()
+    for t in turns:
+        total_tools.update(t.tool_names)
+    assert total_tools == Counter({"Read": 4, "Edit": 3, "Bash": 1, "Grep": 1})
