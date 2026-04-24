@@ -941,3 +941,63 @@ async def test_breakdown_by_model_rejects_unknown_range(tmp_path: Path) -> None:
             resp = await client.get("/api/breakdown/by-model?range=14d")
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_returns_ranked_list(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-multi.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "tools" in data
+
+    # multi.jsonl has 4 distinct tools — no "others" row at default top_n=10.
+    names = [row["tool"] for row in data["tools"]]
+    assert names == ["Read", "Edit", "Bash", "Grep"]
+    counts = [row["count"] for row in data["tools"]]
+    assert counts == [4, 3, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=14d")
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_excludes_interrupted(tmp_path: Path) -> None:
+    """Interrupted turns (no usage) must not contribute to tool counts —
+    matches the by-project / by-model exclusion convention."""
+    dst = tmp_path / "projects" / "sess-int.jsonl"
+    dst.parent.mkdir(parents=True)
+    # One interrupted assistant turn (no usage field) with a tool_use block.
+    dst.write_text(
+        '{"type":"assistant","timestamp":"2026-04-14T10:00:00Z","sessionId":"s1","requestId":"r1","uuid":"e1","isSidechain":false,"model":"claude-opus-4-7",'
+        '"message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]}}\n'
+    )
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all")
+
+    assert resp.status_code == 200
+    assert resp.json()["tools"] == []

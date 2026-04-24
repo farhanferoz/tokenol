@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -447,5 +448,31 @@ def create_app(
             })
         models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
         return JSONResponse({"range": range, "models": models})
+
+    @app.get("/api/breakdown/tools")
+    async def api_breakdown_tools(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+
+        total: Counter[str] = Counter()
+        for t in result.turns:
+            if since is not None and t.timestamp.date() < since:
+                continue
+            if t.is_interrupted:
+                continue
+            total.update(t.tool_names)
+
+        if not total:
+            return JSONResponse({"range": range, "tools": []})
+
+        ranked = total.most_common()
+        top_n = 10
+        head = ranked[:top_n]
+        tail = ranked[top_n:]
+        tools = [{"tool": name, "count": count} for name, count in head]
+        if tail:
+            tools.append({"tool": "others", "count": sum(c for _, c in tail)})
+        return JSONResponse({"range": range, "tools": tools})
 
     return app
