@@ -235,6 +235,84 @@ function renderByProject(data) {
   });
 }
 
+async function fetchByModel(range) {
+  const resp = await fetch(`/api/breakdown/by-model?range=${encodeURIComponent(range)}`);
+  if (!resp.ok) throw new Error(`by-model ${resp.status}`);
+  return resp.json();
+}
+
+const BY_MODEL_TOP_N = 6;
+
+let _chartByModel = null;
+let _byModelNames = [];  // parallel to chart labels; 'others' entry is null
+
+function collapseModels(models) {
+  // Keep top N−1, collapse the tail into 'others' only if it would exceed N.
+  if (models.length <= BY_MODEL_TOP_N) {
+    return models.map(m => ({ name: m.model, value: m.input + m.output, isOthers: false }));
+  }
+  const head = models.slice(0, BY_MODEL_TOP_N - 1).map(m => ({
+    name: m.model, value: m.input + m.output, isOthers: false,
+  }));
+  const tailValue = models.slice(BY_MODEL_TOP_N - 1).reduce((s, m) => s + m.input + m.output, 0);
+  head.push({ name: 'others', value: tailValue, isOthers: true });
+  return head;
+}
+
+function renderByModel(data) {
+  const pal = tokenolPalette();
+  const collapsed = collapseModels(data.models);
+  const labels = collapsed.map(c => c.name);
+  const values = collapsed.map(c => c.value);
+  const colors = collapsed.map((_, i) => pal[i % pal.length]);
+  _byModelNames = collapsed.map(c => (c.isOthers ? null : c.name));
+
+  document.getElementById('bp-by-model-sub').textContent =
+    `${data.models.length} model${data.models.length === 1 ? '' : 's'}`;
+
+  const canvas = document.getElementById('chart-by-model');
+
+  if (_chartByModel) {
+    _chartByModel.data.labels = labels;
+    _chartByModel.data.datasets[0].data = values;
+    _chartByModel.data.datasets[0].backgroundColor = colors;
+    _chartByModel.update('none');
+    return;
+  }
+
+  _chartByModel = new window.Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderWidth: 1, borderColor: cssVar('--bg-raised') }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '60%',
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              const total = ctx.dataset.data.reduce((s, v) => s + v, 0) || 1;
+              const v = ctx.parsed;
+              const pct = ((v / total) * 100).toFixed(1);
+              return `${ctx.label}: ${fmtTok(v)} billable (${pct}%)`;
+            },
+          },
+        },
+      },
+      onClick: (_evt, elements) => {
+        if (!elements.length) return;
+        const idx = elements[0].index;
+        const name = _byModelNames[idx];
+        if (name) window.location.href = `/model/${encodeURIComponent(name)}`;
+      },
+    },
+  });
+}
+
 let _chartDefaultsApplied = false;
 function configureChartDefaults() {
   if (_chartDefaultsApplied || typeof window.Chart === 'undefined') return;
@@ -395,15 +473,17 @@ async function refreshAll() {
   try {
     await whenChartReady();
     configureChartDefaults();
-    const [summary, daily, byProject] = await Promise.all([
+    const [summary, daily, byProject, byModel] = await Promise.all([
       fetchSummary(range),
       fetchDailyTokens(range),
       fetchByProject(range),
+      fetchByModel(range),
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
     renderDailyCache(daily);
     renderByProject(byProject);
+    renderByModel(byModel);
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
