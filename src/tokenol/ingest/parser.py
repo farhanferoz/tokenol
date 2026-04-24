@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,19 +34,29 @@ def _parse_usage(msg: dict) -> Usage | None:
     )
 
 
-def _count_tool_blocks(content: list) -> tuple[int, int]:
-    """Return (tool_use_count, tool_error_count) from a message content list."""
-    tool_use = 0
+def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
+    """Return (tool_names, tool_use_total, tool_error_count) from a content list.
+
+    Named `tool_use` blocks are keyed by their `name` in the Counter. Unnamed
+    or empty-name blocks are skipped from `tool_names` but still bump
+    `tool_use_total` so the legacy `tool_use_count` field preserves its
+    "count every tool_use block" semantics.
+    """
+    tool_names: Counter[str] = Counter()
+    tool_use_total = 0
     tool_error = 0
     for block in content:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
         if btype == "tool_use":
-            tool_use += 1
+            tool_use_total += 1
+            name = block.get("name")
+            if isinstance(name, str) and name:
+                tool_names[name] += 1
         elif btype == "tool_result" and block.get("is_error") is True:
             tool_error += 1
-    return tool_use, tool_error
+    return tool_names, tool_use_total, tool_error
 
 
 def parse_file(path: Path) -> Iterator[RawEvent]:
@@ -78,7 +89,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
             content = msg.get("content") or []
             if not isinstance(content, list):
                 content = []
-            tool_use_count, tool_error_count = _count_tool_blocks(content)
+            tool_names, tool_use_count, tool_error_count = _extract_tool_blocks(content)
 
             cwd: str | None = ev.get("cwd") or None
             if cwd and (
@@ -105,6 +116,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 stop_reason=msg.get("stop_reason"),
                 tool_use_count=tool_use_count,
                 tool_error_count=tool_error_count,
+                tool_names=tool_names,
                 cwd=cwd,
                 raw=ev,
             )
