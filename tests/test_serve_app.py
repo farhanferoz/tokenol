@@ -856,6 +856,25 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     # cache_hit_rate is a decimal or null.
     assert p["cache_hit_rate"] is None or 0.0 <= p["cache_hit_rate"] <= 1.0
 
+    # Oracle cross-check: the endpoint's per-project token sums must match the
+    # raw (non-interrupted) turn totals from the cached snapshot. This catches
+    # aggregation bugs (e.g. counting interrupted turns, double-counting across
+    # sessions) that the shape/sort assertions above would miss.
+    snap = app.state.snapshot_result
+    assert snap is not None, "snapshot should be cached after the endpoint call"
+    expected_input = sum(
+        t.usage.input_tokens
+        for s in snap.sessions for t in s.turns
+        if not t.is_interrupted
+    )
+    expected_output = sum(
+        t.usage.output_tokens
+        for s in snap.sessions for t in s.turns
+        if not t.is_interrupted
+    )
+    assert sum(p["input"] for p in data["projects"]) == expected_input
+    assert sum(p["output"] for p in data["projects"]) == expected_output
+
 
 @pytest.mark.asyncio
 async def test_breakdown_by_project_rejects_unknown_range(tmp_path: Path) -> None:

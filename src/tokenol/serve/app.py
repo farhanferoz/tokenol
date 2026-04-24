@@ -36,6 +36,15 @@ from tokenol.serve.state import (
 
 _WINDOW_MINUTES: dict[str, int] = {"15m": 15, "60m": 60, "4h": 240, "24h": 1440}
 _KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "thresholds"})
+_BREAKDOWN_RANGES: frozenset[str] = frozenset({"7d", "30d", "90d", "all"})
+
+
+def _validate_breakdown_range(range_: str) -> None:
+    if range_ not in _BREAKDOWN_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail="range must be 7d, 30d, 90d, or all",
+        )
 
 
 def _is_compare_form(param: str) -> bool:
@@ -317,11 +326,7 @@ def create_app(
 
     @app.get("/api/breakdown/summary")
     async def api_breakdown_summary(request: Request, range: str = "30d"):
-        if range not in ("7d", "30d", "90d", "all"):
-            raise HTTPException(
-                status_code=400,
-                detail="range must be 7d, 30d, 90d, or all",
-            )
+        _validate_breakdown_range(range)
         result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
         since = range_since(range, date.today()) if range != "all" else None
         if since is None:
@@ -348,11 +353,7 @@ def create_app(
 
     @app.get("/api/breakdown/daily-tokens")
     async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
-        if range not in ("7d", "30d", "90d", "all"):
-            raise HTTPException(
-                status_code=400,
-                detail="range must be 7d, 30d, 90d, or all",
-            )
+        _validate_breakdown_range(range)
         result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
         since = range_since(range, date.today()) if range != "all" else None
         if since is None:
@@ -379,11 +380,7 @@ def create_app(
 
     @app.get("/api/breakdown/by-project")
     async def api_breakdown_by_project(request: Request, range: str = "30d"):
-        if range not in ("7d", "30d", "90d", "all"):
-            raise HTTPException(
-                status_code=400,
-                detail="range must be 7d, 30d, 90d, or all",
-            )
+        _validate_breakdown_range(range)
         result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
         since = range_since(range, date.today()) if range != "all" else None
 
