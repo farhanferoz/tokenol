@@ -32,6 +32,7 @@ from tokenol.serve.state import (
     build_recent_activity_panel,
     build_search_results,
     build_snapshot_full,
+    build_tool_detail,
     decode_cwd,
     encode_cwd,
     range_since,
@@ -153,6 +154,11 @@ def create_app(
     @app.get("/model/{name}", include_in_schema=False)
     async def model_page(name: str):
         p = STATIC_DIR / "model.html"
+        return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
+
+    @app.get("/tool/{name}", include_in_schema=False)
+    async def tool_page(name: str):
+        p = STATIC_DIR / "tool.html"
         return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
 
     @app.get("/api/snapshot")
@@ -305,6 +311,14 @@ def create_app(
         detail = build_model_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Model not found")
+        return JSONResponse(detail)
+
+    @app.get("/api/tool/{name}")
+    async def api_tool_detail(name: str, request: Request):
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        detail = build_tool_detail(name, result.turns, result.sessions)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Tool not found")
         return JSONResponse(detail)
 
     @app.get("/api/search")

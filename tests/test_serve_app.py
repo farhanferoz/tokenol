@@ -1001,3 +1001,50 @@ async def test_breakdown_tools_excludes_interrupted(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     assert resp.json()["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_page_returns_html(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/tool/Read")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_api_tool_detail_returns_payload(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-multi.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/tool/Read")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Read"
+    # From multi.jsonl: Read is used 4 times total (2 in sess-a + 1 in sess-b + 1 in sess-c).
+    assert data["total_invocations"] == 4
+    # projA has Read in both sess-a (2) and sess-c (1) = 3; projB has Read in sess-b = 1.
+    projs = {p["cwd"]: p for p in data["projects_using_tool"]}
+    assert projs["/home/u/projA"]["count"] == 3
+    assert projs["/home/u/projB"]["count"] == 1
+    # Sorted desc.
+    counts = [p["count"] for p in data["projects_using_tool"]]
+    assert counts == sorted(counts, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_api_tool_detail_404_on_unknown(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/tool/NoSuchTool")
+    assert resp.status_code == 404
