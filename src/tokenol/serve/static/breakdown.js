@@ -382,8 +382,11 @@ function renderToolMix(data) {
     ? 'no tool calls'
     : `${tools.length} tool${tools.length === 1 ? '' : 's'} · ${fmtInt(totalCalls)} calls`;
 
+  const names = tools.map(t => t.tool === 'others' ? null : t.tool);
+
   const canvas = document.getElementById('chart-tools');
   if (_chartTools) {
+    _chartTools.$tokenol = { names };
     _chartTools.data.labels = labels;
     _chartTools.data.datasets[0].data = counts;
     _chartTools.update('none');
@@ -418,8 +421,15 @@ function renderToolMix(data) {
           },
         },
       },
+      onClick: (_evt, elements) => {
+        if (!elements.length) return;
+        const idx = elements[0].index;
+        const name = _chartTools.$tokenol.names[idx];
+        if (name) window.location.href = `/tool/${encodeURIComponent(name)}`;
+      },
     },
   });
+  _chartTools.$tokenol = { names };
 }
 
 let _chartDefaultsApplied = false;
