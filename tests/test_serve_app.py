@@ -185,7 +185,8 @@ async def test_daily_endpoint_happy_path(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_daily_insufficient_history(tmp_path: Path) -> None:
-    """GET /api/daily?range=90d with only ~8 days of data → 400 insufficient_history."""
+    """GET /api/daily?range=90d with only a few days of data → 200 with fallback note,
+    not 400 — clients shouldn't have to special-case a well-formed request."""
     dst = tmp_path / "projects" / "sess-001.jsonl"
     dst.parent.mkdir(parents=True)
     dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
@@ -197,10 +198,13 @@ async def test_daily_insufficient_history(tmp_path: Path) -> None:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/api/daily?range=90d")
 
-    assert resp.status_code == 400
+    assert resp.status_code == 200
     body = resp.json()
-    assert body["error"] == "insufficient_history"
-    assert "have_days" in body
+    assert body["range"] == "all"
+    assert body["requested_range"] == "90d"
+    assert body["have_days"] >= 1
+    assert "Only" in body["note"] and "90d" in body["note"]
+    assert "series" in body  # full panel still rendered
 
 
 @pytest.mark.asyncio

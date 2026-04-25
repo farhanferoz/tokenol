@@ -275,6 +275,13 @@ def create_app(
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
         result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        # Fall back silently to the longest available window when the requested range
+        # exceeds the data we have — return 200 with a `note` so the UI can caption it.
+        # Returning 400 here forced clients to special-case "policy" failures even though
+        # the request itself is well-formed.
+        effective_range = range
+        note: str | None = None
+        have_days: int | None = None
         if range != "all" and result.turns:
             today = date.today()
             since = range_since(range, today)
@@ -282,11 +289,17 @@ def create_app(
                 earliest = min(t.timestamp.date() for t in result.turns)
                 if earliest > since:
                     have_days = (today - earliest).days + 1
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": "insufficient_history", "have_days": have_days},
+                    effective_range = "all"
+                    note = (
+                        f"Only {have_days} days of history available — "
+                        f"showing all data instead of {range}."
                     )
-        return JSONResponse(build_daily_panel(result.turns, result.sessions, range, metric, project, model))
+        panel = build_daily_panel(result.turns, result.sessions, effective_range, metric, project, model)
+        if note is not None:
+            panel["requested_range"] = range
+            panel["have_days"] = have_days
+            panel["note"] = note
+        return JSONResponse(panel)
 
     @app.get("/api/models")
     async def api_models(request: Request, range: str = "today"):

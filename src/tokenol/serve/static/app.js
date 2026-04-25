@@ -660,6 +660,7 @@ function _apiToDailyChartData(d) {
   const chart = _normApiSeries(d, p => p.date, dt => new Date(dt + 'T00:00:00').getTime() / 1000);
   chart._activeProjects = d.active_projects ?? [];
   chart._activeModels   = d.active_models   ?? [];
+  chart._note           = d.note ?? null;
   return chart;
 }
 
@@ -714,6 +715,11 @@ const _fetchDaily = _makeFetcher({
 function _paintDaily(data) {
   const scale = _scaleFor(_dMetric, _dScaleRaw);
   _syncScalePills('daily-scale-pills', _dMetric === 'hit_pct' ? 'linear-forced' : scale);
+  const note = $('daily-note');
+  if (note) {
+    if (data._note) { note.textContent = data._note; note.classList.remove('hidden'); }
+    else            { note.textContent = '';         note.classList.add('hidden');    }
+  }
   _paintTimeline('daily-chart', data, 'No history yet — check back after a few days.', {
     xFmt: _xFmtDate,
     stepped: data.labels.map(lbl => lbl !== '7d avg'),
