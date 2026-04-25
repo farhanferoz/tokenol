@@ -488,3 +488,100 @@ def test_grouped_cwd_siblings_stay_separate(tmp_path: Path) -> None:
     m = _grouped_cwd_by_sid(sessions)
     assert m["a"] == "/dev/StratSense/Backend"
     assert m["b"] == "/dev/StratSense/Frontend"
+
+
+def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None:
+    """A single JSONL file holding N sessions must set source_file on each.
+
+    Regression guard: earlier code keyed session_source by path.stem, which
+    broke for multi-session files (stem != sessionId for all but one).
+    """
+    from tokenol.ingest.parser import parse_file
+    from tokenol.serve.state import _build_turns_and_sessions
+
+    dst = tmp_path / "multi.jsonl"
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+
+    events = parse_file(dst)
+    _, sessions = _build_turns_and_sessions(events)
+
+    assert {s.session_id for s in sessions} == {"sess-a", "sess-b", "sess-c"}
+    for s in sessions:
+        assert s.source_file == str(dst), f"{s.session_id} has source_file={s.source_file!r}"
+
+
+# ---- build_tool_detail tests ------------------------------------------
+
+from collections import Counter
+
+
+def test_build_tool_detail_returns_payload():
+    from datetime import datetime, timezone
+    from tokenol.serve.state import build_tool_detail
+    from tokenol.model.events import Session, Turn, Usage
+
+    def _turn(sid, ts, model, tools, cost=0.0, err_count=0):
+        return Turn(
+            dedup_key=f"k-{ts.isoformat()}", timestamp=ts, session_id=sid,
+            model=model, usage=Usage(input_tokens=1, output_tokens=1),
+            is_sidechain=False, stop_reason="tool_use",
+            cost_usd=cost, tool_use_count=sum(tools.values()),
+            tool_error_count=err_count, tool_names=Counter(tools),
+        )
+
+    t0 = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 4, 14, 11, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc)
+
+    turns = [
+        _turn("sA", t0, "claude-opus-4-7",    {"Read": 2, "Edit": 1}),
+        _turn("sB", t1, "claude-opus-4-7",    {"Read": 1, "Bash": 3}, err_count=1),
+        _turn("sC", t2, "claude-sonnet-4-6",  {"Grep": 1}),  # no Read
+    ]
+    sessions = [
+        Session(session_id="sA", source_file="a.jsonl", is_sidechain=False, cwd="/p/projA", turns=[turns[0]]),
+        Session(session_id="sB", source_file="b.jsonl", is_sidechain=False, cwd="/p/projB", turns=[turns[1]]),
+        Session(session_id="sC", source_file="c.jsonl", is_sidechain=False, cwd="/p/projA", turns=[turns[2]]),
+    ]
+
+    detail = build_tool_detail("Read", turns, sessions)
+    assert detail["name"] == "Read"
+    assert detail["total_invocations"] == 3  # 2 in sA + 1 in sB
+
+    # Per-project breakdown: projA (2 invocations in sA) and projB (1 in sB). projA's
+    # last_active is sA's turn since sC doesn't use Read.
+    projects = {p["cwd"]: p for p in detail["projects_using_tool"]}
+    assert set(projects.keys()) == {"/p/projA", "/p/projB"}
+    assert projects["/p/projA"]["count"] == 2
+    assert projects["/p/projB"]["count"] == 1
+    assert projects["/p/projA"]["cwd_b64"]  # non-empty base64
+    assert projects["/p/projA"]["last_active"] == t0.isoformat()
+    # Projects sorted by count desc.
+    assert detail["projects_using_tool"][0]["count"] >= detail["projects_using_tool"][1]["count"]
+
+    # Per-model breakdown: only opus (sonnet didn't call Read).
+    models = {m["model"]: m for m in detail["models_using_tool"]}
+    assert set(models.keys()) == {"claude-opus-4-7"}
+    assert models["claude-opus-4-7"]["count"] == 3
+
+
+def test_build_tool_detail_unknown_returns_none():
+    from tokenol.serve.state import build_tool_detail
+    assert build_tool_detail("NoSuchTool", [], []) is None
+
+
+def test_build_tool_detail_excludes_interrupted():
+    """Interrupted turns (no usage billed) still might have tool_use content,
+    but we exclude them from counts to match /api/breakdown/tools."""
+    from datetime import datetime, timezone
+    from tokenol.serve.state import build_tool_detail
+    from tokenol.model.events import Session, Turn, Usage
+
+    ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
+    interrupted = Turn(
+        dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
+        usage=Usage(), is_sidechain=False, stop_reason=None,
+        is_interrupted=True, tool_use_count=1, tool_names=Counter({"Read": 1}),
+    )
+    sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p", turns=[interrupted])]
+    assert build_tool_detail("Read", [interrupted], sessions) is None

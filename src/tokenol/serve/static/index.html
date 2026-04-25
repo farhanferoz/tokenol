@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
   <script defer src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 </head>
-<body>
+<body data-page="overview">
 
 <!-- modal toggles: body-level siblings of modal-bg elements so CSS ~ selector works -->
 <input type="checkbox" class="modal-toggle" id="m-gl">
@@ -117,6 +117,10 @@
   <header class="topbar">
     <div class="topbar-row1">
       <div class="brand">tokenol <span class="dim">— live</span></div>
+      <nav class="nav-tabs" aria-label="Primary">
+        <a href="/" class="nav-tab is-active" aria-current="page">Overview</a>
+        <a href="/breakdown" class="nav-tab">Breakdown</a>
+      </nav>
       <div class="topbar-icons">
         <span class="sse-dot" id="sse-dot" title="SSE connecting…"></span>
         <span id="wall-clock" aria-live="off">––:––</span>

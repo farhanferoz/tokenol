@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
+from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
+from tokenol.metrics.rollups import _rank_counter_with_others
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
@@ -19,6 +22,7 @@ from tokenol.serve.state import (
     VALID_METRICS,
     ParseCache,
     SnapshotResult,
+    _grouped_cwd_by_sid,
     build_daily_panel,
     build_day_detail,
     build_hourly_panel,
@@ -28,12 +32,53 @@ from tokenol.serve.state import (
     build_recent_activity_panel,
     build_search_results,
     build_snapshot_full,
+    build_tool_detail,
     decode_cwd,
+    encode_cwd,
     range_since,
 )
 
 _WINDOW_MINUTES: dict[str, int] = {"15m": 15, "60m": 60, "4h": 240, "24h": 1440}
 _KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "thresholds"})
+_BREAKDOWN_RANGES: frozenset[str] = frozenset({"7d", "30d", "90d", "all"})
+
+
+def _validate_breakdown_range(range_: str) -> None:
+    if range_ not in _BREAKDOWN_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail="range must be 7d, 30d, 90d, or all",
+        )
+
+
+def _bucket_turns(
+    sessions: list,
+    since,
+    key_fn,
+) -> dict[str, dict[str, int]]:
+    """Group non-interrupted turns into buckets and sum the usage fields.
+
+    `key_fn` receives `(session, turn)` and returns the bucket key; handlers
+    pass a lambda that closes over whatever grouping dict they precomputed
+    (e.g. `cwd_by_sid`). Returns `{key: {"input", "output", "cache_read",
+    "cache_creation"}}`. Callers may ignore unused fields.
+    """
+    buckets: dict[str, dict[str, int]] = {}
+    for s in sessions:
+        for t in s.turns:
+            if since is not None and t.timestamp.date() < since:
+                continue
+            if t.is_interrupted:
+                continue
+            key = key_fn(s, t)
+            b = buckets.setdefault(key, {
+                "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+            })
+            b["input"] += t.usage.input_tokens
+            b["output"] += t.usage.output_tokens
+            b["cache_read"] += t.usage.cache_read_input_tokens
+            b["cache_creation"] += t.usage.cache_creation_input_tokens
+    return buckets
 
 
 def _is_compare_form(param: str) -> bool:
@@ -90,6 +135,10 @@ def create_app(
     async def index_page():
         return FileResponse(str(STATIC_DIR / "index.html"))
 
+    @app.get("/breakdown", include_in_schema=False)
+    async def breakdown_page():
+        return FileResponse(str(STATIC_DIR / "breakdown.html"))
+
     @app.get("/session/{session_id}", include_in_schema=False)
     async def session_page(session_id: str):
         return FileResponse(str(STATIC_DIR / "session.html"))
@@ -105,6 +154,11 @@ def create_app(
     @app.get("/model/{name}", include_in_schema=False)
     async def model_page(name: str):
         p = STATIC_DIR / "model.html"
+        return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
+
+    @app.get("/tool/{name}", include_in_schema=False)
+    async def tool_page(name: str):
+        p = STATIC_DIR / "tool.html"
         return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
 
     @app.get("/api/snapshot")
@@ -259,6 +313,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="Model not found")
         return JSONResponse(detail)
 
+    @app.get("/api/tool/{name}")
+    async def api_tool_detail(name: str, request: Request):
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        detail = build_tool_detail(name, result.turns, result.sessions)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Tool not found")
+        return JSONResponse(detail)
+
     @app.get("/api/search")
     async def api_search(request: Request, q: str = ""):
         if not q.strip():
@@ -308,5 +370,128 @@ def create_app(
 
         prefs.save(request.app.state.prefs_path)
         return JSONResponse(prefs.to_dict())
+
+    @app.get("/api/breakdown/summary")
+    async def api_breakdown_summary(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+        if since is None:
+            turns = list(result.turns)
+            sessions = list(result.sessions)
+        else:
+            turns = [t for t in result.turns if t.timestamp.date() >= since]
+            sessions = [
+                s for s in result.sessions
+                if any(t.timestamp.date() >= since for t in s.turns)
+            ]
+
+        return JSONResponse({
+            "range": range,
+            "sessions": len(sessions),
+            "turns": len(turns),
+            "input_tokens": sum(t.usage.input_tokens for t in turns),
+            "output_tokens": sum(t.usage.output_tokens for t in turns),
+            "cache_read_tokens": sum(t.usage.cache_read_input_tokens for t in turns),
+            "cache_creation_tokens": sum(t.usage.cache_creation_input_tokens for t in turns),
+            "cost_usd": sum(t.cost_usd for t in turns),
+            "cache_saved_usd": cache_saved_usd(turns),
+        })
+
+    @app.get("/api/breakdown/daily-tokens")
+    async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+        if since is None:
+            turns = list(result.turns)
+            rollups = rollup_by_date(turns)
+        else:
+            turns = [t for t in result.turns if t.timestamp.date() >= since]
+            rollups = rollup_by_date(turns, since=since)
+
+        return JSONResponse({
+            "range": range,
+            "days": [
+                {
+                    "date": r.date.isoformat(),
+                    "input": r.input_tokens,
+                    "output": r.output_tokens,
+                    "cache_creation": r.cache_creation_tokens,
+                    "cache_read": r.cache_read_tokens,
+                    "cost_usd": r.cost_usd,
+                }
+                for r in rollups
+            ],
+        })
+
+    @app.get("/api/breakdown/by-project")
+    async def api_breakdown_by_project(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+
+        cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
+
+        buckets = _bucket_turns(
+            result.sessions, since,
+            key_fn=lambda s, _t: cwd_by_sid.get(s.session_id, "(unknown)"),
+        )
+
+        projects = []
+        for cwd, b in buckets.items():
+            denom = b["cache_read"] + b["cache_creation"] + b["input"]
+            hit_rate = (b["cache_read"] / denom) if denom > 0 else None
+            projects.append({
+                "project": Path(cwd).name if cwd != "(unknown)" else "(unknown)",
+                "cwd": cwd,
+                "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
+                "input": b["input"],
+                "output": b["output"],
+                "cache_hit_rate": hit_rate,
+            })
+        projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
+        return JSONResponse({"range": range, "projects": projects})
+
+    @app.get("/api/breakdown/by-model")
+    async def api_breakdown_by_model(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+
+        buckets = _bucket_turns(
+            result.sessions, since,
+            key_fn=lambda _s, t: t.model or "(unknown)",
+        )
+
+        total_billable = sum(b["input"] + b["output"] for b in buckets.values()) or 1
+        models = []
+        for name, b in buckets.items():
+            billable = b["input"] + b["output"]
+            models.append({
+                "model": name,
+                "input": b["input"],
+                "output": b["output"],
+                "share": billable / total_billable,
+            })
+        models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
+        return JSONResponse({"range": range, "models": models})
+
+    @app.get("/api/breakdown/tools")
+    async def api_breakdown_tools(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        since = range_since(range, date.today()) if range != "all" else None
+
+        total: Counter[str] = Counter()
+        for t in result.turns:
+            if since is not None and t.timestamp.date() < since:
+                continue
+            if t.is_interrupted:
+                continue
+            total.update(t.tool_names)
+
+        tools = _rank_counter_with_others(total, top_n=10)
+        return JSONResponse({"range": range, "tools": tools})
 
     return app

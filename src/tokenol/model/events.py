@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -48,6 +49,9 @@ class RawEvent:
     tool_use_count: int = 0
     tool_error_count: int = 0
 
+    # Tool names (parsed from message.content tool_use blocks)
+    tool_names: Counter[str] = field(default_factory=Counter)
+
     # Working directory (from system events)
     cwd: str | None = None
 
@@ -71,6 +75,7 @@ class Turn:
     is_interrupted: bool = False
     tool_use_count: int = 0
     tool_error_count: int = 0
+    tool_names: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass

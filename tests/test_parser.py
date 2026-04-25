@@ -120,3 +120,130 @@ def test_parse_normalizes_windows_cwd(tmp_path):
     assert by_sid["s1"].cwd == "C:/Users/alice/dev/proj"
     assert by_sid["s2"].cwd == "//fileserver/share/work"
     assert by_sid["s3"].cwd == "/home/alice/dev/proj"
+
+
+from collections import Counter
+
+
+def test_parse_captures_tool_names_single_use(tmp_path):
+    import json
+    p = tmp_path / "tools.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
+        "model": "claude-opus-4-7",
+        "message": {
+            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            "content": [
+                {"type": "text", "text": "ok"},
+                {"type": "tool_use", "name": "Read", "input": {}},
+            ],
+        },
+    }) + "\n")
+
+    events = list(parse_file(p))
+    assert events[0].tool_names == Counter({"Read": 1})
+    assert events[0].tool_use_count == 1
+
+
+def test_parse_captures_tool_names_multiple_per_turn(tmp_path):
+    import json
+    p = tmp_path / "tools_multi.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
+        "model": "claude-opus-4-7",
+        "message": {
+            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            "content": [
+                {"type": "tool_use", "name": "Read",  "input": {}},
+                {"type": "tool_use", "name": "Read",  "input": {}},
+                {"type": "tool_use", "name": "Edit",  "input": {}},
+                {"type": "text",     "text": "done"},
+            ],
+        },
+    }) + "\n")
+
+    events = list(parse_file(p))
+    assert events[0].tool_names == Counter({"Read": 2, "Edit": 1})
+    assert events[0].tool_use_count == 3
+
+
+def test_parse_skips_unnamed_tool_block(tmp_path):
+    """`tool_use` blocks without a `name` field are junk — skip them but don't crash."""
+    import json
+    p = tmp_path / "tools_unnamed.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
+        "model": "claude-opus-4-7",
+        "message": {
+            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            "content": [
+                {"type": "tool_use", "input": {}},                 # no "name" key
+                {"type": "tool_use", "name": "",  "input": {}},    # empty name
+                {"type": "tool_use", "name": "Bash", "input": {}},
+            ],
+        },
+    }) + "\n")
+
+    events = list(parse_file(p))
+    assert events[0].tool_names == Counter({"Bash": 1})
+    # tool_use_count still counts all tool_use blocks, per existing semantics.
+    assert events[0].tool_use_count == 3
+
+
+def test_parse_zero_tools(tmp_path):
+    """A text-only assistant turn yields an empty Counter, not None."""
+    events = list(parse_file(FIXTURES / "basic.jsonl"))
+    assert events[0].tool_names == Counter()
+    assert events[0].tool_use_count == 0
+
+
+def test_builder_propagates_tool_names(tmp_path):
+    """tool_names on RawEvent must survive through build_turns to Turn."""
+    import json
+    from tokenol.ingest.builder import build_turns
+    p = tmp_path / "sess.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
+        "model": "claude-opus-4-7",
+        "message": {
+            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            "content": [
+                {"type": "tool_use", "name": "Grep", "input": {}},
+                {"type": "tool_use", "name": "Grep", "input": {}},
+            ],
+        },
+    }) + "\n")
+
+    turns = build_turns([p])
+    assert len(turns) == 1
+    assert turns[0].tool_names == Counter({"Grep": 2})
+    assert turns[0].tool_use_count == 2
+
+
+def test_multi_fixture_shape():
+    """Sanity-check the multi.jsonl fixture's expected totals."""
+    from tokenol.ingest.builder import build_sessions, build_turns
+    p = FIXTURES / "multi.jsonl"
+    turns = build_turns([p])
+    sessions = build_sessions(turns, paths=[p])
+
+    assert len(sessions) == 3
+    assert {s.cwd for s in sessions} == {"/home/u/projA", "/home/u/projB"}
+    assert {t.model for t in turns} == {"claude-opus-4-7", "claude-sonnet-4-6"}
+
+    total_tools: Counter[str] = Counter()
+    for t in turns:
+        total_tools.update(t.tool_names)
+    assert total_tools == Counter({"Read": 4, "Edit": 3, "Bash": 1, "Grep": 1})

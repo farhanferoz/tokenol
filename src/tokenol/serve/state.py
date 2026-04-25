@@ -79,16 +79,19 @@ class ParseCache:
 
 
 def _build_turns_and_sessions(
-    all_events: list[RawEvent], paths: list[Path]
+    all_events: list[RawEvent],
 ) -> tuple[list[Turn], list[Session]]:
     """Build deduplicated turns and sessions from pre-parsed raw events."""
     seen: dict[str, tuple[RawEvent, str]] = {}
     passthroughs: list[tuple[RawEvent, None]] = []
     cwd_by_session: dict[str, str] = {}
+    session_source: dict[str, str] = {}
 
     for ev in all_events:
         if ev.cwd and ev.session_id not in cwd_by_session:
             cwd_by_session[ev.session_id] = ev.cwd
+        if ev.session_id not in session_source:
+            session_source[ev.session_id] = ev.source_file
         if ev.event_type != "assistant":
             continue
         if ev.model == "<synthetic>":
@@ -128,9 +131,8 @@ def _build_turns_and_sessions(
             is_interrupted=is_interrupted,
             tool_use_count=ev.tool_use_count,
             tool_error_count=ev.tool_error_count,
+            tool_names=ev.tool_names,
         ))
-
-    session_source: dict[str, str] = {p.stem: str(p) for p in paths}
 
     session_turns: dict[str, list[Turn]] = defaultdict(list)
     session_sidechain: dict[str, bool] = {}
@@ -726,7 +728,7 @@ def build_snapshot_full(
             pass
 
     parse_cache.purge(active_keys)
-    all_turns, all_sessions = _build_turns_and_sessions(all_raw_events, paths)
+    all_turns, all_sessions = _build_turns_and_sessions(all_raw_events)
 
     turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
     daily_90d = _build_daily_series(turns_90d, since_90d)
@@ -1049,6 +1051,60 @@ def build_model_detail(
             "cache_creation_usd": mr.cache_creation_usd,
         } if mr else None,
         "projects_using_model": projects,
+    }
+
+
+def build_tool_detail(
+    name: str,
+    turns: list[Turn],
+    sessions: list[Session],
+) -> dict | None:
+    """Build the tool drill-down payload for GET /api/tool/{name}.
+
+    Returns None if the tool was never used in a billable (non-interrupted) turn.
+    """
+    tool_turns = [
+        t for t in turns
+        if not t.is_interrupted and t.tool_names.get(name, 0) > 0
+    ]
+    if not tool_turns:
+        return None
+
+    cwd_by_sid = _grouped_cwd_by_sid(sessions)
+    proj_counts: defaultdict[str, int] = defaultdict(int)
+    proj_last_turn: dict[str, Turn] = {}
+    model_counts: defaultdict[str, int] = defaultdict(int)
+    total_invocations = 0
+
+    for t in tool_turns:
+        invocations = t.tool_names.get(name, 0)
+        total_invocations += invocations
+        cwd = cwd_by_sid.get(t.session_id, "(unknown)")
+        proj_counts[cwd] += invocations
+        if cwd not in proj_last_turn or t.timestamp > proj_last_turn[cwd].timestamp:
+            proj_last_turn[cwd] = t
+        model = t.model or "(unknown)"
+        model_counts[model] += invocations
+
+    projects = sorted(
+        [{
+            "cwd": cwd,
+            "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
+            "count": proj_counts[cwd],
+            "last_active": proj_last_turn[cwd].timestamp.isoformat(),
+        } for cwd in proj_counts],
+        key=lambda x: -x["count"],
+    )
+    models = sorted(
+        [{"model": model, "count": model_counts[model]} for model in model_counts],
+        key=lambda x: -x["count"],
+    )
+
+    return {
+        "name": name,
+        "total_invocations": total_invocations,
+        "projects_using_tool": projects,
+        "models_using_tool": models,
     }
 
 

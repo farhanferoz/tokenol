@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — breakdown</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23a66408' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css">
+
+  <!-- Chart.js 4.4.7 — UMD build, pinned with SRI. -->
+  <script defer
+          src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.js"
+          integrity="sha384-zYPBGXwO4633CABX/5Spf6emCKUJCfoOkhOMYyxMsatqQZPnDblmmOewfjsIVWCM"
+          crossorigin="anonymous"></script>
+</head>
+<body data-page="breakdown">
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="topbar-row1">
+      <div class="brand">tokenol <span class="dim">— breakdown</span></div>
+      <nav class="nav-tabs" aria-label="Primary">
+        <a href="/" class="nav-tab">Overview</a>
+        <a href="/breakdown" class="nav-tab is-active" aria-current="page">Breakdown</a>
+      </nav>
+      <div class="topbar-icons">
+        <span class="sse-dot" id="sse-dot" title="SSE connecting…"></span>
+      </div>
+    </div>
+  </header>
+
+  <div class="page-heading">
+    <div>
+      <h1 class="page-title">Breakdown</h1>
+      <div class="page-subtitle">tokens by day, project, model, and tool</div>
+    </div>
+    <div class="pill-row" id="breakdown-period-pills" role="group" aria-label="Period">
+      <span data-range="7d">7D</span>
+      <span data-range="30d" class="on">30D</span>
+      <span data-range="90d">90D</span>
+      <span data-range="all">All</span>
+    </div>
+  </div>
+
+  <section class="scorecard" aria-label="Totals">
+    <article class="scorecard-card" id="sc-activity">
+      <div class="sc-label">Activity</div>
+      <div class="sc-primary" id="sc-activity-primary">—</div>
+      <div class="sc-sub"     id="sc-activity-sub">—</div>
+    </article>
+    <article class="scorecard-card" id="sc-tokens">
+      <div class="sc-label">Billable tokens</div>
+      <div class="sc-primary" id="sc-tokens-primary">—</div>
+      <div class="sc-sub"     id="sc-tokens-sub">—</div>
+    </article>
+    <article class="scorecard-card" id="sc-cache">
+      <div class="sc-label">Cache</div>
+      <div class="sc-primary" id="sc-cache-primary">—</div>
+      <div class="sc-sub"     id="sc-cache-sub">—</div>
+    </article>
+    <article class="scorecard-card" id="sc-cost">
+      <div class="sc-label">Est. Cost</div>
+      <div class="sc-primary" id="sc-cost-primary">—</div>
+      <div class="sc-sub good" id="sc-cost-sub">—</div>
+    </article>
+  </section>
+
+  <div class="section-heading breakdown-section-heading">
+    <h2>Time</h2>
+  </div>
+  <div class="breakdown-grid breakdown-grid--2">
+    <section class="breakdown-panel" aria-labelledby="bp-daily-work-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-daily-work-title">Daily Billable Tokens</h3>
+        <span class="chart-subheading" id="bp-daily-work-sub"></span>
+      </div>
+      <div class="breakdown-chart"><canvas id="chart-daily-work" height="200"></canvas></div>
+    </section>
+    <section class="breakdown-panel" aria-labelledby="bp-daily-cache-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-daily-cache-title">Daily Cache Re-use</h3>
+        <span class="chart-subheading" id="bp-daily-cache-sub"></span>
+      </div>
+      <div class="breakdown-chart"><canvas id="chart-daily-cache" height="200"></canvas></div>
+    </section>
+  </div>
+
+  <div class="section-heading breakdown-section-heading">
+    <h2>Breakdowns</h2>
+  </div>
+  <div class="breakdown-grid breakdown-grid--2-1">
+    <section class="breakdown-panel" aria-labelledby="bp-by-project-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-by-project-title">Tokens by Project</h3>
+        <span class="chart-subheading" id="bp-by-project-sub"></span>
+      </div>
+      <div class="breakdown-caption" id="bp-by-project-caption" aria-label="Legend for per-project cache hit rate dots"></div>
+      <div class="breakdown-chart"><canvas id="chart-by-project" height="260"></canvas></div>
+    </section>
+    <section class="breakdown-panel" aria-labelledby="bp-by-model-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-by-model-title">Model Mix</h3>
+        <span class="chart-subheading" id="bp-by-model-sub"></span>
+      </div>
+      <div class="breakdown-chart"><canvas id="chart-by-model" height="260"></canvas></div>
+    </section>
+  </div>
+
+  <div class="section-heading breakdown-section-heading">
+    <h2>Tools</h2>
+  </div>
+  <div class="breakdown-grid breakdown-grid--1">
+    <section class="breakdown-panel" aria-labelledby="bp-tools-title">
+      <div class="breakdown-panel-heading">
+        <h3 id="bp-tools-title">Tool Mix</h3>
+        <span class="chart-subheading" id="bp-tools-sub"></span>
+      </div>
+      <div class="breakdown-chart breakdown-chart--tall"><canvas id="chart-tools" height="320"></canvas></div>
+    </section>
+  </div>
+
+</div>
+
+<script type="module" src="/assets/breakdown.js"></script>
+
+</body>
+</html>

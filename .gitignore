@@ -16,3 +16,4 @@ venv/
 htmlcov/
 .env
 .superpowers/
+projects/

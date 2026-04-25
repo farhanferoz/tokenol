@@ -734,3 +734,317 @@ async def test_prefs_thresholds_reset_sentinel(tmp_path: Path) -> None:
     assert resp.status_code == 200
     got = resp.json()["thresholds"]
     assert got["hit_rate_good_pct"] == DEFAULTS["hit_rate_good_pct"]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_summary_returns_scorecard_fields(tmp_path: Path) -> None:
+    """GET /api/breakdown/summary returns all scorecard fields."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/summary?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    for key in [
+        "range", "sessions", "turns",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_creation_tokens",
+        "cost_usd", "cache_saved_usd",
+    ]:
+        assert key in data, f"Missing field: {key}"
+    assert data["range"] == "all"
+    assert data["sessions"] >= 1
+    assert data["turns"] >= 1
+    assert isinstance(data["cost_usd"], (int, float))
+    assert isinstance(data["cache_saved_usd"], (int, float))
+
+
+@pytest.mark.asyncio
+async def test_breakdown_summary_rejects_unknown_range(tmp_path: Path) -> None:
+    """GET /api/breakdown/summary with invalid range → 400."""
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/summary?range=14d")
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_daily_tokens_returns_day_array(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/daily-tokens?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "days" in data
+    assert len(data["days"]) >= 1
+    day = data["days"][0]
+    for key in ["date", "input", "output", "cache_creation", "cache_read", "cost_usd"]:
+        assert key in day, f"Missing field: {key}"
+    # Dates are ISO strings (YYYY-MM-DD).
+    assert len(day["date"]) == 10 and day["date"][4] == "-" and day["date"][7] == "-"
+
+
+@pytest.mark.asyncio
+async def test_breakdown_daily_tokens_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/daily-tokens?range=14d")
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_route_returns_html(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/breakdown")
+
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-project?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "projects" in data
+    assert len(data["projects"]) >= 1
+    p = data["projects"][0]
+    for key in ["project", "cwd", "cwd_b64", "input", "output", "cache_hit_rate"]:
+        assert key in p, f"Missing field: {key}"
+    # Billable-token sort is descending.
+    billable = [pp["input"] + pp["output"] for pp in data["projects"]]
+    assert billable == sorted(billable, reverse=True)
+    # cache_hit_rate is a decimal or null.
+    assert p["cache_hit_rate"] is None or 0.0 <= p["cache_hit_rate"] <= 1.0
+
+    # Oracle cross-check: the endpoint's per-project token sums must match the
+    # raw (non-interrupted) turn totals from the cached snapshot. This catches
+    # aggregation bugs (e.g. counting interrupted turns, double-counting across
+    # sessions) that the shape/sort assertions above would miss.
+    snap = app.state.snapshot_result
+    assert snap is not None, "snapshot should be cached after the endpoint call"
+    expected_input = sum(
+        t.usage.input_tokens
+        for s in snap.sessions for t in s.turns
+        if not t.is_interrupted
+    )
+    expected_output = sum(
+        t.usage.output_tokens
+        for s in snap.sessions for t in s.turns
+        if not t.is_interrupted
+    )
+    assert sum(p["input"] for p in data["projects"]) == expected_input
+    assert sum(p["output"] for p in data["projects"]) == expected_output
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_project_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-project?range=14d")
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-model?range=all")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["range"] == "all"
+        assert "models" in data
+        assert len(data["models"]) >= 1
+        m = data["models"][0]
+        for key in ["model", "input", "output", "share"]:
+            assert key in m, f"Missing field: {key}"
+        # Shares sum to ~1 (floating point tolerance).
+        total = sum(mm["share"] for mm in data["models"])
+        assert abs(total - 1.0) < 1e-6
+        # Sort desc by billable tokens.
+        billable = [mm["input"] + mm["output"] for mm in data["models"]]
+        assert billable == sorted(billable, reverse=True)
+
+        # Oracle cross-check: sums of per-model input/output must match the
+        # raw non-interrupted turn totals from the cached snapshot. Cache
+        # tokens are deliberately NOT part of share math.
+        snap = app.state.snapshot_result
+        assert snap is not None
+        expected_input = sum(
+            t.usage.input_tokens for t in snap.turns if not t.is_interrupted
+        )
+        expected_output = sum(
+            t.usage.output_tokens for t in snap.turns if not t.is_interrupted
+        )
+        assert sum(mm["input"] for mm in data["models"]) == expected_input
+        assert sum(mm["output"] for mm in data["models"]) == expected_output
+
+
+@pytest.mark.asyncio
+async def test_breakdown_by_model_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-model?range=14d")
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_returns_ranked_list(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-multi.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "tools" in data
+
+    # multi.jsonl has 4 distinct tools — no "others" row at default top_n=10.
+    names = [row["tool"] for row in data["tools"]]
+    assert names == ["Read", "Edit", "Bash", "Grep"]
+    counts = [row["count"] for row in data["tools"]]
+    assert counts == [4, 3, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_rejects_unknown_range(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=14d")
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_excludes_interrupted(tmp_path: Path) -> None:
+    """Interrupted turns (no usage) must not contribute to tool counts —
+    matches the by-project / by-model exclusion convention."""
+    dst = tmp_path / "projects" / "sess-int.jsonl"
+    dst.parent.mkdir(parents=True)
+    # One interrupted assistant turn (no usage field) with a tool_use block.
+    dst.write_text(
+        '{"type":"assistant","timestamp":"2026-04-14T10:00:00Z","sessionId":"s1","requestId":"r1","uuid":"e1","isSidechain":false,"model":"claude-opus-4-7",'
+        '"message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]}}\n'
+    )
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all")
+
+    assert resp.status_code == 200
+    assert resp.json()["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_page_returns_html(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/tool/Read")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_api_tool_detail_returns_payload(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-multi.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/tool/Read")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Read"
+    # From multi.jsonl: Read is used 4 times total (2 in sess-a + 1 in sess-b + 1 in sess-c).
+    assert data["total_invocations"] == 4
+    # projA has Read in both sess-a (2) and sess-c (1) = 3; projB has Read in sess-b = 1.
+    projs = {p["cwd"]: p for p in data["projects_using_tool"]}
+    assert projs["/home/u/projA"]["count"] == 3
+    assert projs["/home/u/projB"]["count"] == 1
+    # Sorted desc.
+    counts = [p["count"] for p in data["projects_using_tool"]]
+    assert counts == sorted(counts, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_api_tool_detail_404_on_unknown(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/tool/NoSuchTool")
+    assert resp.status_code == 404
