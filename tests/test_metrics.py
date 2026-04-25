@@ -1,5 +1,6 @@
 """Cost metric unit tests with hand-computed expected values."""
 
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,7 +8,8 @@ import pytest
 
 from tokenol.ingest.builder import build_turns
 from tokenol.metrics.cost import cache_saved_usd, cost_for_turn, rollup_by_date
-from tokenol.model.events import Turn, Usage
+from tokenol.metrics.rollups import build_session_rollup, build_tool_mix
+from tokenol.model.events import Session, Turn, Usage
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -132,14 +134,8 @@ def test_cache_saved_usd_sums_across_turns_and_models():
 
 # ---- tool_mix / build_tool_mix ----------------------------------------------
 
-from collections import Counter
-
-from tokenol.metrics.rollups import build_session_rollup, build_tool_mix
-from tokenol.model.events import Session
-
 
 def _turn_with_tools(tool_names: dict[str, int]) -> Turn:
-    from datetime import datetime, timezone
     return Turn(
         dedup_key="k",
         timestamp=datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc),

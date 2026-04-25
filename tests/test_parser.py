@@ -1,8 +1,11 @@
 """Parser unit tests."""
 
+import json
+from collections import Counter
 from pathlib import Path
 
 from tokenol.enums import AssumptionTag
+from tokenol.ingest.builder import build_sessions, build_turns
 from tokenol.ingest.parser import iter_assistant_events, parse_file
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -70,7 +73,6 @@ def test_interrupted_turn_tag():
 
 def test_parse_normalizes_windows_cwd(tmp_path):
     """Windows drive-letter and UNC paths are normalized to POSIX separators at ingestion."""
-    import json
     p = tmp_path / "sess.jsonl"
     lines = [
         # Drive-letter path with backslashes
@@ -122,11 +124,7 @@ def test_parse_normalizes_windows_cwd(tmp_path):
     assert by_sid["s3"].cwd == "/home/alice/dev/proj"
 
 
-from collections import Counter
-
-
 def test_parse_captures_tool_names_single_use(tmp_path):
-    import json
     p = tmp_path / "tools.jsonl"
     p.write_text(json.dumps({
         "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
@@ -149,7 +147,6 @@ def test_parse_captures_tool_names_single_use(tmp_path):
 
 
 def test_parse_captures_tool_names_multiple_per_turn(tmp_path):
-    import json
     p = tmp_path / "tools_multi.jsonl"
     p.write_text(json.dumps({
         "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
@@ -175,7 +172,6 @@ def test_parse_captures_tool_names_multiple_per_turn(tmp_path):
 
 def test_parse_skips_unnamed_tool_block(tmp_path):
     """`tool_use` blocks without a `name` field are junk — skip them but don't crash."""
-    import json
     p = tmp_path / "tools_unnamed.jsonl"
     p.write_text(json.dumps({
         "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
@@ -208,8 +204,6 @@ def test_parse_zero_tools(tmp_path):
 
 def test_builder_propagates_tool_names(tmp_path):
     """tool_names on RawEvent must survive through build_turns to Turn."""
-    import json
-    from tokenol.ingest.builder import build_turns
     p = tmp_path / "sess.jsonl"
     p.write_text(json.dumps({
         "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
@@ -234,7 +228,6 @@ def test_builder_propagates_tool_names(tmp_path):
 
 def test_multi_fixture_shape():
     """Sanity-check the multi.jsonl fixture's expected totals."""
-    from tokenol.ingest.builder import build_sessions, build_turns
     p = FIXTURES / "multi.jsonl"
     turns = build_turns([p])
     sessions = build_sessions(turns, paths=[p])

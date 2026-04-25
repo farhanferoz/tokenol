@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
+from tokenol.model.events import Session, Turn, Usage
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     build_project_detail,
     build_snapshot_full,
+    build_tool_detail,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -512,14 +516,8 @@ def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None
 
 # ---- build_tool_detail tests ------------------------------------------
 
-from collections import Counter
-
 
 def test_build_tool_detail_returns_payload():
-    from datetime import datetime, timezone
-    from tokenol.serve.state import build_tool_detail
-    from tokenol.model.events import Session, Turn, Usage
-
     def _turn(sid, ts, model, tools, cost=0.0, err_count=0):
         return Turn(
             dedup_key=f"k-{ts.isoformat()}", timestamp=ts, session_id=sid,
@@ -566,17 +564,12 @@ def test_build_tool_detail_returns_payload():
 
 
 def test_build_tool_detail_unknown_returns_none():
-    from tokenol.serve.state import build_tool_detail
     assert build_tool_detail("NoSuchTool", [], []) is None
 
 
 def test_build_tool_detail_excludes_interrupted():
     """Interrupted turns (no usage billed) still might have tool_use content,
     but we exclude them from counts to match /api/breakdown/tools."""
-    from datetime import datetime, timezone
-    from tokenol.serve.state import build_tool_detail
-    from tokenol.model.events import Session, Turn, Usage
-
     ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
     interrupted = Turn(
         dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
