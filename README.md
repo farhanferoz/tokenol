@@ -17,6 +17,11 @@ Claude Code bills you for everything the model reads — input, output, **and** 
 
 ![Main dashboard](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/main.jpg)
 
+Breakdowns tab — daily work / cache trends, project · model · tool mix with click-through:
+
+![Breakdowns, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_top.jpg)
+![Breakdowns, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_bottom.jpg)
+
 Session drill-down — pattern detection + cost-per-turn small multiples:
 
 ![Session drill-down, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_top.jpg)
