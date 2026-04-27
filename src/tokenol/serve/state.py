@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from tokenol import assumptions as assumption_recorder
 from tokenol.enums import AssumptionTag, BlowUpVerdict
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs
 from tokenol.ingest.parser import dedup_key, parse_file
@@ -51,10 +50,17 @@ class ParseCache:
     """JSONL parse cache keyed by (path_str, size, mtime_ns).
 
     All public methods are thread-safe via an internal lock.
+
+    Also memoizes the derived (turns, sessions) tuple keyed on the active set of
+    parse keys: when no JSONL file changed since the last build, build_snapshot_full
+    can skip the O(total events) re-derivation. The memo is invalidated automatically
+    on any get_or_parse miss or any purge that drops a key.
     """
 
     _store: dict[tuple[str, int, int], list[RawEvent]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _derived_keys: frozenset[tuple[str, int, int]] | None = None
+    _derived: tuple[list[Turn], list[Session], Counter[AssumptionTag]] | None = None
 
     def get_or_parse(self, path: Path) -> tuple[tuple[str, int, int], list[RawEvent]]:
         """Return (cache_key, events). Parses only when (size, mtime_ns) changes."""
@@ -63,6 +69,9 @@ class ParseCache:
         with self._lock:
             if key not in self._store:
                 self._store[key] = list(parse_file(path))
+                # New file content invalidates any derived memo.
+                self._derived_keys = None
+                self._derived = None
             return key, self._store[key]
 
     def purge(self, keep_keys: set[tuple[str, int, int]]) -> None:
@@ -71,6 +80,36 @@ class ParseCache:
             stale = [k for k in self._store if k not in keep_keys]
             for k in stale:
                 del self._store[k]
+            if stale:
+                self._derived_keys = None
+                self._derived = None
+
+    def get_derived(
+        self,
+        keys: frozenset[tuple[str, int, int]],
+        builder: Callable[[list[RawEvent]], tuple[list[Turn], list[Session], Counter[AssumptionTag]]],
+    ) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
+        """Return memoized (turns, sessions, fired_counts) for the given key set; rebuild on miss.
+
+        The memo is keyed on `keys` (the set of active ParseCache entries). When no
+        file changed mtime/size since the last build, the cached derivation is
+        returned without re-iterating events — this is the dominant per-tick cost.
+        """
+        with self._lock:
+            if self._derived is not None and self._derived_keys == keys:
+                return self._derived
+            # Build outside the parse-cache invariant by snapshotting events first.
+            events: list[RawEvent] = []
+            for k in keys:
+                bucket = self._store.get(k)
+                if bucket is not None:
+                    events.extend(bucket)
+        # Builder runs without the lock — it's pure CPU over a private list.
+        derived = builder(events)
+        with self._lock:
+            self._derived = derived
+            self._derived_keys = keys
+        return derived
 
     @property
     def size(self) -> int:
@@ -80,12 +119,18 @@ class ParseCache:
 
 def _build_turns_and_sessions(
     all_events: list[RawEvent],
-) -> tuple[list[Turn], list[Session]]:
-    """Build deduplicated turns and sessions from pre-parsed raw events."""
+) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
+    """Build deduplicated turns and sessions from pre-parsed raw events.
+
+    Returns the (turns, sessions, fired-assumption-counts). Fired counts are returned
+    rather than written to a global recorder so the result is referentially
+    transparent and safe to memoize on ParseCache.
+    """
     seen: dict[str, tuple[RawEvent, str]] = {}
     passthroughs: list[tuple[RawEvent, None]] = []
     cwd_by_session: dict[str, str] = {}
     session_source: dict[str, str] = {}
+    fired: Counter[AssumptionTag] = Counter()
 
     for ev in all_events:
         if ev.cwd and ev.session_id not in cwd_by_session:
@@ -115,7 +160,8 @@ def _build_turns_and_sessions(
 
         tc = cost_for_turn(ev.model, usage)
         tags.extend(t for t in tc.assumptions if t not in tags)
-        assumption_recorder.record(tags)
+        for tag in tags:
+            fired[tag] += 1
 
         key_str = k or ev.uuid or str(id(ev))
         turns.append(Turn(
@@ -153,7 +199,7 @@ def _build_turns_and_sessions(
             turns=t_list,
         ))
     sessions.sort(key=lambda s: s.turns[0].timestamp if s.turns else s.session_id)
-    return turns, sessions
+    return turns, sessions, fired
 
 
 @dataclass
@@ -709,7 +755,6 @@ def build_snapshot_full(
       hourly_today, daily, models, recent_activity,
       assumptions_summary
     """
-    assumption_recorder.reset()
     now = datetime.now(tz=timezone.utc)
     today_date = now.date()
     since_90d = today_date - timedelta(days=89)
@@ -717,18 +762,18 @@ def build_snapshot_full(
     dirs = get_config_dirs(all_projects=all_projects)
     paths = find_jsonl_files(dirs)
 
-    all_raw_events: list[RawEvent] = []
     active_keys: set[tuple[str, int, int]] = set()
     for path in paths:
         try:
-            key, events = parse_cache.get_or_parse(path)
+            key, _events = parse_cache.get_or_parse(path)
             active_keys.add(key)
-            all_raw_events.extend(events)
         except OSError:
             pass
 
     parse_cache.purge(active_keys)
-    all_turns, all_sessions = _build_turns_and_sessions(all_raw_events)
+    all_turns, all_sessions, _fired = parse_cache.get_derived(
+        frozenset(active_keys), _build_turns_and_sessions
+    )
 
     turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
     daily_90d = _build_daily_series(turns_90d, since_90d)
@@ -756,7 +801,6 @@ def build_snapshot_full(
     models = _build_models(period_turns, period)
     recent_activity = _build_recent_activity(all_turns, cwd_by_sid, now)
 
-    _fired = assumption_recorder.fired()
     payload = {
         "generated_at": now.isoformat(),
         "config": {"reference_usd": reference_usd, "tick_seconds": tick_seconds},
@@ -779,6 +823,25 @@ def build_snapshot_full(
     }
 
     return SnapshotResult(payload=payload, turns=all_turns, sessions=all_sessions)
+
+
+def compute_active_keys(all_projects: bool) -> frozenset[tuple[str, int, int]]:
+    """Stat all active JSONL files and return their (path, size, mtime_ns) keys.
+
+    Cheap alternative to a full build_snapshot_full when the only question is
+    "did anything change since the last build?". The SSE broadcaster uses this as
+    an idle gate so unchanged ticks skip the full snapshot assembly entirely.
+    """
+    dirs = get_config_dirs(all_projects=all_projects)
+    paths = find_jsonl_files(dirs)
+    keys: set[tuple[str, int, int]] = set()
+    for p in paths:
+        try:
+            s = p.stat()
+            keys.add((str(p), s.st_size, s.st_mtime_ns))
+        except OSError:
+            pass
+    return frozenset(keys)
 
 
 # ---------------------------------------------------------------------------

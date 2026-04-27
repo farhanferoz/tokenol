@@ -107,6 +107,71 @@ def test_parse_cache_purge(tmp_path: Path) -> None:
     assert cache.size == 0
 
 
+def test_parse_cache_get_derived_memoizes(tmp_path: Path) -> None:
+    """get_derived skips the builder on a key-set hit and rebuilds on miss.
+
+    This is the core idle-CPU optimization: identical (path, size, mtime_ns) sets
+    must reuse the cached (turns, sessions, fired) tuple without re-iterating
+    events. A new key in the set forces a rebuild.
+    """
+    dst = tmp_path / "basic.jsonl"
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    cache = ParseCache()
+    key, _events = cache.get_or_parse(dst)
+
+    call_count = 0
+
+    def builder(events):
+        nonlocal call_count
+        call_count += 1
+        from tokenol.serve.state import _build_turns_and_sessions
+        return _build_turns_and_sessions(events)
+
+    keys = frozenset({key})
+    r1 = cache.get_derived(keys, builder)
+    r2 = cache.get_derived(keys, builder)
+    assert call_count == 1, "second call with same key set must hit the memo"
+    assert r1 is r2, "memo must return the same triple object"
+
+    # A different (simulated) key set forces rebuild.
+    other_key = ("/tmp/other.jsonl", 999, 999)
+    cache.get_derived(frozenset({key, other_key}), builder)
+    assert call_count == 2
+
+
+def test_parse_cache_invalidates_derived_on_new_file(tmp_path: Path) -> None:
+    """A new get_or_parse miss must invalidate the derived memo.
+
+    Otherwise, after a JSONL file changes mtime, build_snapshot_full would happily
+    return stale (turns, sessions) computed before the change.
+    """
+    dst = tmp_path / "basic.jsonl"
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    cache = ParseCache()
+    key1, _ = cache.get_or_parse(dst)
+
+    call_count = 0
+
+    def builder(events):
+        nonlocal call_count
+        call_count += 1
+        from tokenol.serve.state import _build_turns_and_sessions
+        return _build_turns_and_sessions(events)
+
+    cache.get_derived(frozenset({key1}), builder)
+    assert call_count == 1
+
+    # Mutate file → new key, recorded via a fresh get_or_parse miss → memo invalidated.
+    dst.write_bytes(dst.read_bytes() + b'\n{"type":"system","timestamp":"2026-04-14T10:10:00Z","sessionId":"x","cwd":"/tmp"}\n')
+    key2, _ = cache.get_or_parse(dst)
+    assert key1 != key2
+
+    cache.get_derived(frozenset({key2}), builder)
+    assert call_count == 2, "memo must be invalidated when a new file revision is parsed"
+
+
 # ---- build_snapshot_full tests -----------------------------------------
 
 
@@ -507,7 +572,7 @@ def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None
     dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
 
     events = parse_file(dst)
-    _, sessions = _build_turns_and_sessions(events)
+    _, sessions, _fired = _build_turns_and_sessions(events)
 
     assert {s.session_id for s in sessions} == {"sess-a", "sess-b", "sess-c"}
     for s in sessions:

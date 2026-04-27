@@ -55,9 +55,6 @@ class RawEvent:
     # Working directory (from system events)
     cwd: str | None = None
 
-    # Raw for extensibility (caller may inspect)
-    raw: dict = field(default_factory=dict)  # type: ignore[assignment]
-
 
 @dataclass
 class Turn:

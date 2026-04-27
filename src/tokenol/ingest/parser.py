@@ -118,7 +118,6 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 tool_error_count=tool_error_count,
                 tool_names=tool_names,
                 cwd=cwd,
-                raw=ev,
             )
 
 

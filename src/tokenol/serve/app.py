@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ from tokenol.serve.state import (
     encode_cwd,
     range_since,
 )
+from tokenol.serve.streaming import SnapshotBroadcaster
 
 _WINDOW_MINUTES: dict[str, int] = {"15m": 15, "60m": 60, "4h": 240, "24h": 1440}
 _KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "thresholds"})
@@ -121,12 +123,29 @@ def create_app(
     _prefs_path = prefs_path or default_path()
     prefs = Preferences.load(_prefs_path)
 
-    app = FastAPI(title="tokenol")
+    parse_cache = ParseCache()
+    broadcaster = SnapshotBroadcaster(
+        parse_cache=parse_cache,
+        all_projects=config.all_projects,
+        get_reference_usd=lambda: prefs.reference_usd,
+        get_tick_seconds=lambda: prefs.tick_seconds,
+        get_thresholds=lambda: prefs.thresholds,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            await broadcaster.shutdown()
+
+    app = FastAPI(title="tokenol", lifespan=lifespan)
     app.state.config = config
     app.state.prefs = prefs
     app.state.prefs_path = _prefs_path
-    app.state.parse_cache = ParseCache()
+    app.state.parse_cache = parse_cache
     app.state.snapshot_result = None
+    app.state.broadcaster = broadcaster
 
     if STATIC_DIR.exists():
         app.mount("/assets", StaticFiles(directory=str(STATIC_DIR)), name="assets")
@@ -220,21 +239,10 @@ def create_app(
 
     @app.get("/api/stream")
     async def api_stream(request: Request, period: str = "today"):
-        from tokenol.serve.streaming import snapshot_stream
-
-        cfg: ServerConfig = request.app.state.config
-        prefs: Preferences = request.app.state.prefs
-        cache: ParseCache = request.app.state.parse_cache
+        broadcaster: SnapshotBroadcaster = request.app.state.broadcaster
 
         async def event_generator():
-            async for chunk in snapshot_stream(
-                parse_cache=cache,
-                all_projects=cfg.all_projects,
-                reference_usd=prefs.reference_usd,
-                get_tick_seconds=lambda: prefs.tick_seconds,
-                period=period,
-                thresholds=prefs.thresholds,
-            ):
+            async for chunk in broadcaster.subscribe(period):
                 if await request.is_disconnected():
                     break
                 yield chunk
