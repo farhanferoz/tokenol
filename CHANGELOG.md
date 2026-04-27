@@ -4,6 +4,35 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-27
+
+### Changed
+- **`tokenol serve` resource use slashed.** On a real session-history workload,
+  steady-state RSS drops ~8× (from ~4 GiB to ~500 MiB) and idle CPU falls to
+  near zero between heartbeats. Multi-tab dashboards now share a single
+  background producer, so adding tabs does not multiply server CPU.
+- The SSE stream (`/api/stream`) is driven by `SnapshotBroadcaster`: one task
+  per `period` fans payloads out to N subscribers, each maintaining its own
+  shallow-diff state. The wire format is unchanged.
+- The producer now gates rebuilds on JSONL file `(path, size, mtime_ns)`
+  changes, with a configurable heartbeat (default 60 s) so time-windowed
+  panels (`recent_activity`, day boundaries) stay reasonably fresh. Trade-off:
+  panels may lag wall-clock by up to the heartbeat between file writes.
+- `ParseCache` now memoizes derived `(turns, sessions, fired)` keyed on the
+  active file-key set; idle ticks skip the per-tick `_build_turns_and_sessions`
+  rebuild entirely.
+- `_build_turns_and_sessions` now returns the per-build assumption-fired
+  `Counter` instead of mutating the global `assumption_recorder`.
+- `create_app` migrated from the deprecated `@app.on_event("shutdown")` to a
+  lifespan context manager.
+
+### Removed
+- **`RawEvent.raw` field.** Was populated by the parser with the full JSON
+  dict (message bodies, tool I/O) for "extensibility" but read by no
+  downstream code. Removing it is the dominant memory win. Code that wants
+  raw JSON should re-read from disk (as `serve/session_detail.py` already
+  does).
+
 ## [0.2.0] — 2026-04-25
 
 ### Added
