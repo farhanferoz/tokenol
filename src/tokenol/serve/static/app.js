@@ -50,18 +50,44 @@ function _setPeriod(p) { localStorage.setItem(_LS_PERIOD, p); }
 
 // ---- SSE dot ----
 const _dot = $('sse-dot');
+let _dotBaseTitle = '';
 function _dotState(cls, title) {
   _dot.className = 'sse-dot' + (cls ? ' ' + cls : '');
+  _dotBaseTitle = title;
   _dot.title = title;
 }
+// Live tooltip: "Live — connected · last update 5s ago" — updated every second
+// so you can hover-and-tell whether the page is genuinely stale.
+setInterval(() => {
+  if (!_dot) return;
+  if (_lastMsgAt) {
+    const ageS = Math.round((Date.now() - _lastMsgAt) / 1000);
+    _dot.title = `${_dotBaseTitle} · last update ${ageS}s ago`;
+  } else {
+    _dot.title = _dotBaseTitle;
+  }
+}, 1_000);
 
 // ---- SSE connection ----
 let _es = null;
 let _reconnectDelay = 1_000;
 let _fiveXXSince    = null;
+let _lastMsgAt      = 0;
+// Server heartbeat is ≤60s; >90s without a message means the connection
+// silently stalled (system sleep, NAT drop, transparent proxy).
+const _STALE_MS = 90_000;
+
+function _scheduleReconnect(reason) {
+  if (_es) { _es.close(); _es = null; }
+  _lastMsgAt = 0;
+  _dotState('amber', `SSE ${reason} — reconnecting…`);
+  setTimeout(() => _connect(_getPeriod()), _reconnectDelay);
+  _reconnectDelay = Math.min(_reconnectDelay * 2, 30_000);
+}
 
 function _connect(period) {
   if (_es) { _es.close(); _es = null; }
+  _lastMsgAt = 0;
   _dotState('', 'SSE connecting…');
   _es = new EventSource(`/api/stream?period=${period}`);
 
@@ -69,21 +95,47 @@ function _connect(period) {
     _dotState('connected', 'Live — connected');
     _reconnectDelay = 1_000;
     _fiveXXSince    = null;
+    _lastMsgAt      = Date.now();
     _resetIdleTimer();
   };
 
   _es.onmessage = ev => {
+    _lastMsgAt = Date.now();
     try { _applyPayload(JSON.parse(ev.data)); }
     catch (e) { console.error('SSE parse', e); }
   };
 
-  _es.onerror = () => {
-    _dotState('amber', 'SSE disconnected — reconnecting…');
-    _es.close(); _es = null;
-    setTimeout(() => _connect(_getPeriod()), _reconnectDelay);
-    _reconnectDelay = Math.min(_reconnectDelay * 2, 30_000);
-  };
+  _es.onerror = () => _scheduleReconnect('disconnected');
 }
+
+// Watchdog: EventSource doesn't reliably fire onerror on silent stalls.
+setInterval(() => {
+  if (!_es || !_lastMsgAt) return;
+  if (Date.now() - _lastMsgAt > _STALE_MS) _scheduleReconnect('stalled');
+}, 10_000);
+
+// Browsers throttle background tabs — timers slow, SSE may pause. On tab
+// return, if our last message is older than one tick + slack, force a fresh
+// reconnect so the user never sees stale data.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!_lastMsgAt || Date.now() - _lastMsgAt > 15_000) {
+    _reconnectDelay = 1_000;
+    _scheduleReconnect('tab visible');
+  }
+});
+
+// Backstop: re-fetch the authoritative snapshot periodically. SSE is the
+// fast path; this catches any case where SSE flows but the merged client
+// state drifts (browser extension hooks, long-lived tab quirks, etc.).
+// Skipped while hidden — visibilitychange handler covers the wakeup case.
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  _fetchSnapshot(_getPeriod());
+}, 30_000);
+
+// Debug: window.__tokenolForceReconnect() simulates a silent stall.
+window.__tokenolForceReconnect = () => _scheduleReconnect('forced (debug)');
 
 // ---- initial fetch ----
 async function _fetchSnapshot(period) {
