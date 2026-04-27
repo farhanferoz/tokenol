@@ -115,7 +115,9 @@ tokenol serve --all-projects --tick 2s --reference 25
 tokenol serve --open
 ```
 
-The dashboard updates via SSE as Claude Code writes events to disk. Main page layout (top to bottom):
+The dashboard updates via SSE as Claude Code writes events to disk. The server gates rebuilds on JSONL file changes — when no files have changed, it idles at near-zero CPU and forces a refresh at most once a minute (so time-windowed panels like Recent Activity don't drift more than ~60 s from wall clock). Multiple browser tabs share a single producer, so opening more tabs does not multiply server cost.
+
+Main page layout (top to bottom):
 
 | Panel | What it shows |
 |---|---|
@@ -140,7 +142,7 @@ Keyboard shortcuts: `?` Glossary · `/` Find · `,` Settings · `Esc` close/back
 
 ### Preferences
 
-User preferences (tick cadence and threshold overrides) are saved to:
+User preferences (gate-poll cadence and threshold overrides) are saved to:
 
 ```
 $XDG_CONFIG_HOME/tokenol/prefs.json   # default: ~/.config/tokenol/prefs.json
@@ -163,6 +165,8 @@ Shape:
   }
 }
 ```
+
+`tick_seconds` is how often the server stat-checks the JSONL files for changes (cheap). The full snapshot only rebuilds on a detected change or once per ~60 s heartbeat — so a long `tick_seconds` mainly reduces stat-syscall noise, not rebuild cost.
 
 Reset to defaults via the Settings modal (`POST /api/prefs {"thresholds": "reset"}`).
 
