@@ -117,6 +117,8 @@ tokenol serve --open
 
 The dashboard updates via SSE as Claude Code writes events to disk. The server gates rebuilds on JSONL file changes — when no files have changed, it idles at near-zero CPU and forces a refresh at most once a minute (so time-windowed panels like Recent Activity don't drift more than ~60 s from wall clock). Multiple browser tabs share a single producer, so opening more tabs does not multiply server cost.
 
+If SSE delivery silently stalls (browser tab throttling, extension hooks, long-lived `EventSource` quirks), the client self-heals: it polls `/api/snapshot` every 30 s as a backstop, force-reconnects on tab-visibility return, and runs a 90 s staleness watchdog. `/api/snapshot` reuses the broadcaster's cached payload while an SSE group is live, so the backstop costs only a JSON serialize. Hover the live-status dot for a "last update Ns ago" indicator.
+
 Main page layout (top to bottom):
 
 | Panel | What it shows |
