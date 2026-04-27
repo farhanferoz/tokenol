@@ -4,6 +4,30 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-04-27
+
+### Fixed
+- **Dashboard auto-update self-heals from SSE drift.** The live dashboard
+  could intermittently freeze on stale tile/chart values while the SSE
+  connection appeared healthy (dot green, messages arriving), requiring a
+  hard reload. Reproduced reliably in long-lived browser tabs; root cause
+  is browser-environmental (extension hooks, accumulated tab state, or
+  long-lived `EventSource` quirks). Fix is a layered, root-cause-agnostic
+  resilience set in the static client:
+  - `/api/snapshot` polling backstop every 30 s while the tab is visible —
+    state self-heals within 30 s even if SSE delivery silently breaks.
+  - Force-reconnect on `visibilitychange → visible` when the last message
+    is older than 15 s (browsers throttle background-tab timers/SSE).
+  - 90 s SSE staleness watchdog (silent stalls don't always fire `onerror`).
+  - Live "last update Ns ago" tooltip on the SSE dot for at-a-glance
+    freshness.
+
+### Changed
+- `/api/snapshot` reuses `SnapshotBroadcaster.cached_payload(period)` when
+  an SSE group is live for the requested period, avoiding a redundant full
+  rebuild. Cuts the snapshot fetch from ~175 ms to ~100 ms (mostly JSON
+  serialization), making the new poll backstop essentially free.
+
 ## [0.3.0] — 2026-04-27
 
 ### Changed
