@@ -243,3 +243,8 @@ class SnapshotBroadcaster:
     def group_count(self) -> int:
         """Number of active producer groups (testing aid)."""
         return len(self._groups)
+
+    def cached_payload(self, period: str) -> dict | None:
+        """Latest broadcast payload for *period*, or None if no group is live."""
+        grp = self._groups.get(period)
+        return grp.last_payload if grp is not None else None

@@ -182,6 +182,13 @@ def create_app(
 
     @app.get("/api/snapshot")
     async def api_snapshot(request: Request, period: str = "today"):
+        # Reuse the broadcaster's cached payload when a SSE group is live for
+        # this period — avoids a second full rebuild for polling backstops.
+        broadcaster = getattr(request.app.state, "broadcaster", None)
+        if broadcaster is not None:
+            cached = broadcaster.cached_payload(period)
+            if cached is not None:
+                return JSONResponse(cached)
         return JSONResponse(_build_and_cache_snapshot(request, period=period).payload)
 
     @app.get("/api/session/{session_id}")
