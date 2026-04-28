@@ -113,6 +113,16 @@ def _build_and_cache_snapshot(request: Request, period: str = "today") -> Snapsh
     return result
 
 
+def _current_snapshot_result(request: Request) -> SnapshotResult:
+    """Prefer the broadcaster's latest build; fall back to the app cache or a fresh build."""
+    broadcaster = getattr(request.app.state, "broadcaster", None)
+    if broadcaster is not None:
+        latest = broadcaster.latest_result()
+        if latest is not None:
+            return latest
+    return request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+
+
 def create_app(
     config: ServerConfig | None = None,
     prefs_path: Path | None = None,
@@ -193,7 +203,7 @@ def create_app(
 
     @app.get("/api/session/{session_id}")
     async def api_session_detail(session_id: str, request: Request):
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         session = next((s for s in result.sessions if s.session_id == session_id), None)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -201,7 +211,7 @@ def create_app(
 
     @app.get("/api/session/{session_id}/turn/{turn_idx}")
     async def api_turn_detail(session_id: str, turn_idx: int, request: Request):
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         session = next((s for s in result.sessions if s.session_id == session_id), None)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -218,7 +228,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid cwd encoding") from None
         if range not in ("1d", "7d", "14d", "30d", "all"):
             raise HTTPException(status_code=400, detail="Invalid range — use 1d, 7d, 14d, 30d, or all")
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_project_detail(cwd, result.sessions, range_key=range),
@@ -235,7 +245,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD") from None
         if parsed_date > date.today():
             raise HTTPException(status_code=400, detail="Future dates not supported")
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_day_detail(parsed_date, result.turns, result.sessions),
@@ -272,7 +282,7 @@ def create_app(
             parsed = date.fromisoformat(target_date)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD") from None
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         return JSONResponse(build_hourly_panel(parsed, result.turns, result.sessions, metric, project, model))
 
     @app.get("/api/daily")
@@ -289,7 +299,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"Unknown metric — valid: {sorted(VALID_METRICS)}")
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
         # Returning 400 here forced clients to special-case "policy" failures even though
@@ -318,7 +328,7 @@ def create_app(
 
     @app.get("/api/models")
     async def api_models(request: Request, range: str = "today"):
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         since = range_since(range, date.today())
         turns = [t for t in result.turns if t.timestamp.date() >= since] if since else result.turns
         return JSONResponse(build_models_panel(turns, range))
@@ -327,7 +337,7 @@ def create_app(
     async def api_recent(request: Request, window: str = "60m"):
         if window not in _WINDOW_MINUTES:
             raise HTTPException(status_code=400, detail=f"window must be one of: {list(_WINDOW_MINUTES)}")
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         now = datetime.now(tz=timezone.utc)
         return JSONResponse(build_recent_activity_panel(
             result.turns, result.sessions, now, _WINDOW_MINUTES[window]
@@ -335,7 +345,7 @@ def create_app(
 
     @app.get("/api/model/{name}")
     async def api_model_detail(name: str, request: Request):
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         detail = build_model_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Model not found")
@@ -343,7 +353,7 @@ def create_app(
 
     @app.get("/api/tool/{name}")
     async def api_tool_detail(name: str, request: Request):
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         detail = build_tool_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Tool not found")
@@ -353,7 +363,7 @@ def create_app(
     async def api_search(request: Request, q: str = ""):
         if not q.strip():
             return JSONResponse({"hits": [], "query": q})
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         return JSONResponse(build_search_results(q, result.turns, result.sessions))
 
     @app.get("/api/prefs")
@@ -402,7 +412,7 @@ def create_app(
     @app.get("/api/breakdown/summary")
     async def api_breakdown_summary(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         since = range_since(range, date.today()) if range != "all" else None
         if since is None:
             turns = list(result.turns)
@@ -429,7 +439,7 @@ def create_app(
     @app.get("/api/breakdown/daily-tokens")
     async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         since = range_since(range, date.today()) if range != "all" else None
         if since is None:
             turns = list(result.turns)
@@ -456,7 +466,7 @@ def create_app(
     @app.get("/api/breakdown/by-project")
     async def api_breakdown_by_project(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         since = range_since(range, date.today()) if range != "all" else None
 
         cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
@@ -484,7 +494,7 @@ def create_app(
     @app.get("/api/breakdown/by-model")
     async def api_breakdown_by_model(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         since = range_since(range, date.today()) if range != "all" else None
 
         buckets = _bucket_turns(
@@ -508,7 +518,7 @@ def create_app(
     @app.get("/api/breakdown/tools")
     async def api_breakdown_tools(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+        result = _current_snapshot_result(request)
         since = range_since(range, date.today()) if range != "all" else None
 
         total: Counter[str] = Counter()

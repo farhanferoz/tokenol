@@ -177,6 +177,8 @@ class SnapshotBroadcaster:
         self._heartbeat_s = heartbeat_s
         self._groups: dict[str, _Group] = {}
         self._lock = asyncio.Lock()
+        # turns/sessions are period-agnostic, so any producer's freshest result serves all readers.
+        self._latest_result: SnapshotResult | None = None
 
     def _compute_active_keys(self) -> frozenset[tuple[str, int, int]]:
         return compute_active_keys(self._all_projects)
@@ -190,7 +192,11 @@ class SnapshotBroadcaster:
             period=period,
             thresholds=self._get_thresholds(),
         )
+        self._latest_result = result
         return result.payload
+
+    def latest_result(self) -> SnapshotResult | None:
+        return self._latest_result
 
     async def subscribe(self, period: str) -> AsyncGenerator[str, None]:
         sub = _Subscriber()
