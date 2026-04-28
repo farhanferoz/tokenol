@@ -506,6 +506,7 @@ function renderDailyWork(data) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
       scales: {
         x: { stacked: true, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
         y: { stacked: true, beginAtZero: true, ticks: { callback: v => fmtTok(v) } },
