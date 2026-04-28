@@ -1052,3 +1052,91 @@ async def test_api_tool_detail_404_on_unknown(tmp_path: Path) -> None:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/api/tool/NoSuchTool")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None:
+    """Regression: /api/hourly must track the broadcaster, not stale app.state.snapshot_result."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    from httpx import ASGITransport, AsyncClient
+
+    today = datetime.now(tz=timezone.utc).date()
+    target_date = today.isoformat()
+
+    def _turn_line(uuid: str, hour: int, minute: int) -> bytes:
+        ts = f"{target_date}T{hour:02d}:{minute:02d}:00Z"
+        return (
+            b'{"type":"assistant","timestamp":"' + ts.encode() + b'",'
+            b'"sessionId":"sess-001","requestId":"req-' + uuid.encode() + b'",'
+            b'"uuid":"' + uuid.encode() + b'","isSidechain":false,'
+            b'"model":"claude-opus-4-7",'
+            b'"message":{"id":"msg-' + uuid.encode() + b'","role":"assistant",'
+            b'"stop_reason":"end_turn",'
+            b'"usage":{"input_tokens":10,"output_tokens":20,'
+            b'"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n'
+        )
+
+    sess_path = tmp_path / "projects" / "sess-001.jsonl"
+    sess_path.parent.mkdir(parents=True)
+    sess_path.write_bytes(_turn_line("evt-001", 10, 0) + _turn_line("evt-002", 10, 5))
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        bc = app.state.broadcaster
+        # Force the producer to rebuild on every mtime change with no heartbeat delay.
+        bc._get_tick_seconds = lambda: 0
+        bc._heartbeat_s = 0.0
+
+        agen = bc.subscribe("today").__aiter__()
+        try:
+            await asyncio.wait_for(agen.__anext__(), timeout=5.0)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.get(
+                    f"/api/hourly/{target_date}?metric=cost_per_kw"
+                )
+                turns_before = sum(
+                    p["turns"] for s in resp.json()["series"] for p in s["points"]
+                )
+                assert turns_before == 2, (
+                    f"fixture has 2 assistant turns, /api/hourly saw {turns_before}"
+                )
+
+            sess_path.write_bytes(sess_path.read_bytes() + _turn_line("evt-003", 10, 30))
+
+            # Poll /api/snapshot as the sync barrier — it exercises the same fast-path
+            # the fix targets, without reaching into broadcaster internals.
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                snapshot_turns = 0
+                for _ in range(200):
+                    resp = await client.get("/api/snapshot?period=today")
+                    snapshot_turns = sum(
+                        s["turns"]
+                        for s in resp.json()["hourly_today"]["series"]
+                    )
+                    if snapshot_turns >= 3:
+                        break
+                    await asyncio.sleep(0.02)
+                assert snapshot_turns == 3, (
+                    "broadcaster did not pick up appended turn within 4 s "
+                    f"(snapshot still reports {snapshot_turns} turns)"
+                )
+
+                resp = await client.get(
+                    f"/api/hourly/{target_date}?metric=cost_per_kw"
+                )
+                turns_after = sum(
+                    p["turns"] for s in resp.json()["series"] for p in s["points"]
+                )
+                assert turns_after == 3, (
+                    "/api/hourly returned stale turns "
+                    f"({turns_after}); expected 3 after appending one turn"
+                )
+        finally:
+            await agen.aclose()

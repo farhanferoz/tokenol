@@ -4,6 +4,20 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-04-28
+
+### Fixed
+- **Dashboard fallback endpoints no longer freeze on stale turn counts.**
+  The 0.3.1 `/api/snapshot` fast-path stopped refreshing
+  `app.state.snapshot_result`, so every endpoint that fell back to it
+  (`/api/hourly`, `/api/daily`, `/api/models`, `/api/recent`, `/api/session/*`,
+  `/api/project/*`, `/api/breakdown/*`, `/api/search`, `/api/model/*`,
+  `/api/tool/*`) silently froze at first-page-load turn counts. Symptom: the
+  HIT% panel showed live turns but switching to $/KW, CTX, Cache Reuse, Output,
+  or Cost rendered stale numbers. Fix: `SnapshotBroadcaster` now exposes its
+  freshest `SnapshotResult`, and fallback endpoints prefer it over the
+  app-level cache.
+
 ## [0.3.1] — 2026-04-27
 
 ### Fixed
