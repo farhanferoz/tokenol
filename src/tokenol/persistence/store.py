@@ -11,13 +11,16 @@ either upgrades or no-ops.
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
+
+from tokenol.model.events import Session, Turn
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +78,44 @@ def default_path() -> Path:
     return Path.home() / ".tokenol" / "history.duckdb"
 
 
+def _turn_row(t: Turn) -> tuple:
+    # Strip timezone info before storing in DuckDB to avoid TZ conversion issues
+    ts = t.timestamp.replace(tzinfo=None) if t.timestamp.tzinfo else t.timestamp
+    return (
+        t.dedup_key,
+        ts,
+        t.session_id,
+        t.model,
+        int(t.usage.input_tokens),
+        int(t.usage.output_tokens),
+        int(t.usage.cache_read_input_tokens),
+        int(t.usage.cache_creation_input_tokens),
+        float(t.cost_usd),
+        bool(t.is_sidechain),
+        bool(t.is_interrupted),
+        t.stop_reason,
+        int(t.tool_use_count),
+        int(t.tool_error_count),
+        _json.dumps(dict(t.tool_names)),
+        _json.dumps([a.value for a in t.assumptions]),
+    )
+
+
+def _session_aggregate(turns: Iterable[Turn]) -> dict[str, dict]:
+    """Return {session_id: {first_ts, last_ts, count}} for the given turns."""
+    agg: dict[str, dict] = {}
+    for t in turns:
+        # Strip timezone info for consistency with stored values
+        ts = t.timestamp.replace(tzinfo=None) if t.timestamp.tzinfo else t.timestamp
+        a = agg.setdefault(t.session_id, {"first_ts": ts, "last_ts": ts, "count": 0})
+        if ts < a["first_ts"]:
+            a["first_ts"] = ts
+        if ts > a["last_ts"]:
+            a["last_ts"] = ts
+        a["count"] += 1
+    return agg
+
+
 class HistoryStore:
     """Owns a single DuckDB write connection and the schema."""
 
@@ -104,6 +145,88 @@ class HistoryStore:
             self._con.close()
         except Exception:
             log.debug("error closing DuckDB connection", exc_info=True)
+
+    def flush(self, turns: list[Turn], sessions: list[Session]) -> None:
+        """Insert *turns* (idempotent on dedup_key) and UPSERT *sessions* in one tx.
+
+        Session metadata is refreshed from the union of (already-stored rows for
+        that session_id) ∪ (new turns) so denormalized totals stay accurate.
+        """
+        if not turns and not sessions:
+            return
+
+        new_agg = _session_aggregate(turns)
+        sessions_by_id = {s.session_id: s for s in sessions}
+        # Defensive: ensure every session whose turns we're inserting has a
+        # corresponding sessions-table row, even if the caller didn't pass one.
+        for sid in new_agg:
+            if sid not in sessions_by_id:
+                sessions_by_id[sid] = Session(
+                    session_id=sid, source_file="", is_sidechain=False, cwd=None, turns=[]
+                )
+
+        self._con.begin()
+        try:
+            if turns:
+                rows = [_turn_row(t) for t in turns]
+                self._con.executemany(
+                    """
+                    INSERT INTO turns (
+                        dedup_key, ts, session_id, model,
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                        cost_usd, is_sidechain, is_interrupted, stop_reason,
+                        tool_use_count, tool_error_count, tool_names, assumptions
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT (dedup_key) DO NOTHING
+                    """,
+                    rows,
+                )
+
+            for sid, s in sessions_by_id.items():
+                existing = self._con.execute(
+                    "SELECT first_ts, last_ts, turn_count FROM sessions WHERE session_id = ?",
+                    [sid],
+                ).fetchone()
+                new_a = new_agg.get(sid)
+                if existing is None and new_a is None:
+                    continue
+                if existing is None:
+                    first_ts = new_a["first_ts"]
+                    last_ts = new_a["last_ts"]
+                    count = new_a["count"]
+                elif new_a is None:
+                    first_ts, last_ts, count = existing
+                else:
+                    first_ts = min(existing[0], new_a["first_ts"])
+                    last_ts = max(existing[1], new_a["last_ts"])
+                    # Re-derive from actual rows because some inserts may have
+                    # been no-ops on dedup_key collision.
+                    count = self._con.execute(
+                        "SELECT COUNT(*) FROM turns WHERE session_id = ?", [sid]
+                    ).fetchone()[0]
+
+                self._con.execute(
+                    """
+                    INSERT INTO sessions (
+                        session_id, source_file, cwd, is_sidechain,
+                        first_ts, last_ts, turn_count
+                    ) VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        source_file = COALESCE(EXCLUDED.source_file, sessions.source_file),
+                        cwd         = COALESCE(EXCLUDED.cwd,         sessions.cwd),
+                        is_sidechain = EXCLUDED.is_sidechain,
+                        first_ts    = LEAST(sessions.first_ts, EXCLUDED.first_ts),
+                        last_ts     = GREATEST(sessions.last_ts, EXCLUDED.last_ts),
+                        turn_count  = EXCLUDED.turn_count
+                    """,
+                    [sid, s.source_file or None, s.cwd, s.is_sidechain,
+                     first_ts, last_ts, count],
+                )
+
+            self._con.commit()
+        except Exception:
+            self._con.rollback()
+            raise
 
 
 @contextmanager
