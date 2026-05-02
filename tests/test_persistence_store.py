@@ -157,3 +157,25 @@ def test_flush_serializes_tool_names_and_assumptions_as_json(tmp_path: Path) -> 
         assert json.loads(row[1]) == ["UNKNOWN_MODEL_FALLBACK"]
     finally:
         store.close()
+
+
+def test_flush_refreshes_updated_at_on_upsert(tmp_path: Path) -> None:
+    """Subsequent flushes for the same session must bump sessions.updated_at."""
+    import time
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush([_turn("k1", "sess-1")], [_session("sess-1")])
+        first_updated = store._con.execute(
+            "SELECT updated_at FROM sessions WHERE session_id = 'sess-1'"
+        ).fetchone()[0]
+        time.sleep(0.05)  # ensure CURRENT_TIMESTAMP can advance
+        store.flush(
+            [_turn("k2", "sess-1", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))],
+            [_session("sess-1")],
+        )
+        second_updated = store._con.execute(
+            "SELECT updated_at FROM sessions WHERE session_id = 'sess-1'"
+        ).fetchone()[0]
+        assert second_updated > first_updated
+    finally:
+        store.close()

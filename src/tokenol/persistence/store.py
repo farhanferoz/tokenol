@@ -16,6 +16,7 @@ import logging
 import os
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -205,22 +206,24 @@ class HistoryStore:
                         "SELECT COUNT(*) FROM turns WHERE session_id = ?", [sid]
                     ).fetchone()[0]
 
+                now_ts = datetime.now()
                 self._con.execute(
                     """
                     INSERT INTO sessions (
                         session_id, source_file, cwd, is_sidechain,
-                        first_ts, last_ts, turn_count
-                    ) VALUES (?,?,?,?,?,?,?)
+                        first_ts, last_ts, turn_count, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?)
                     ON CONFLICT (session_id) DO UPDATE SET
                         source_file = COALESCE(EXCLUDED.source_file, sessions.source_file),
                         cwd         = COALESCE(EXCLUDED.cwd,         sessions.cwd),
                         is_sidechain = EXCLUDED.is_sidechain,
                         first_ts    = LEAST(sessions.first_ts, EXCLUDED.first_ts),
                         last_ts     = GREATEST(sessions.last_ts, EXCLUDED.last_ts),
-                        turn_count  = EXCLUDED.turn_count
+                        turn_count  = EXCLUDED.turn_count,
+                        updated_at  = EXCLUDED.updated_at
                     """,
                     [sid, s.source_file or None, s.cwd, s.is_sidechain,
-                     first_ts, last_ts, count],
+                     first_ts, last_ts, count, now_ts],
                 )
 
             self._con.commit()
