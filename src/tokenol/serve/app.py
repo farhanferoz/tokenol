@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -272,7 +272,6 @@ def create_app(
                     if s is not None:
                         s.archived = True  # JSONL is gone — content snippets unavailable
                         warm_sessions.append(s)
-                from dataclasses import replace
                 result = replace(
                     result,
                     turns=merged_turns,
@@ -365,7 +364,6 @@ def create_app(
                     t for t in warm_turns if t.dedup_key not in existing_keys
                 ]
                 merged.sort(key=lambda t: t.timestamp)
-                from dataclasses import replace
                 result = replace(result, turns=merged)
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
