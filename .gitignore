@@ -1,4 +1,5 @@
 _local/
+.worktrees/
 *_PLAN.md
 *.plan.md
 RESUME.md
