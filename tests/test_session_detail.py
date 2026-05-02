@@ -145,3 +145,21 @@ class TestPatterns:
         p = next(x for x in detail["patterns"] if x["kind"] == "idle_expiry")
         for field in ("kind", "severity", "headline", "reason", "suggested_fix", "turn_indices"):
             assert field in p
+
+
+def test_build_session_detail_includes_archived_flag() -> None:
+    from tokenol.model.events import Session
+    from tokenol.serve.session_detail import build_session_detail
+
+    s = Session(session_id="sx", source_file="/dev/null", is_sidechain=False, archived=True)
+    payload = build_session_detail(s)
+    assert payload["archived"] is True
+
+
+def test_build_session_detail_default_archived_false() -> None:
+    from tokenol.model.events import Session
+    from tokenol.serve.session_detail import build_session_detail
+
+    s = Session(session_id="sx", source_file="/dev/null", is_sidechain=False)
+    payload = build_session_detail(s)
+    assert payload["archived"] is False

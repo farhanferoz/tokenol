@@ -115,6 +115,9 @@ function render(d) {
   $('sess-tool-errors').textContent = d.totals.tool_errors;
   if (d.totals.tool_errors > 0) $('sess-tool-errors').classList.add('alarm');
 
+  const badge = $('session-archived-badge');
+  if (badge) badge.hidden = !d.archived;
+
   renderPatternCards(d.patterns || []);
   renderCostBars(d.turns);
   renderChart(d.turns);
@@ -272,16 +275,23 @@ function _renderTurnModal(d) {
       <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Tools</div>
       <div style="font-size:12px;">${toolsHtml}</div>
     </div>
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">User prompt</div>
-      ${promptHtml}
-    </div>
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Assistant preview</div>
-      ${asstHtml}
+    <div id="turn-snippet-block">
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">User prompt</div>
+        ${promptHtml}
+      </div>
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;color:var(--mute);margin-bottom:4px;">Assistant preview</div>
+        ${asstHtml}
+      </div>
     </div>
     <div style="font-size:10px;color:var(--mute);">Source: ${esc(d.source_file)}${d.source_line ? ':' + d.source_line : ''}</div>
   `;
+
+  const snippetBlock = document.getElementById('turn-snippet-block');
+  if (snippetBlock) {
+    snippetBlock.hidden = !!d.archived;
+  }
 }
 
 // Close on X / backdrop click
