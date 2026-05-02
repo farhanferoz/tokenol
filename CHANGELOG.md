@@ -4,6 +4,39 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Persistent history that survives JSONL deletion.** `tokenol serve` now
+  backs the live in-memory dashboard with a single-file DuckDB store at
+  `~/.tokenol/history.duckdb` (override via `TOKENOL_HISTORY_PATH`). On
+  startup the store seeds the in-memory hot tier so cold start is bounded
+  by `hot_window_days` (default 90), not by total history length. Each
+  tick parses only JSONLs whose mtime exceeds the per-session high-water
+  mark — typically just today's active files — and appends derived turns
+  to both memory and a background batch flush (every 30 s or 100 turns).
+  Deleting a JSONL no longer drops its data from the dashboard; the
+  affected sessions are marked `archived=True` and continue to render
+  every quantitative panel. Only the per-turn modal's content snippets
+  (user prompt, assistant preview, tool-call list) become unavailable
+  for archived sessions, in line with the privacy intent of the deletion.
+- `Preferences.hot_window_days` (default `90`, accepted range `1..3650`),
+  exposed via the existing `/api/prefs` endpoint. Takes effect on next
+  startup.
+- `Session.archived: bool` field surfaced through `/api/session/{id}` and
+  `/api/session/{id}/turn/{idx}`; the session-detail page renders an
+  amber "Archived — text snippets unavailable" badge and hides the
+  per-turn snippet block when the flag is set.
+- `tokenol.persistence.forget_handoff` — a pidfile + atomic request-file
+  handshake so a future `tokenol forget` CLI (PR 2) can apply deletions
+  to a live serve within one tick, without requiring a restart.
+
+### Changed
+- `build_snapshot_full` now accepts optional `history_store` and
+  `flush_queue` arguments. When neither is supplied the legacy whole-
+  corpus derivation path is used unchanged, so CLI report commands and
+  any existing test that constructs a bare `ParseCache` keep working.
+
 ## [0.3.2] — 2026-04-28
 
 ### Fixed
