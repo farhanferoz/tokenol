@@ -69,11 +69,12 @@ On startup:
 4. Start the broadcaster. The first tick parses the scheduled "edge" files and merges new turns into the hot tier.
 
 Per tick (broadcaster):
-1. Existing `compute_active_keys` probe runs unchanged. If nothing changed *and* heartbeat hasn't fired, skip.
+1. Existing `compute_active_keys` probe runs unchanged. If nothing changed *and* heartbeat hasn't fired *and* no pending forget request exists, skip.
 2. Parse only the JSONLs whose mtime is newer than the persisted `last_ts` for their session. The existing `ParseCache` continues to short-circuit unchanged-this-run files within the process.
 3. `_build_turns_and_sessions` runs over the *new* events only and produces incremental `Turn`/`Session` deltas. Today's full re-derivation is replaced by an append.
 4. New turns flow into the hot tier and into a flush queue.
 5. If the flush queue holds ≥100 turns OR ≥30 seconds have passed since the last flush, a background `asyncio.Task` invokes `HistoryStore.flush(...)` via `run_in_executor` (the same off-loop pattern already used for `build_project_detail`). The flush issues a single `INSERT … ON CONFLICT DO NOTHING` batch (idempotent on `dedup_key`) and an UPSERT for the affected `sessions` rows in one transaction.
+6. Pending-forget probe: `forget_handoff.take_forget_request()` is called once per tick. When a request is present (rare path), the broadcaster invokes `HistoryStore.forget(...)` via the same write connection, evicts the affected session_ids from the in-memory hot tier, and removes the request file. The next snapshot reflects the eviction without a process restart.
 
 On graceful shutdown (lifespan hook): force-drain the flush queue.
 
@@ -179,15 +180,25 @@ A small queue-and-batch component that lives alongside the broadcaster.
 - The lifespan hook force-flushes the queue and closes the store on shutdown.
 - Two handlers gain a warm-tier path: `api_daily` with `range=all`, and `api_project_detail` with `range=all`. Both currently iterate over `result.turns` filtering by date; after this change they delegate to `HistoryStore.query_turns(...)` when the requested range exceeds the hot window. Other handlers are unchanged.
 
+### `tokenol/persistence/forget_handoff.py` (new)
+
+A tiny helper module that owns the pidfile + request-file convention used by `tokenol forget` to coordinate with a live `tokenol serve`:
+
+- `write_pidfile()` / `clear_pidfile()` — called from serve's lifespan startup/shutdown.
+- `read_live_pid() -> int | None` — checks the pidfile, validates the PID is alive (not a stale file from a crashed serve), returns the PID or `None`.
+- `submit_forget_request(req: ForgetRequest) -> None` — writes the JSON request to `~/.tokenol/pending-forget.json` (atomic via tmpfile + rename).
+- `take_forget_request() -> ForgetRequest | None` — called by serve's broadcaster each tick; reads + removes the request file if present.
+- `ForgetRequest` is a small dataclass: `kind: Literal["session", "project", "older_than", "all"]`, `value: str | None`, `submitted_at: datetime`.
+
 ### `tokenol/cli.py` (modified)
 
 A new `tokenol forget` subcommand backed by `HistoryStore.forget`:
 
 - `tokenol forget --session <id>` — drop a single session's turns and metadata.
 - `tokenol forget --project <cwd>` — drop everything under a working-directory.
-- `tokenol forget --older-than <duration>` — accepts `7d`, `30d`, `1y`. Drops turns older than the cutoff and prunes sessions whose last_ts falls before it.
+- `tokenol forget --older-than <duration>` — accepts `7d`, `30d`, `1y`. Per-turn semantics: deletes every turn whose `ts` falls before the cutoff. Surviving sessions have their denormalized `first_ts` and `turn_count` recomputed from remaining turns in the same transaction. Sessions whose every turn was dropped have their `sessions` row removed.
 - `tokenol forget --all` — wipes the store. Equivalent to deleting `~/.tokenol/history.duckdb` but goes through the connection so a running serve process notices.
-- All forms print the number of dropped sessions and turns and prompt for confirmation unless `--yes` is passed.
+- All forms print the number of affected sessions and turns and prompt for confirmation unless `--yes` is passed. When a live serve is detected via the pidfile, the CLI submits the request via `forget_handoff.submit_forget_request` and exits with a message indicating the request is queued. Otherwise it executes the deletion inline against its own write connection.
 
 A second new subcommand `tokenol recompute-costs` re-runs `cost_for_turn` over every stored turn and updates `cost_usd` in place. Used after pricing-table changes.
 
@@ -234,7 +245,7 @@ A re-hydration is *not* triggered when this value changes mid-run; it takes effe
 - **`hot_window_days` shrunk**: hot tier hydrates the smaller window on next startup. Older turns stay in the warm tier untouched. No data is dropped.
 - **`hot_window_days` grown beyond available history**: hydrates whatever exists. Same as today's "earliest_available" handling.
 - **Two `tokenol serve` processes started against the same store**: DuckDB file lock fails on the second one with a clear error. Documented.
-- **Concurrent `tokenol forget --session …` while serve is running**: DuckDB single-writer enforcement means `forget` cannot open its own write connection while serve holds one. The CLI surfaces a clear error ("a tokenol serve process is using the store; stop it before running forget") and exits non-zero. Auto-eviction of forgotten sessions from a running serve's hot tier is deferred to a later iteration.
+- **Concurrent `tokenol forget` while serve is running**: handled via a request-file handoff. Serve writes its PID to `~/.tokenol/serve.pid` on startup and clears it on graceful shutdown. `forget` checks the pidfile; if a live serve is detected, it writes the forget request to `~/.tokenol/pending-forget.json` and exits with a "queued; serve will apply within one tick" message. Serve checks for that file once per broadcaster tick (a single `os.stat`, free when absent), processes it through its own write connection, evicts the affected session_ids from the hot tier in memory, and removes the request file. If no live serve is detected, `forget` opens its own write connection and processes the request inline.
 
 ## Testing
 
@@ -246,7 +257,8 @@ New test surfaces:
 - **`tests/persistence/test_flusher.py`**: queue drains every 30s; queue drains when count threshold crossed; force-flush on shutdown leaves no pending turns.
 - **`tests/serve/test_state_with_store.py`**: hot-tier hydration produces the same in-memory turn list as parsing the equivalent JSONL set; per-tick incremental derivation produces the same `SnapshotResult.payload` as a full rebuild over the same events; `range=all` handler returns identical rows whether served from hot tier or DuckDB query.
 - **`tests/serve/test_archived_session.py`**: deleting a JSONL whose session is in the store produces a snapshot identical to the pre-deletion one in every quantitative field; `build_turn_detail` returns blanked snippet fields and a populated source-file field; the existing tests for `_parse_turn_snippets` remain valid for sessions with live JSONLs.
-- **`tests/cli/test_forget.py`**: each `--session/--project/--older-than/--all` form removes the expected rows; `--yes` skips the prompt; without `--yes` the prompt is required.
+- **`tests/cli/test_forget.py`**: each `--session/--project/--older-than/--all` form removes the expected rows; `--older-than` recomputes `first_ts`/`turn_count` for surviving sessions and removes sessions whose every turn was dropped; `--yes` skips the prompt; without `--yes` the prompt is required.
+- **`tests/persistence/test_forget_handoff.py`**: pidfile staleness detection (PID file present but process gone is treated as no live serve); request file is processed exactly once even if serve restarts mid-tick; `submit_forget_request` is atomic against concurrent CLI invocations.
 - **`tests/cli/test_recompute_costs.py`**: a price change in `tokenol/model/pricing.py` followed by `tokenol recompute-costs` updates `cost_usd` in stored turns to match the new pricing while leaving token counts and dedup keys untouched.
 
 ## Rollout
