@@ -6,7 +6,7 @@ import asyncio
 from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -246,6 +246,38 @@ def create_app(
         if range not in ("1d", "7d", "14d", "30d", "all"):
             raise HTTPException(status_code=400, detail="Invalid range — use 1d, 7d, 14d, 30d, or all")
         result = _current_snapshot_result(request)
+        if range == "all" and request.app.state.history_store is not None:
+            loop = asyncio.get_running_loop()
+            warm_turns = await loop.run_in_executor(
+                None,
+                lambda: request.app.state.history_store.query_turns(project=cwd),
+            )
+            if warm_turns:
+                existing_keys = {t.dedup_key for t in result.turns}
+                merged_turns = list(result.turns) + [
+                    t for t in warm_turns if t.dedup_key not in existing_keys
+                ]
+                merged_turns.sort(key=lambda t: t.timestamp)
+
+                # Build a superset of sessions: existing + warm-tier sessions for this cwd.
+                warm_sids = {t.session_id for t in warm_turns}
+                existing_sids = {s.session_id for s in result.sessions}
+                missing_sids = warm_sids - existing_sids
+                warm_sessions: list = []
+                for sid in missing_sids:
+                    s = await loop.run_in_executor(
+                        None,
+                        lambda sid=sid: request.app.state.history_store.query_session(sid),
+                    )
+                    if s is not None:
+                        s.archived = True  # JSONL is gone — content snippets unavailable
+                        warm_sessions.append(s)
+                from dataclasses import replace
+                result = replace(
+                    result,
+                    turns=merged_turns,
+                    sessions=list(result.sessions) + warm_sessions,
+                )
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_project_detail(cwd, result.sessions, range_key=range),
@@ -317,6 +349,24 @@ def create_app(
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
         result = _current_snapshot_result(request)
+        # Warm-tier merge: when range=all and a store is wired, fold in any persisted
+        # turns older than the in-memory hot window so the chart includes them.
+        if range == "all" and request.app.state.history_store is not None:
+            prefs: Preferences = request.app.state.prefs
+            hot_cutoff = date.today() - timedelta(days=prefs.hot_window_days)
+            loop = asyncio.get_running_loop()
+            warm_turns = await loop.run_in_executor(
+                None,
+                lambda: request.app.state.history_store.query_turns(until=hot_cutoff),
+            )
+            if warm_turns:
+                existing_keys = {t.dedup_key for t in result.turns}
+                merged = list(result.turns) + [
+                    t for t in warm_turns if t.dedup_key not in existing_keys
+                ]
+                merged.sort(key=lambda t: t.timestamp)
+                from dataclasses import replace
+                result = replace(result, turns=merged)
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
         # Returning 400 here forced clients to special-case "policy" failures even though
