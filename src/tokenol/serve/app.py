@@ -41,7 +41,7 @@ from tokenol.serve.state import (
 from tokenol.serve.streaming import SnapshotBroadcaster
 
 _WINDOW_MINUTES: dict[str, int] = {"15m": 15, "60m": 60, "4h": 240, "24h": 1440}
-_KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "thresholds"})
+_KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "hot_window_days", "thresholds"})
 _BREAKDOWN_RANGES: frozenset[str] = frozenset({"7d", "30d", "90d", "all"})
 
 
@@ -390,6 +390,15 @@ def create_app(
             if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
                 raise HTTPException(status_code=400, detail="reference_usd must be a positive number")
             prefs.reference_usd = float(v)
+
+        if "hot_window_days" in body:
+            v = body["hot_window_days"]
+            if not isinstance(v, int) or isinstance(v, bool) or not (1 <= v <= 3650):
+                raise HTTPException(
+                    status_code=400,
+                    detail="hot_window_days must be an integer between 1 and 3650 (takes effect on next startup)",
+                )
+            prefs.hot_window_days = v
 
         if "thresholds" in body:
             t = body["thresholds"]
