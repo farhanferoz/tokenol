@@ -17,6 +17,9 @@ from starlette.responses import StreamingResponse
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.rollups import _rank_counter_with_others
 from tokenol.metrics.thresholds import DEFAULTS
+from tokenol.persistence.flusher import FlushQueue
+from tokenol.persistence.forget_handoff import clear_pidfile, write_pidfile
+from tokenol.persistence.store import HistoryStore
 from tokenol.serve.prefs import Preferences, default_path
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
 from tokenol.serve.state import (
@@ -134,20 +137,32 @@ def create_app(
     prefs = Preferences.load(_prefs_path)
 
     parse_cache = ParseCache()
+    history_store = HistoryStore()
+    # Hot-tier window is read by _store_backed_derivation as a duck-typed attr.
+    history_store._hot_window_days = prefs.hot_window_days
+    flush_queue = FlushQueue(history_store)
+
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
         all_projects=config.all_projects,
         get_reference_usd=lambda: prefs.reference_usd,
         get_tick_seconds=lambda: prefs.tick_seconds,
         get_thresholds=lambda: prefs.thresholds,
+        history_store=history_store,
+        flush_queue=flush_queue,
     )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        write_pidfile()
+        await flush_queue.start()
         try:
             yield
         finally:
             await broadcaster.shutdown()
+            await flush_queue.stop()
+            history_store.close()
+            clear_pidfile()
 
     app = FastAPI(title="tokenol", lifespan=lifespan)
     app.state.config = config
@@ -156,6 +171,8 @@ def create_app(
     app.state.parse_cache = parse_cache
     app.state.snapshot_result = None
     app.state.broadcaster = broadcaster
+    app.state.history_store = history_store
+    app.state.flush_queue = flush_queue
 
     if STATIC_DIR.exists():
         app.mount("/assets", StaticFiles(directory=str(STATIC_DIR)), name="assets")

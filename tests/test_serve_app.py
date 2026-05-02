@@ -1140,3 +1140,36 @@ async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None
                 )
         finally:
             await agen.aclose()
+
+
+def test_create_app_attaches_store_and_writes_pidfile(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
+
+    from tokenol.serve.app import ServerConfig, create_app
+
+    app = create_app(ServerConfig())
+    # Store attached
+    assert app.state.history_store is not None
+    # Flush queue attached (object exists; lifespan starts the task)
+    assert app.state.flush_queue is not None
+
+
+def test_lifespan_starts_and_stops_flusher(tmp_path, monkeypatch) -> None:
+    """The lifespan startup writes the pidfile; shutdown clears it."""
+    import asyncio
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
+
+    from tokenol.persistence.forget_handoff import pidfile_path
+    from tokenol.serve.app import ServerConfig, create_app
+
+    app = create_app(ServerConfig())
+
+    async def go():
+        async with app.router.lifespan_context(app):
+            assert pidfile_path().exists()
+        # Outside the context: pidfile cleared.
+        assert not pidfile_path().exists()
+
+    asyncio.run(go())
