@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -235,5 +235,65 @@ def test_last_ts_by_session(tmp_path: Path) -> None:
         # DuckDB returns naive datetimes from TIMESTAMP columns; we tag them UTC on read.
         assert marks["sess-1"] == datetime(2026, 5, 1, 11, 0, tzinfo=timezone.utc)
         assert marks["sess-2"] == datetime(2026, 5, 2, 9, 0, tzinfo=timezone.utc)
+    finally:
+        store.close()
+
+
+def test_query_turns_filters_by_date_range(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(
+            [
+                _turn("a", "s1", ts=datetime(2026, 4, 1, tzinfo=timezone.utc)),
+                _turn("b", "s1", ts=datetime(2026, 5, 1, tzinfo=timezone.utc)),
+                _turn("c", "s1", ts=datetime(2026, 6, 1, tzinfo=timezone.utc)),
+            ],
+            [_session("s1")],
+        )
+        rows = store.query_turns(since=date(2026, 5, 1), until=date(2026, 5, 31))
+        assert {t.dedup_key for t in rows} == {"b"}
+    finally:
+        store.close()
+
+
+def test_query_turns_filters_by_project_and_model(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(
+            [
+                _turn("a", "s1", model="claude-opus-4-7"),
+                _turn("b", "s2", model="claude-sonnet-4-6"),
+            ],
+            [_session("s1", cwd="/proj/a"), _session("s2", cwd="/proj/b")],
+        )
+        rows = store.query_turns(project="/proj/a")
+        assert {t.dedup_key for t in rows} == {"a"}
+        rows = store.query_turns(model="claude-sonnet-4-6")
+        assert {t.dedup_key for t in rows} == {"b"}
+    finally:
+        store.close()
+
+
+def test_query_session_returns_full_session(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(
+            [_turn("a", "s1"), _turn("b", "s1", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))],
+            [_session("s1", cwd="/proj/x")],
+        )
+        s = store.query_session("s1")
+        assert s is not None
+        assert s.session_id == "s1"
+        assert s.cwd == "/proj/x"
+        assert {t.dedup_key for t in s.turns} == {"a", "b"}
+
+    finally:
+        store.close()
+
+
+def test_query_session_returns_none_for_missing(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        assert store.query_session("nope") is None
     finally:
         store.close()

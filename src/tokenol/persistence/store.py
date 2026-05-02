@@ -17,7 +17,7 @@ import os
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -321,6 +321,80 @@ class HistoryStore:
             "SELECT session_id, last_ts FROM sessions"
         ).fetchall()
         return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
+
+    def query_turns(
+        self,
+        since: date | None = None,
+        until: date | None = None,
+        project: str | None = None,
+        model: str | None = None,
+    ) -> list[Turn]:
+        """Return matching turns from the warm tier, hydrated into Turn objects.
+
+        `since` / `until` are inclusive bounds on the date portion of `ts`.
+        `project` matches `sessions.cwd` exactly (joins through sessions table).
+        `model` matches `turns.model` exactly.
+        """
+        where: list[str] = []
+        params: list = []
+        join_sessions = project is not None
+        if since is not None:
+            where.append("turns.ts >= ?")
+            params.append(datetime.combine(since, datetime.min.time()))
+        if until is not None:
+            # End-inclusive: include the entire `until` day.
+            where.append("turns.ts < ?")
+            params.append(datetime.combine(until, datetime.min.time()) + timedelta(days=1))
+        if model is not None:
+            where.append("turns.model = ?")
+            params.append(model)
+        if project is not None:
+            where.append("sessions.cwd = ?")
+            params.append(project)
+
+        join_clause = "JOIN sessions USING (session_id)" if join_sessions else ""
+        where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+        sql = f"""
+            SELECT turns.dedup_key, turns.ts, turns.session_id, turns.model,
+                   turns.input_tokens, turns.output_tokens, turns.cache_read_tokens,
+                   turns.cache_creation_tokens, turns.cost_usd, turns.is_sidechain,
+                   turns.is_interrupted, turns.stop_reason, turns.tool_use_count,
+                   turns.tool_error_count, turns.tool_names, turns.assumptions
+            FROM turns {join_clause} {where_clause}
+            ORDER BY turns.ts
+        """
+        rows = self._con.execute(sql, params).fetchall()
+        return [_row_to_turn(r) for r in rows]
+
+    def query_session(self, session_id: str) -> Session | None:
+        """Return a Session with all its persisted turns, or None if unknown."""
+        srow = self._con.execute(
+            "SELECT session_id, source_file, cwd, is_sidechain "
+            "FROM sessions WHERE session_id = ?",
+            [session_id],
+        ).fetchone()
+        if srow is None:
+            return None
+        sid, src, cwd, sidechain = srow
+        # Direct query for this session's turns (avoids loading the full warm tier).
+        turn_rows = self._con.execute(
+            """
+            SELECT dedup_key, ts, session_id, model,
+                   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                   cost_usd, is_sidechain, is_interrupted, stop_reason,
+                   tool_use_count, tool_error_count, tool_names, assumptions
+            FROM turns WHERE session_id = ? ORDER BY ts
+            """,
+            [sid],
+        ).fetchall()
+        turns = [_row_to_turn(r) for r in turn_rows]
+        return Session(
+            session_id=sid,
+            source_file=src or "",
+            is_sidechain=bool(sidechain),
+            cwd=cwd,
+            turns=turns,
+        )
 
 
 @contextmanager
