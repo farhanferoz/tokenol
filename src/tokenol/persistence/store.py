@@ -14,6 +14,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -27,6 +28,13 @@ from tokenol.model.events import Session, Turn, Usage
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+# Cap per-batch row count for `executemany`. DuckDB plans large multi-row
+# `INSERT … ON CONFLICT DO NOTHING` statements with JSON columns by allocating
+# memory proportional to the full batch — empirically a single ~90k-row insert
+# blows past 24 GiB of RAM and OOMs the process. Chunking inside the same
+# transaction preserves atomicity and idempotency while bounding peak memory.
+FLUSH_CHUNK_SIZE = 1000
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -159,6 +167,20 @@ class HistoryStore:
         self.path = path if path is not None else default_path()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._con = duckdb.connect(str(self.path))
+        # DuckDB defaults to 80% of system RAM (~24 GiB on a 32-GiB box). With
+        # `dedup_key` PRIMARY KEY enforcement plus JSON-column INSERTs, a
+        # first-run flush of ~90k rows blows past that and OOMs the process.
+        # Bounding the pool lets DuckDB spill intermediates to disk instead.
+        try:
+            self._con.execute("SET memory_limit='1GB'")
+            self._con.execute(
+                f"SET temp_directory='{tempfile.gettempdir()}'"
+            )
+            # Order preservation forces an in-memory materialization step that
+            # we don't need (the table sorts on `ts` whenever order matters).
+            self._con.execute("SET preserve_insertion_order=false")
+        except Exception:
+            log.debug("could not configure DuckDB memory pragmas", exc_info=True)
         # Best-effort tighten file mode after open (DuckDB may have created it).
         try:
             os.chmod(self.path, 0o600)
@@ -183,10 +205,16 @@ class HistoryStore:
             log.debug("error closing DuckDB connection", exc_info=True)
 
     def flush(self, turns: list[Turn], sessions: list[Session]) -> None:
-        """Insert *turns* (idempotent on dedup_key) and UPSERT *sessions* in one tx.
+        """Insert *turns* (idempotent on dedup_key) and UPSERT *sessions*.
 
         Session metadata is refreshed from the union of (already-stored rows for
         that session_id) ∪ (new turns) so denormalized totals stay accurate.
+
+        Each chunk of `FLUSH_CHUNK_SIZE` turns commits in its own transaction
+        so DuckDB can release page-cache memory between chunks. Atomicity per
+        chunk is enough because `dedup_key` collisions make any re-flush of a
+        partially-applied batch a no-op for already-persisted rows. Sessions
+        UPSERT in a final transaction once all turn chunks have landed.
         """
         if not turns and not sessions:
             return
@@ -201,23 +229,32 @@ class HistoryStore:
                     session_id=sid, source_file="", is_sidechain=False, cwd=None, turns=[]
                 )
 
+        if turns:
+            insert_sql = """
+                INSERT INTO turns (
+                    dedup_key, ts, session_id, model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    cost_usd, is_sidechain, is_interrupted, stop_reason,
+                    tool_use_count, tool_error_count, tool_names, assumptions
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT (dedup_key) DO NOTHING
+            """
+            for i in range(0, len(turns), FLUSH_CHUNK_SIZE):
+                chunk = turns[i : i + FLUSH_CHUNK_SIZE]
+                rows = [_turn_row(t) for t in chunk]
+                self._con.begin()
+                try:
+                    self._con.executemany(insert_sql, rows)
+                    self._con.commit()
+                except Exception:
+                    self._con.rollback()
+                    raise
+
+        if not sessions_by_id:
+            return
+
         self._con.begin()
         try:
-            if turns:
-                rows = [_turn_row(t) for t in turns]
-                self._con.executemany(
-                    """
-                    INSERT INTO turns (
-                        dedup_key, ts, session_id, model,
-                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                        cost_usd, is_sidechain, is_interrupted, stop_reason,
-                        tool_use_count, tool_error_count, tool_names, assumptions
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT (dedup_key) DO NOTHING
-                    """,
-                    rows,
-                )
-
             for sid, s in sessions_by_id.items():
                 existing = self._con.execute(
                     "SELECT first_ts, last_ts, turn_count FROM sessions WHERE session_id = ?",

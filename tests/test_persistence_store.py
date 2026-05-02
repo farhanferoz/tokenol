@@ -12,7 +12,7 @@ import pytest
 
 from tokenol.enums import AssumptionTag
 from tokenol.model.events import Session, Turn, Usage
-from tokenol.persistence.store import HistoryStore
+from tokenol.persistence.store import FLUSH_CHUNK_SIZE, HistoryStore
 
 
 def _turn(
@@ -398,5 +398,40 @@ def test_forget_empty_session_list_is_noop(tmp_path: Path) -> None:
         # Original data untouched.
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (1,)
         assert store._con.execute("SELECT COUNT(*) FROM sessions").fetchone() == (1,)
+    finally:
+        store.close()
+
+
+def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
+    """A single flush of many turns must not blow DuckDB memory.
+
+    Regression: a single ~90k-row INSERT … ON CONFLICT DO NOTHING with JSON
+    columns OOM'd at >24 GiB on a real corpus. The fix chunks the executemany
+    inside the same transaction. We verify here with a batch large enough to
+    cross several FLUSH_CHUNK_SIZE boundaries that all rows land atomically.
+    """
+    n = FLUSH_CHUNK_SIZE * 3 + 7  # spans 4 chunks; the +7 catches off-by-one
+    base_ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    turns = [
+        _turn(f"k-{i:06d}", f"s-{i % 5}", ts=base_ts + timedelta(seconds=i))
+        for i in range(n)
+    ]
+    sessions = [_session(f"s-{i}") for i in range(5)]
+
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(turns, sessions)
+        # All rows landed.
+        assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (n,)
+        # Session counts denormalized correctly across the chunked insert.
+        per_session = dict(store._con.execute(
+            "SELECT session_id, turn_count FROM sessions ORDER BY session_id"
+        ).fetchall())
+        assert per_session == {f"s-{i}": sum(1 for j in range(n) if j % 5 == i) for i in range(5)}
+
+        # Re-flushing the same turns is still idempotent (ON CONFLICT DO NOTHING)
+        # even when split across chunks.
+        store.flush(turns, sessions)
+        assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (n,)
     finally:
         store.close()
