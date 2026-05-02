@@ -684,7 +684,7 @@ def test_derive_delta_turns_skips_known_dedup_keys() -> None:
         _ev(sid="s", msg_id="m1", req_id="r1", ts=ts),
         _ev(sid="s", msg_id="m2", req_id="r2", ts=ts, line=2),
     ]
-    turns, _, _ = derive_delta_turns(
+    turns, _, _, _ = derive_delta_turns(
         events,
         existing_dedup_keys={"m1:r1"},
         existing_passthrough_locations=set(),
@@ -698,7 +698,7 @@ def test_derive_delta_turns_skips_known_passthroughs() -> None:
         _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=4),
         _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=7),
     ]
-    turns, _, _ = derive_delta_turns(
+    turns, _, _, _ = derive_delta_turns(
         events,
         existing_dedup_keys=set(),
         existing_passthrough_locations={("/x.jsonl", 4)},
@@ -711,7 +711,7 @@ def test_derive_delta_turns_skips_known_passthroughs() -> None:
 def test_derive_delta_turns_emits_session_metadata_for_new_sids() -> None:
     ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
     events = [_ev(sid="brand-new", msg_id="m1", req_id="r1", ts=ts, cwd="/proj/new")]
-    _, sessions, _ = derive_delta_turns(
+    _, sessions, _, _ = derive_delta_turns(
         events,
         existing_dedup_keys=set(),
         existing_passthrough_locations=set(),
@@ -719,6 +719,25 @@ def test_derive_delta_turns_emits_session_metadata_for_new_sids() -> None:
     assert len(sessions) == 1
     assert sessions[0].session_id == "brand-new"
     assert sessions[0].cwd == "/proj/new"
+
+
+def test_derive_delta_turns_returns_accepted_passthrough_locations() -> None:
+    """The 4th return value is the set of (source_file, line_number) for emitted passthroughs."""
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        # Accepted passthrough (no dedup key, not synthetic, not in known set).
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=10),
+        # Synthetic — must NOT appear in accepted set.
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=20, model="<synthetic>"),
+        # Skipped (already known) — must NOT appear in accepted set.
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=30),
+    ]
+    _, _, _, accepted = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations={("/x.jsonl", 30)},
+    )
+    assert accepted == {("/x.jsonl", 10)}
 
 
 def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:

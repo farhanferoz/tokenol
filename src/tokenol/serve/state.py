@@ -211,18 +211,23 @@ def derive_delta_turns(
     new_events: list[RawEvent],
     existing_dedup_keys: set[str],
     existing_passthrough_locations: set[tuple[str, int]],
-) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
+) -> tuple[list[Turn], list[Session], Counter[AssumptionTag], set[tuple[str, int]]]:
     """Build new Turn/Session deltas from events not already represented in memory.
 
     *existing_dedup_keys* is the set of dedup keys already in the in-memory hot tier.
     *existing_passthrough_locations* is the set of (source_file, line_number) tuples
     for passthrough turns already emitted (passthroughs lack dedup keys).
 
-    Returns *only* the new turns and sessions to append; never touches existing state.
+    Returns (turns, sessions, fired_assumptions, accepted_passthrough_locs):
+    - *turns* and *sessions* are new records to append; never touches existing state.
+    - *fired_assumptions* tracks which assumption tags fired during derivation.
+    - *accepted_passthrough_locs* is the set of (source_file, line_number) tuples for
+      passthroughs that were actually emitted (excluding synthetic models and already-known).
     Within-batch dedup follows the existing last-wins rule.
     """
     seen: dict[str, tuple[RawEvent, str]] = {}
     passthroughs: list[tuple[RawEvent, None]] = []
+    accepted_passthrough_locs: set[tuple[str, int]] = set()
     cwd_by_session: dict[str, str] = {}
     session_source: dict[str, str] = {}
     fired: Counter[AssumptionTag] = Counter()
@@ -242,6 +247,7 @@ def derive_delta_turns(
             if loc in existing_passthrough_locations:
                 continue
             passthroughs.append((ev, None))
+            accepted_passthrough_locs.add(loc)
         else:
             if k in existing_dedup_keys:
                 continue
@@ -296,7 +302,7 @@ def derive_delta_turns(
             turns=[],  # caller appends to its own session's turn list
         ))
 
-    return turns, sessions, fired
+    return turns, sessions, fired, accepted_passthrough_locs
 
 
 @dataclass
@@ -873,7 +879,7 @@ def _store_backed_derivation(
             continue
 
     if new_events:
-        delta_turns, delta_sessions, fired = derive_delta_turns(
+        delta_turns, delta_sessions, fired, accepted_passthrough_locs = derive_delta_turns(
             new_events,
             parse_cache._known_dedup_keys,
             parse_cache._known_passthrough_locs,
@@ -886,10 +892,9 @@ def _store_backed_derivation(
         for s in delta_sessions:
             if s.session_id not in parse_cache._hot_sessions_by_id:
                 parse_cache._hot_sessions_by_id[s.session_id] = s
-        # Track passthrough locations to avoid re-emission on subsequent ticks.
-        for ev in new_events:
-            if ev.event_type == "assistant" and dedup_key(ev) is None:
-                parse_cache._known_passthrough_locs.add((ev.source_file, ev.line_number))
+        # Track passthrough locations from the SAME source of truth as derive_delta_turns
+        # (which knows about the synthetic-model and already-known filters).
+        parse_cache._known_passthrough_locs.update(accepted_passthrough_locs)
         # Refresh per-session high-water marks from the new turns.
         for t in delta_turns:
             cur = parse_cache._last_ts_by_session.get(t.session_id)
