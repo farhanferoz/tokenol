@@ -1158,6 +1158,9 @@ def test_daily_range_all_uses_warm_tier(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
     monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
+    # Pin JSONL discovery to an empty tmp dir so the test doesn't pick up the
+    # developer's real ~/.claude* corpus during the build sweep.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     from fastapi.testclient import TestClient
 
     from tokenol.serve.app import ServerConfig, create_app
