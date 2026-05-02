@@ -262,6 +262,19 @@ class SnapshotBroadcaster:
                 if hasattr(cache, "_hot_turns"):
                     cache._hot_turns = [t for t in cache._hot_turns if t.timestamp >= cutoff]
                     cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
+                    # Evict sessions whose every turn was pruned — otherwise they linger as
+                    # phantoms in the hot-tier maps and inflate session counts.
+                    surviving_sids = {t.session_id for t in cache._hot_turns}
+                    if hasattr(cache, "_hot_sessions_by_id"):
+                        cache._hot_sessions_by_id = {
+                            sid: s for sid, s in cache._hot_sessions_by_id.items()
+                            if sid in surviving_sids
+                        }
+                    if hasattr(cache, "_last_ts_by_session"):
+                        cache._last_ts_by_session = {
+                            sid: ts for sid, ts in cache._last_ts_by_session.items()
+                            if sid in surviving_sids
+                        }
             elif req.kind == "all":
                 await loop.run_in_executor(
                     None, lambda: store.forget(all=True)

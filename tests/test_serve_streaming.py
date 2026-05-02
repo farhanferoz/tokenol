@@ -427,3 +427,81 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
             await flush_queue.stop()
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypatch) -> None:
+    """forget(older_than) must evict from _hot_sessions_by_id and _last_ts_by_session,
+    not just _hot_turns. Otherwise sessions whose every turn was pruned linger
+    as phantoms in the hot-tier maps."""
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    from tokenol.enums import AssumptionTag
+    from tokenol.model.events import Session, Turn, Usage
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.forget_handoff import ForgetRequest, submit_forget_request
+    from tokenol.persistence.store import HistoryStore
+
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        recent_ts = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+        def _t(key, sid, ts):
+            return Turn(
+                dedup_key=key, timestamp=ts, session_id=sid,
+                model="claude-sonnet-4-6",
+                usage=Usage(input_tokens=10, output_tokens=5,
+                            cache_read_input_tokens=0, cache_creation_input_tokens=0),
+                is_sidechain=False, stop_reason="end_turn", cost_usd=0.001,
+                is_interrupted=False, tool_use_count=0, tool_error_count=0,
+                tool_names=Counter(),
+                assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
+            )
+
+        def _s(sid):
+            return Session(session_id=sid, source_file="", is_sidechain=False, cwd="/p", turns=[])
+
+        store.flush(
+            [_t("old1", "s_old", old_ts), _t("recent1", "s_recent", recent_ts)],
+            [_s("s_old"), _s("s_recent")],
+        )
+
+        cache = ParseCache()
+        cache._hot_initialized = True
+        cache._hot_turns = [_t("old1", "s_old", old_ts), _t("recent1", "s_recent", recent_ts)]
+        cache._hot_sessions_by_id = {"s_old": _s("s_old"), "s_recent": _s("s_recent")}
+        cache._known_dedup_keys = {"old1", "recent1"}
+        cache._known_passthrough_locs = set()
+        cache._last_ts_by_session = {"s_old": old_ts, "s_recent": recent_ts}
+        cache._fired = Counter()
+
+        flush_queue = FlushQueue(store, count_threshold=1000, interval_seconds=60)
+        await flush_queue.start()
+        try:
+            broadcaster = SnapshotBroadcaster(
+                parse_cache=cache, all_projects=False,
+                get_reference_usd=lambda: 50.0, get_tick_seconds=lambda: 1,
+                get_thresholds=lambda: {},
+                history_store=store, flush_queue=flush_queue,
+            )
+            cutoff = datetime(2026, 4, 1, tzinfo=timezone.utc)
+            submit_forget_request(ForgetRequest(
+                kind="older_than", value=cutoff.isoformat(),
+                submitted_at=datetime.now(tz=timezone.utc),
+            ))
+
+            await broadcaster.process_pending_forget()
+
+            # s_old must be evicted from BOTH the hot turns AND the hot-tier maps.
+            assert "s_old" not in cache._hot_sessions_by_id
+            assert "s_old" not in cache._last_ts_by_session
+            # s_recent must be retained.
+            assert "s_recent" in cache._hot_sessions_by_id
+            assert "s_recent" in cache._last_ts_by_session
+        finally:
+            await flush_queue.stop()
+    finally:
+        store.close()
