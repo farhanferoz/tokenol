@@ -104,6 +104,8 @@ def _build_and_cache_snapshot(request: Request, period: str = "today") -> Snapsh
     cfg: ServerConfig = request.app.state.config
     prefs: Preferences = request.app.state.prefs
     cache: ParseCache = request.app.state.parse_cache
+    # Route through the persistent-history path so the broadcaster's hot tier
+    # and the API fallback build agree on the same Turn/Session universe.
     result = build_snapshot_full(
         cache,
         all_projects=cfg.all_projects,
@@ -111,6 +113,8 @@ def _build_and_cache_snapshot(request: Request, period: str = "today") -> Snapsh
         tick_seconds=prefs.tick_seconds,
         period=period,
         thresholds=prefs.thresholds,
+        history_store=request.app.state.history_store,
+        flush_queue=request.app.state.flush_queue,
     )
     request.app.state.snapshot_result = result
     return result
