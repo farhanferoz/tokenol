@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from tokenol.enums import AssumptionTag
 from tokenol.model.events import Session, Turn, Usage
@@ -295,5 +296,93 @@ def test_query_session_returns_none_for_missing(tmp_path: Path) -> None:
     store = HistoryStore(tmp_path / "h.duckdb")
     try:
         assert store.query_session("nope") is None
+    finally:
+        store.close()
+
+
+def test_forget_session_drops_turns_and_session(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(
+            [_turn("a", "s1"), _turn("b", "s2")],
+            [_session("s1"), _session("s2")],
+        )
+        dropped = store.forget(session_ids=["s1"])
+        assert dropped == (1, 1)
+        assert store._con.execute(
+            "SELECT session_id FROM sessions ORDER BY session_id"
+        ).fetchall() == [("s2",)]
+        assert store._con.execute("SELECT dedup_key FROM turns").fetchall() == [("b",)]
+    finally:
+        store.close()
+
+
+def test_forget_project_drops_all_matching(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(
+            [_turn("a", "s1"), _turn("b", "s2"), _turn("c", "s3")],
+            [_session("s1", cwd="/proj/x"), _session("s2", cwd="/proj/x"), _session("s3", cwd="/proj/y")],
+        )
+        dropped = store.forget(cwd="/proj/x")
+        assert dropped == (2, 2)
+        assert store._con.execute("SELECT cwd FROM sessions").fetchall() == [("/proj/y",)]
+    finally:
+        store.close()
+
+
+def test_forget_older_than_drops_old_turns_only(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        recent = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        store.flush(
+            [
+                _turn("old1", "s1", ts=old),
+                _turn("old2", "s2", ts=old),
+                _turn("recent", "s1", ts=recent),
+            ],
+            [_session("s1"), _session("s2")],
+        )
+        cutoff = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        dropped = store.forget(older_than=cutoff)
+        # s2 fully gone (1 session dropped); 2 turns total dropped (old1, old2)
+        assert dropped == (1, 2)
+
+        # s1 retained with only its recent turn; first_ts/turn_count refreshed.
+        srows = store._con.execute(
+            "SELECT session_id, first_ts, turn_count FROM sessions"
+        ).fetchall()
+        assert srows == [("s1", datetime(2026, 5, 1), 1)]
+        assert store._con.execute(
+            "SELECT dedup_key FROM turns ORDER BY dedup_key"
+        ).fetchall() == [("recent",)]
+    finally:
+        store.close()
+
+
+def test_forget_all_wipes_store(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush([_turn("a", "s1")], [_session("s1")])
+        dropped = store.forget(all=True)
+        assert dropped == (1, 1)
+        assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (0,)
+        assert store._con.execute("SELECT COUNT(*) FROM sessions").fetchone() == (0,)
+        # Schema/meta retained.
+        assert store._con.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone() == ("1",)
+    finally:
+        store.close()
+
+
+def test_forget_requires_exactly_one_kind(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        with pytest.raises(ValueError, match="exactly one"):
+            store.forget()
+        with pytest.raises(ValueError, match="exactly one"):
+            store.forget(session_ids=["x"], cwd="/p")
     finally:
         store.close()

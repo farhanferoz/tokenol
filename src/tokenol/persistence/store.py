@@ -396,6 +396,122 @@ class HistoryStore:
             turns=turns,
         )
 
+    def forget(
+        self,
+        *,
+        session_ids: list[str] | None = None,
+        cwd: str | None = None,
+        older_than: datetime | None = None,
+        all: bool = False,
+    ) -> tuple[int, int]:
+        """Delete persisted history. Returns (sessions_dropped, turns_dropped).
+
+        Exactly one of *session_ids*, *cwd*, *older_than*, *all* must be supplied.
+
+        Per-turn semantics for *older_than*: turns with `ts < older_than` are deleted.
+        Sessions with no remaining turns are also dropped. Surviving sessions have
+        their denormalized `first_ts` and `turn_count` re-derived from remaining turns.
+        """
+        specified = sum(
+            1 for x in (
+                session_ids is not None,
+                cwd is not None,
+                older_than is not None,
+                bool(all),
+            ) if x
+        )
+        if specified != 1:
+            raise ValueError("forget requires exactly one of: session_ids, cwd, older_than, all")
+
+        self._con.begin()
+        try:
+            if all:
+                t_dropped = self._con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+                s_dropped = self._con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+                self._con.execute("DELETE FROM turns")
+                self._con.execute("DELETE FROM sessions")
+                self._con.commit()
+                return s_dropped, t_dropped
+
+            if session_ids is not None:
+                # Handle empty list case
+                if not session_ids:
+                    self._con.commit()
+                    return 0, 0
+                placeholders = ",".join(["?"] * len(session_ids))
+                t_dropped = self._con.execute(
+                    f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
+                    session_ids,
+                ).fetchone()[0]
+                s_dropped = self._con.execute(
+                    f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                    session_ids,
+                ).fetchone()[0]
+                self._con.execute(
+                    f"DELETE FROM turns WHERE session_id IN ({placeholders})",
+                    session_ids,
+                )
+                self._con.execute(
+                    f"DELETE FROM sessions WHERE session_id IN ({placeholders})",
+                    session_ids,
+                )
+                self._con.commit()
+                return s_dropped, t_dropped
+
+            if cwd is not None:
+                sids = [r[0] for r in self._con.execute(
+                    "SELECT session_id FROM sessions WHERE cwd = ?", [cwd]
+                ).fetchall()]
+                if not sids:
+                    self._con.commit()
+                    return 0, 0
+                placeholders = ",".join(["?"] * len(sids))
+                t_dropped = self._con.execute(
+                    f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
+                    sids,
+                ).fetchone()[0]
+                self._con.execute(
+                    f"DELETE FROM turns WHERE session_id IN ({placeholders})", sids
+                )
+                self._con.execute(
+                    f"DELETE FROM sessions WHERE session_id IN ({placeholders})", sids
+                )
+                self._con.commit()
+                return len(sids), t_dropped
+
+            # older_than (per-turn semantics)
+            cutoff_naive = older_than.replace(tzinfo=None)
+            t_dropped = self._con.execute(
+                "SELECT COUNT(*) FROM turns WHERE ts < ?", [cutoff_naive]
+            ).fetchone()[0]
+            affected_sids = [r[0] for r in self._con.execute(
+                "SELECT DISTINCT session_id FROM turns WHERE ts < ?", [cutoff_naive]
+            ).fetchall()]
+            self._con.execute("DELETE FROM turns WHERE ts < ?", [cutoff_naive])
+
+            s_dropped = 0
+            for sid in affected_sids:
+                agg = self._con.execute(
+                    "SELECT MIN(ts), MAX(ts), COUNT(*) FROM turns WHERE session_id = ?",
+                    [sid],
+                ).fetchone()
+                if agg[2] == 0:
+                    self._con.execute(
+                        "DELETE FROM sessions WHERE session_id = ?", [sid]
+                    )
+                    s_dropped += 1
+                else:
+                    self._con.execute(
+                        "UPDATE sessions SET first_ts = ?, last_ts = ?, turn_count = ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                        [agg[0], agg[1], agg[2], sid],
+                    )
+            self._con.commit()
+            return s_dropped, t_dropped
+        except Exception:
+            self._con.rollback()
+            raise
+
 
 @contextmanager
 def read_connection(path: Path | None = None) -> Iterator[duckdb.DuckDBPyConnection]:
