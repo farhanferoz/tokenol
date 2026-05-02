@@ -343,3 +343,87 @@ async def test_distinct_periods_get_distinct_groups(tmp_path: Path) -> None:
         finally:
             await a.aclose()
             await b.aclose()
+
+
+@pytest.mark.asyncio
+async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None:
+    """A live serve consumes pending forget requests within one tick.
+
+    The broadcaster polls take_forget_request() each tick. When a request is
+    present, it applies the deletion to the store AND evicts the affected
+    session_ids from the in-memory hot tier so the next snapshot reflects it
+    without requiring a process restart.
+    """
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    from tokenol.enums import AssumptionTag
+    from tokenol.model.events import Session, Turn, Usage
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.forget_handoff import ForgetRequest, submit_forget_request
+    from tokenol.persistence.store import HistoryStore
+    from tokenol.serve.state import ParseCache
+
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        pre_existing_turn = Turn(
+            dedup_key="k1",
+            timestamp=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+            session_id="sess-X",
+            model="claude-sonnet-4-6",
+            usage=Usage(input_tokens=100, output_tokens=50,
+                        cache_read_input_tokens=20, cache_creation_input_tokens=10),
+            is_sidechain=False, stop_reason="end_turn", cost_usd=0.01,
+            is_interrupted=False, tool_use_count=0, tool_error_count=0,
+            tool_names=Counter(), assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
+        )
+        pre_existing_session = Session(
+            session_id="sess-X", source_file="/tmp/x.jsonl",
+            is_sidechain=False, cwd="/tmp/proj", turns=[],
+        )
+        store.flush([pre_existing_turn], [pre_existing_session])
+
+        # Prime the parse cache's hot tier as if the broadcaster had hydrated it.
+        parse_cache = ParseCache()
+        parse_cache._hot_initialized = True
+        parse_cache._hot_turns = [pre_existing_turn]
+        parse_cache._hot_sessions_by_id = {"sess-X": pre_existing_session}
+        parse_cache._known_dedup_keys = {"k1"}
+        parse_cache._known_passthrough_locs = set()
+        parse_cache._last_ts_by_session = {"sess-X": pre_existing_turn.timestamp}
+        parse_cache._fired = Counter()
+
+        flush_queue = FlushQueue(store, count_threshold=1000, interval_seconds=60)
+        await flush_queue.start()
+        try:
+            broadcaster = SnapshotBroadcaster(
+                parse_cache=parse_cache,
+                all_projects=False,
+                get_reference_usd=lambda: 50.0,
+                get_tick_seconds=lambda: 1,
+                get_thresholds=lambda: {},
+                history_store=store,
+                flush_queue=flush_queue,
+            )
+
+            submit_forget_request(ForgetRequest(
+                kind="session", value="sess-X",
+                submitted_at=datetime.now(tz=timezone.utc),
+            ))
+
+            await broadcaster.process_pending_forget()
+
+            # Store row gone.
+            rows = store._con.execute(
+                "SELECT COUNT(*) FROM sessions WHERE session_id = 'sess-X'"
+            ).fetchone()
+            assert rows == (0,)
+            # In-memory hot tier evicted.
+            assert "sess-X" not in parse_cache._hot_sessions_by_id
+            # Hot turns list also pruned.
+            assert all(t.session_id != "sess-X" for t in parse_cache._hot_turns)
+        finally:
+            await flush_queue.stop()
+    finally:
+        store.close()

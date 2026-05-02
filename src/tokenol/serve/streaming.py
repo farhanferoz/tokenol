@@ -19,7 +19,12 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.store import HistoryStore
 
 from tokenol.serve.state import (
     ParseCache,
@@ -69,12 +74,14 @@ class _Group:
         compute_keys: Callable[[], frozenset[tuple[str, int, int]]],
         get_tick_seconds: Callable[[], int],
         heartbeat_s: float = DEFAULT_HEARTBEAT_S,
+        forget_hook: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.period = period
         self._build_payload = build_payload
         self._compute_keys = compute_keys
         self._get_tick_seconds = get_tick_seconds
         self._heartbeat_s = heartbeat_s
+        self._forget_hook = forget_hook
         self.subscribers: set[_Subscriber] = set()
         self.task: asyncio.Task | None = None
         self.last_payload: dict | None = None
@@ -98,6 +105,13 @@ class _Group:
                 tick = int(self._get_tick_seconds())
                 idle_seconds = time.monotonic() - last_change_ts
                 sleep_for = _effective_tick(tick, idle_seconds)
+
+                # Per-tick forget probe — cheap when no request is pending.
+                if self._forget_hook is not None:
+                    try:
+                        await self._forget_hook()
+                    except Exception:
+                        log.exception("forget hook failed — continuing tick")
 
                 try:
                     keys = await loop.run_in_executor(None, self._compute_keys)
@@ -168,6 +182,8 @@ class SnapshotBroadcaster:
         get_tick_seconds: Callable[[], int],
         get_thresholds: Callable[[], dict],
         heartbeat_s: float = DEFAULT_HEARTBEAT_S,
+        history_store: HistoryStore | None = None,
+        flush_queue: FlushQueue | None = None,
     ) -> None:
         self._parse_cache = parse_cache
         self._all_projects = all_projects
@@ -175,6 +191,8 @@ class SnapshotBroadcaster:
         self._get_tick_seconds = get_tick_seconds
         self._get_thresholds = get_thresholds
         self._heartbeat_s = heartbeat_s
+        self._history_store = history_store
+        self._flush_queue = flush_queue
         self._groups: dict[str, _Group] = {}
         self._lock = asyncio.Lock()
         # turns/sessions are period-agnostic, so any producer's freshest result serves all readers.
@@ -191,12 +209,82 @@ class SnapshotBroadcaster:
             tick_seconds=int(self._get_tick_seconds()),
             period=period,
             thresholds=self._get_thresholds(),
+            history_store=self._history_store,
+            flush_queue=self._flush_queue,
         )
         self._latest_result = result
         return result.payload
 
     def latest_result(self) -> SnapshotResult | None:
         return self._latest_result
+
+    async def process_pending_forget(self) -> None:
+        """Consume any pending forget request and apply it to the store + hot tier.
+
+        Called once per broadcaster tick. Cheap when no request is pending — just
+        a single os.stat() inside take_forget_request().
+        """
+        from tokenol.persistence.forget_handoff import take_forget_request
+
+        if self._history_store is None:
+            return
+        req = take_forget_request()
+        if req is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            evicted_sids: list[str] = []
+            cache = self._parse_cache
+            store = self._history_store
+            if req.kind == "session" and req.value:
+                evicted_sids = [req.value]
+                await loop.run_in_executor(
+                    None, lambda: store.forget(session_ids=[req.value])
+                )
+            elif req.kind == "project" and req.value:
+                if hasattr(cache, "_hot_sessions_by_id"):
+                    evicted_sids = [
+                        sid for sid, s in cache._hot_sessions_by_id.items()
+                        if s.cwd == req.value
+                    ]
+                await loop.run_in_executor(
+                    None, lambda: store.forget(cwd=req.value)
+                )
+            elif req.kind == "older_than" and req.value:
+                from datetime import datetime, timezone
+                cutoff = datetime.fromisoformat(req.value)
+                if cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=timezone.utc)
+                await loop.run_in_executor(
+                    None, lambda: store.forget(older_than=cutoff)
+                )
+                if hasattr(cache, "_hot_turns"):
+                    cache._hot_turns = [t for t in cache._hot_turns if t.timestamp >= cutoff]
+                    cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
+            elif req.kind == "all":
+                await loop.run_in_executor(
+                    None, lambda: store.forget(all=True)
+                )
+                if hasattr(cache, "_hot_turns"):
+                    cache._hot_turns = []
+                    cache._hot_sessions_by_id = {}
+                    cache._known_dedup_keys = set()
+                    cache._known_passthrough_locs = set()
+                    cache._last_ts_by_session = {}
+
+            # For session/project deletes, evict matching session_ids from the hot tier.
+            if evicted_sids and hasattr(cache, "_hot_sessions_by_id"):
+                evict_set = set(evicted_sids)
+                for sid in evicted_sids:
+                    cache._hot_sessions_by_id.pop(sid, None)
+                    cache._last_ts_by_session.pop(sid, None)
+                cache._hot_turns = [
+                    t for t in cache._hot_turns if t.session_id not in evict_set
+                ]
+                cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
+        except Exception:
+            log.exception("processing forget request failed")
 
     async def subscribe(self, period: str) -> AsyncGenerator[str, None]:
         sub = _Subscriber()
@@ -209,6 +297,7 @@ class SnapshotBroadcaster:
                     self._compute_active_keys,
                     self._get_tick_seconds,
                     heartbeat_s=self._heartbeat_s,
+                    forget_hook=self.process_pending_forget,
                 )
                 grp.task = asyncio.create_task(
                     grp.run(), name=f"snapshot-broadcaster:{period}"
