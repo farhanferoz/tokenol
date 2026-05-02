@@ -386,3 +386,17 @@ def test_forget_requires_exactly_one_kind(tmp_path: Path) -> None:
             store.forget(session_ids=["x"], cwd="/p")
     finally:
         store.close()
+
+
+def test_forget_empty_session_list_is_noop(tmp_path: Path) -> None:
+    """forget(session_ids=[]) is a deliberate no-op so callers can pass empty filter results."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush([_turn("a", "s1")], [_session("s1")])
+        # Empty list means "no sessions matched the filter" — return (0, 0), don't raise.
+        assert store.forget(session_ids=[]) == (0, 0)
+        # Original data untouched.
+        assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (1,)
+        assert store._con.execute("SELECT COUNT(*) FROM sessions").fetchone() == (1,)
+    finally:
+        store.close()
