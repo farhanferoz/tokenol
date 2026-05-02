@@ -18,10 +18,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from tokenol.enums import AssumptionTag, BlowUpVerdict
-from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs
+from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import dedup_key, parse_file
+
+if TYPE_CHECKING:
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.store import HistoryStore
 from tokenol.metrics.context import (
     cache_hit_pct,
     cache_hit_rate,
@@ -827,6 +832,97 @@ def _build_recent_activity(
 
 
 # ---------------------------------------------------------------------------
+# Store-backed derivation helper
+# ---------------------------------------------------------------------------
+
+
+def _store_backed_derivation(
+    parse_cache: ParseCache,
+    paths: list[Path],
+    history_store: HistoryStore,
+    flush_queue: FlushQueue | None,
+) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
+    """Hot-tier-aware derivation: hydrate from store on first call, then append deltas.
+
+    The hot-tier caches live as duck-typed attributes on the ParseCache instance so
+    they survive across ticks within a single process. They are intentionally NOT
+    declared on ParseCache itself (the dataclass invariants there are about the
+    JSONL parse cache; we layer hot-tier state on top without altering that).
+    """
+    if not getattr(parse_cache, "_hot_initialized", False):
+        window_days = getattr(history_store, "_hot_window_days", 90)
+        hot_turns, hot_sessions = history_store.hydrate_hot(window_days=window_days)
+        parse_cache._hot_turns = hot_turns
+        parse_cache._hot_sessions_by_id = {s.session_id: s for s in hot_sessions}
+        parse_cache._known_dedup_keys = {t.dedup_key for t in hot_turns}
+        parse_cache._known_passthrough_locs = set()
+        parse_cache._last_ts_by_session = history_store.last_ts_by_session()
+        parse_cache._fired = Counter()
+        parse_cache._hot_initialized = True
+
+    # Filter to edge paths (mtime newer than persisted high-water marks).
+    edge_paths = select_edge_paths(paths, parse_cache._last_ts_by_session)
+
+    # Parse only edge files.
+    new_events: list[RawEvent] = []
+    for p in edge_paths:
+        try:
+            _key, evs = parse_cache.get_or_parse(p)
+            new_events.extend(evs)
+        except OSError:
+            continue
+
+    if new_events:
+        delta_turns, delta_sessions, fired = derive_delta_turns(
+            new_events,
+            parse_cache._known_dedup_keys,
+            parse_cache._known_passthrough_locs,
+        )
+        # Append new turns to hot tier and update bookkeeping.
+        for t in delta_turns:
+            parse_cache._hot_turns.append(t)
+            parse_cache._known_dedup_keys.add(t.dedup_key)
+        # Add new session metadata for previously-unseen session_ids.
+        for s in delta_sessions:
+            if s.session_id not in parse_cache._hot_sessions_by_id:
+                parse_cache._hot_sessions_by_id[s.session_id] = s
+        # Track passthrough locations to avoid re-emission on subsequent ticks.
+        for ev in new_events:
+            if ev.event_type == "assistant" and dedup_key(ev) is None:
+                parse_cache._known_passthrough_locs.add((ev.source_file, ev.line_number))
+        # Refresh per-session high-water marks from the new turns.
+        for t in delta_turns:
+            cur = parse_cache._last_ts_by_session.get(t.session_id)
+            if cur is None or t.timestamp > cur:
+                parse_cache._last_ts_by_session[t.session_id] = t.timestamp
+        # Attach new turns to their in-memory Session objects so drilldowns work.
+        for t in delta_turns:
+            sess = parse_cache._hot_sessions_by_id.get(t.session_id)
+            if sess is not None:
+                sess.turns.append(t)
+        parse_cache._fired.update(fired)
+        # Queue deltas for background flush.
+        if flush_queue is not None:
+            sessions_to_flush = [
+                parse_cache._hot_sessions_by_id[s.session_id]
+                for s in delta_sessions
+                if s.session_id in parse_cache._hot_sessions_by_id
+            ]
+            flush_queue.enqueue(delta_turns, sessions_to_flush)
+
+    # Mark sessions whose JSONL is no longer on disk as archived.
+    live_sids = {p.stem for p in paths}
+    for sid, sess in parse_cache._hot_sessions_by_id.items():
+        sess.archived = sid not in live_sids
+
+    return (
+        list(parse_cache._hot_turns),
+        list(parse_cache._hot_sessions_by_id.values()),
+        Counter(parse_cache._fired),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main snapshot builder
 # ---------------------------------------------------------------------------
 
@@ -838,14 +934,19 @@ def build_snapshot_full(
     tick_seconds: int = 5,
     period: str = "today",
     thresholds: dict | None = None,
+    history_store: HistoryStore | None = None,
+    flush_queue: FlushQueue | None = None,
 ) -> SnapshotResult:
-    """Build the full Phase 5 dashboard snapshot.
+    """Build the dashboard snapshot.
 
-    Payload top-level keys:
-      generated_at, config, thresholds, period,
-      topbar_summary, tiles, anomaly,
-      hourly_today, daily, models, recent_activity,
-      assumptions_summary
+    When *history_store* is supplied:
+    - First call: hydrate hot tier from DuckDB.
+    - Every call: parse only edge JSONLs (mtime > persisted mark) and append
+      derived deltas to the in-memory hot tier. New turns are queued on
+      *flush_queue* if present.
+
+    When *history_store* is None (CLI report tools, existing tests):
+    - Falls back to today's full re-derivation behavior. Backwards-compatible.
     """
     now = datetime.now(tz=timezone.utc)
     today_date = now.date()
@@ -854,18 +955,22 @@ def build_snapshot_full(
     dirs = get_config_dirs(all_projects=all_projects)
     paths = find_jsonl_files(dirs)
 
-    active_keys: set[tuple[str, int, int]] = set()
-    for path in paths:
-        try:
-            key, _events = parse_cache.get_or_parse(path)
-            active_keys.add(key)
-        except OSError:
-            pass
-
-    parse_cache.purge(active_keys)
-    all_turns, all_sessions, _fired = parse_cache.get_derived(
-        frozenset(active_keys), _build_turns_and_sessions
-    )
+    if history_store is not None:
+        all_turns, all_sessions, _fired = _store_backed_derivation(
+            parse_cache, paths, history_store, flush_queue
+        )
+    else:
+        active_keys: set[tuple[str, int, int]] = set()
+        for path in paths:
+            try:
+                key, _events = parse_cache.get_or_parse(path)
+                active_keys.add(key)
+            except OSError:
+                pass
+        parse_cache.purge(active_keys)
+        all_turns, all_sessions, _fired = parse_cache.get_derived(
+            frozenset(active_keys), _build_turns_and_sessions
+        )
 
     turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
     daily_90d = _build_daily_series(turns_90d, since_90d)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import tokenol.serve.state as _state_mod
 from tokenol.model.events import RawEvent, Session, Turn, Usage
+from tokenol.persistence.store import HistoryStore
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
@@ -718,3 +719,45 @@ def test_derive_delta_turns_emits_session_metadata_for_new_sids() -> None:
     assert len(sessions) == 1
     assert sessions[0].session_id == "brand-new"
     assert sessions[0].cwd == "/proj/new"
+
+
+def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
+    """Snapshot from JSONLs == snapshot from store-only after JSONL deletion.
+
+    Verifies that once turns are persisted to the store, deleting their source
+    JSONL files does not change the dashboard's quantitative payload.
+    """
+    proj = tmp_path / "claude" / "projects" / "p1"
+    proj.mkdir(parents=True)
+    _write_session(proj, "sid-A", "/proj/a", "claude-sonnet-4-6", "2026-05-01T12:00:00Z", "1")
+    _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7",   "2026-05-01T13:00:00Z", "2")
+
+    store = HistoryStore(tmp_path / "h.duckdb")
+    # Use a wide hot window so both turns hydrate into memory in run 2.
+    store._hot_window_days = 365
+
+    try:
+        with _mock_dirs(tmp_path / "claude"):
+            cache = ParseCache()
+            r1 = build_snapshot_full(cache, history_store=store)
+            # Force-flush whatever the broadcaster would normally batch.
+            store.flush(
+                turns=cache._hot_turns,
+                sessions=list(cache._hot_sessions_by_id.values()),
+            )
+
+        # Delete the live JSONLs.
+        for f in proj.glob("*.jsonl"):
+            f.unlink()
+
+        with _mock_dirs(tmp_path / "claude"):
+            cache2 = ParseCache()
+            r2 = build_snapshot_full(cache2, history_store=store)
+
+        # Quantitative payload sections must match across the deletion.
+        for k in ("topbar_summary", "tiles", "models", "recent_activity"):
+            assert r1.payload[k] == r2.payload[k], f"divergence in {k}"
+        # Sessions are preserved across deletion.
+        assert {s.session_id for s in r1.sessions} == {s.session_id for s in r2.sessions}
+    finally:
+        store.close()
