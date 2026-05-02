@@ -202,6 +202,98 @@ def _build_turns_and_sessions(
     return turns, sessions, fired
 
 
+def derive_delta_turns(
+    new_events: list[RawEvent],
+    existing_dedup_keys: set[str],
+    existing_passthrough_locations: set[tuple[str, int]],
+) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
+    """Build new Turn/Session deltas from events not already represented in memory.
+
+    *existing_dedup_keys* is the set of dedup keys already in the in-memory hot tier.
+    *existing_passthrough_locations* is the set of (source_file, line_number) tuples
+    for passthrough turns already emitted (passthroughs lack dedup keys).
+
+    Returns *only* the new turns and sessions to append; never touches existing state.
+    Within-batch dedup follows the existing last-wins rule.
+    """
+    seen: dict[str, tuple[RawEvent, str]] = {}
+    passthroughs: list[tuple[RawEvent, None]] = []
+    cwd_by_session: dict[str, str] = {}
+    session_source: dict[str, str] = {}
+    fired: Counter[AssumptionTag] = Counter()
+
+    for ev in new_events:
+        if ev.cwd and ev.session_id not in cwd_by_session:
+            cwd_by_session[ev.session_id] = ev.cwd
+        if ev.session_id not in session_source:
+            session_source[ev.session_id] = ev.source_file
+        if ev.event_type != "assistant":
+            continue
+        if ev.model == "<synthetic>":
+            continue
+        k = dedup_key(ev)
+        if k is None:
+            loc = (ev.source_file, ev.line_number)
+            if loc in existing_passthrough_locations:
+                continue
+            passthroughs.append((ev, None))
+        else:
+            if k in existing_dedup_keys:
+                continue
+            seen[k] = (ev, k)
+
+    turns: list[Turn] = []
+    for ev, k in itertools.chain(passthroughs, seen.values()):
+        is_interrupted = ev.usage is None
+        usage = ev.usage if ev.usage is not None else Usage()
+
+        tags: list[AssumptionTag] = []
+        if k is None:
+            tags.append(AssumptionTag.DEDUP_PASSTHROUGH)
+        if is_interrupted:
+            tags.append(AssumptionTag.INTERRUPTED_TURN_SKIPPED)
+
+        tc = cost_for_turn(ev.model, usage)
+        tags.extend(t for t in tc.assumptions if t not in tags)
+        for tag in tags:
+            fired[tag] += 1
+
+        key_str = k or ev.uuid or str(id(ev))
+        turns.append(Turn(
+            dedup_key=key_str,
+            timestamp=ev.timestamp,
+            session_id=ev.session_id,
+            model=ev.model,
+            usage=usage,
+            is_sidechain=ev.is_sidechain,
+            stop_reason=ev.stop_reason,
+            assumptions=tags,
+            cost_usd=tc.total_usd,
+            is_interrupted=is_interrupted,
+            tool_use_count=ev.tool_use_count,
+            tool_error_count=ev.tool_error_count,
+            tool_names=ev.tool_names,
+        ))
+
+    # Build *delta* Session records for any session_id we touched (one Session per
+    # new sid, with empty turns list — caller appends turns to its own session map).
+    sessions: list[Session] = []
+    seen_sids: set[str] = set()
+    for t in turns:
+        if t.session_id in seen_sids:
+            continue
+        seen_sids.add(t.session_id)
+        sessions.append(Session(
+            session_id=t.session_id,
+            source_file=session_source.get(t.session_id, ""),
+            is_sidechain=t.is_sidechain,
+            cwd=cwd_by_session.get(t.session_id),
+            turns=[],  # caller appends to its own session's turn list
+        ))
+
+    return turns, sessions, fired
+
+
 @dataclass
 class SnapshotResult:
     payload: dict

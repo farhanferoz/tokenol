@@ -8,13 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
-from tokenol.model.events import Session, Turn, Usage
+from tokenol.model.events import RawEvent, Session, Turn, Usage
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     build_project_detail,
     build_snapshot_full,
     build_tool_detail,
+    derive_delta_turns,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -643,3 +644,77 @@ def test_build_tool_detail_excludes_interrupted():
     )
     sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p", turns=[interrupted])]
     assert build_tool_detail("Read", [interrupted], sessions) is None
+
+
+# ---- derive_delta_turns tests ------------------------------------------
+
+
+def _ev(
+    *,
+    sid: str,
+    msg_id: str | None,
+    req_id: str | None,
+    ts: datetime,
+    source: str = "/tmp/x.jsonl",
+    line: int = 1,
+    cwd: str = "/proj",
+    model: str = "claude-sonnet-4-6",
+) -> RawEvent:
+    return RawEvent(
+        source_file=source,
+        line_number=line,
+        event_type="assistant",
+        session_id=sid,
+        request_id=req_id,
+        message_id=msg_id,
+        uuid=f"u-{line}",
+        timestamp=ts,
+        usage=Usage(input_tokens=10, output_tokens=5),
+        model=model,
+        is_sidechain=False,
+        stop_reason="end_turn",
+        cwd=cwd,
+    )
+
+
+def test_derive_delta_turns_skips_known_dedup_keys() -> None:
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        _ev(sid="s", msg_id="m1", req_id="r1", ts=ts),
+        _ev(sid="s", msg_id="m2", req_id="r2", ts=ts, line=2),
+    ]
+    turns, _, _ = derive_delta_turns(
+        events,
+        existing_dedup_keys={"m1:r1"},
+        existing_passthrough_locations=set(),
+    )
+    assert {t.dedup_key for t in turns} == {"m2:r2"}
+
+
+def test_derive_delta_turns_skips_known_passthroughs() -> None:
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=4),
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=7),
+    ]
+    turns, _, _ = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations={("/x.jsonl", 4)},
+    )
+    # Line 4 known → skipped; line 7 emitted as a new passthrough turn.
+    assert len(turns) == 1
+    assert turns[0].dedup_key  # passthroughs use uuid or id() as fallback
+
+
+def test_derive_delta_turns_emits_session_metadata_for_new_sids() -> None:
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [_ev(sid="brand-new", msg_id="m1", req_id="r1", ts=ts, cwd="/proj/new")]
+    _, sessions, _ = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations=set(),
+    )
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "brand-new"
+    assert sessions[0].cwd == "/proj/new"
