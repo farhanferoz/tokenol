@@ -29,11 +29,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
-# Cap per-batch row count for `executemany`. DuckDB plans large multi-row
-# `INSERT … ON CONFLICT DO NOTHING` statements with JSON columns by allocating
-# memory proportional to the full batch — empirically a single ~90k-row insert
-# blows past 24 GiB of RAM and OOMs the process. Chunking inside the same
-# transaction preserves atomicity and idempotency while bounding peak memory.
+# Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
 
 _SCHEMA_V1 = """
@@ -167,26 +163,30 @@ class HistoryStore:
         self.path = path if path is not None else default_path()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._con = duckdb.connect(str(self.path))
-        # DuckDB defaults to 80% of system RAM (~24 GiB on a 32-GiB box). With
-        # `dedup_key` PRIMARY KEY enforcement plus JSON-column INSERTs, a
-        # first-run flush of ~90k rows blows past that and OOMs the process.
-        # Bounding the pool lets DuckDB spill intermediates to disk instead.
-        try:
-            self._con.execute("SET memory_limit='1GB'")
-            self._con.execute(
-                f"SET temp_directory='{tempfile.gettempdir()}'"
-            )
-            # Order preservation forces an in-memory materialization step that
-            # we don't need (the table sorts on `ts` whenever order matters).
-            self._con.execute("SET preserve_insertion_order=false")
-        except Exception:
-            log.debug("could not configure DuckDB memory pragmas", exc_info=True)
+        # DuckDB defaults to 80% of system RAM, which on a 32-GiB box is enough
+        # to OOM the process during a large first-run flush. Bounding the pool
+        # forces spills to disk instead.
+        self._con.execute("SET memory_limit='1GB'")
+        temp_dir = tempfile.gettempdir().replace("'", "''")
+        self._con.execute(f"SET temp_directory='{temp_dir}'")
+        self._con.execute("SET preserve_insertion_order=false")
         # Best-effort tighten file mode after open (DuckDB may have created it).
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             log.debug("could not chmod 0600 on %s", self.path)
         self._migrate()
+
+    @contextmanager
+    def _tx(self) -> Iterator[None]:
+        """Wrap a block in BEGIN/COMMIT, with ROLLBACK on any exception."""
+        self._con.begin()
+        try:
+            yield
+            self._con.commit()
+        except Exception:
+            self._con.rollback()
+            raise
 
     def _migrate(self) -> None:
         # Apply schema (DDL is idempotent via IF NOT EXISTS).
@@ -207,23 +207,25 @@ class HistoryStore:
     def flush(self, turns: list[Turn], sessions: list[Session]) -> None:
         """Insert *turns* (idempotent on dedup_key) and UPSERT *sessions*.
 
-        Session metadata is refreshed from the union of (already-stored rows for
-        that session_id) ∪ (new turns) so denormalized totals stay accurate.
+        Turns are committed in chunks of `FLUSH_CHUNK_SIZE` rows, each in its
+        own transaction, because a single ~90k-row INSERT … ON CONFLICT DO
+        NOTHING with JSON columns blows past DuckDB's default 80%-of-RAM
+        memory pool and OOMs the process. Per-chunk commits release the page
+        cache between chunks; dedup_key collisions make any partially-applied
+        chunk a no-op on retry.
 
-        Each chunk of `FLUSH_CHUNK_SIZE` turns commits in its own transaction
-        so DuckDB can release page-cache memory between chunks. Atomicity per
-        chunk is enough because `dedup_key` collisions make any re-flush of a
-        partially-applied batch a no-op for already-persisted rows. Sessions
-        UPSERT in a final transaction once all turn chunks have landed.
+        After all turn chunks land, denormalized session metadata is computed
+        in a single GROUP BY over the affected ids — so a crash between turn
+        commits and the session UPSERT is self-healing on next flush, and
+        steady-state flushes don't issue a SELECT per session.
         """
         if not turns and not sessions:
             return
 
-        new_agg = _session_aggregate(turns)
         sessions_by_id = {s.session_id: s for s in sessions}
-        # Defensive: ensure every session whose turns we're inserting has a
-        # corresponding sessions-table row, even if the caller didn't pass one.
-        for sid in new_agg:
+        # Ensure every session whose turns we're inserting has a row, even
+        # when the caller didn't pass an explicit Session.
+        for sid in _session_aggregate(turns):
             if sid not in sessions_by_id:
                 sessions_by_id[sid] = Session(
                     session_id=sid, source_file="", is_sidechain=False, cwd=None, turns=[]
@@ -242,49 +244,30 @@ class HistoryStore:
             for i in range(0, len(turns), FLUSH_CHUNK_SIZE):
                 chunk = turns[i : i + FLUSH_CHUNK_SIZE]
                 rows = [_turn_row(t) for t in chunk]
-                self._con.begin()
-                try:
+                with self._tx():
                     self._con.executemany(insert_sql, rows)
-                    self._con.commit()
-                except Exception:
-                    self._con.rollback()
-                    raise
 
-        if not sessions_by_id:
-            return
+        sids = list(sessions_by_id)
+        placeholders = ",".join(["?"] * len(sids))
+        agg_rows = self._con.execute(
+            f"SELECT session_id, MIN(ts), MAX(ts), COUNT(*) FROM turns "
+            f"WHERE session_id IN ({placeholders}) GROUP BY session_id",
+            sids,
+        ).fetchall()
+        actual_by_sid = {sid: (mn, mx, c) for sid, mn, mx, c in agg_rows}
 
-        self._con.begin()
-        try:
+        with self._tx():
             for sid, s in sessions_by_id.items():
-                existing = self._con.execute(
-                    "SELECT first_ts, last_ts, turn_count FROM sessions WHERE session_id = ?",
-                    [sid],
-                ).fetchone()
-                new_a = new_agg.get(sid)
-                if existing is None and new_a is None:
-                    continue
-                if existing is None:
-                    first_ts = new_a["first_ts"]
-                    last_ts = new_a["last_ts"]
-                    count = new_a["count"]
-                elif new_a is None:
-                    first_ts, last_ts, count = existing
-                else:
-                    first_ts = min(existing[0], new_a["first_ts"])
-                    last_ts = max(existing[1], new_a["last_ts"])
-                    # Re-derive from actual rows because some inserts may have
-                    # been no-ops on dedup_key collision.
-                    count = self._con.execute(
-                        "SELECT COUNT(*) FROM turns WHERE session_id = ?", [sid]
-                    ).fetchone()[0]
-
-                now_ts = datetime.now()
+                actual = actual_by_sid.get(sid)
+                if actual is None:
+                    continue  # session has no turns in the store yet
+                first_ts, last_ts, count = actual
                 self._con.execute(
                     """
                     INSERT INTO sessions (
                         session_id, source_file, cwd, is_sidechain,
                         first_ts, last_ts, turn_count, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
                     ON CONFLICT (session_id) DO UPDATE SET
                         source_file = COALESCE(EXCLUDED.source_file, sessions.source_file),
                         cwd         = COALESCE(EXCLUDED.cwd,         sessions.cwd),
@@ -295,13 +278,8 @@ class HistoryStore:
                         updated_at  = EXCLUDED.updated_at
                     """,
                     [sid, s.source_file or None, s.cwd, s.is_sidechain,
-                     first_ts, last_ts, count, now_ts],
+                     first_ts, last_ts, count],
                 )
-
-            self._con.commit()
-        except Exception:
-            self._con.rollback()
-            raise
 
     def hydrate_hot(self, window_days: int) -> tuple[list[Turn], list[Session]]:
         """Load Turn rows whose ts is within `window_days` of now, plus their sessions.
@@ -460,20 +438,16 @@ class HistoryStore:
         if specified != 1:
             raise ValueError("forget requires exactly one of: session_ids, cwd, older_than, all")
 
-        self._con.begin()
-        try:
+        with self._tx():
             if all:
                 t_dropped = self._con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
                 s_dropped = self._con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
                 self._con.execute("DELETE FROM turns")
                 self._con.execute("DELETE FROM sessions")
-                self._con.commit()
                 return s_dropped, t_dropped
 
             if session_ids is not None:
-                # Handle empty list case
                 if not session_ids:
-                    self._con.commit()
                     return 0, 0
                 placeholders = ",".join(["?"] * len(session_ids))
                 t_dropped = self._con.execute(
@@ -492,7 +466,6 @@ class HistoryStore:
                     f"DELETE FROM sessions WHERE session_id IN ({placeholders})",
                     session_ids,
                 )
-                self._con.commit()
                 return s_dropped, t_dropped
 
             if cwd is not None:
@@ -500,7 +473,6 @@ class HistoryStore:
                     "SELECT session_id FROM sessions WHERE cwd = ?", [cwd]
                 ).fetchall()]
                 if not sids:
-                    self._con.commit()
                     return 0, 0
                 placeholders = ",".join(["?"] * len(sids))
                 t_dropped = self._con.execute(
@@ -513,7 +485,6 @@ class HistoryStore:
                 self._con.execute(
                     f"DELETE FROM sessions WHERE session_id IN ({placeholders})", sids
                 )
-                self._con.commit()
                 return len(sids), t_dropped
 
             # older_than (per-turn semantics)
@@ -543,11 +514,7 @@ class HistoryStore:
                         "updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
                         [agg[0], agg[1], agg[2], sid],
                     )
-            self._con.commit()
             return s_dropped, t_dropped
-        except Exception:
-            self._con.rollback()
-            raise
 
 
 @contextmanager

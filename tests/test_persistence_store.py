@@ -403,13 +403,10 @@ def test_forget_empty_session_list_is_noop(tmp_path: Path) -> None:
 
 
 def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
-    """A single flush of many turns must not blow DuckDB memory.
-
-    Regression: a single ~90k-row INSERT … ON CONFLICT DO NOTHING with JSON
-    columns OOM'd at >24 GiB on a real corpus. The fix chunks the executemany
-    inside the same transaction. We verify here with a batch large enough to
-    cross several FLUSH_CHUNK_SIZE boundaries that all rows land atomically.
-    """
+    """Regression: a single ~90k-row INSERT ON CONFLICT with JSON columns
+    OOM'd at >24 GiB on a real corpus. The fix chunks per FLUSH_CHUNK_SIZE
+    and commits per chunk so DuckDB releases memory between batches. This
+    test crosses several chunk boundaries to exercise that path."""
     n = FLUSH_CHUNK_SIZE * 3 + 7  # spans 4 chunks; the +7 catches off-by-one
     base_ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
     turns = [
@@ -421,16 +418,14 @@ def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
     store = HistoryStore(tmp_path / "h.duckdb")
     try:
         store.flush(turns, sessions)
-        # All rows landed.
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (n,)
-        # Session counts denormalized correctly across the chunked insert.
+        # Denormalized counts must agree with the chunked-insert outcome.
         per_session = dict(store._con.execute(
             "SELECT session_id, turn_count FROM sessions ORDER BY session_id"
         ).fetchall())
         assert per_session == {f"s-{i}": sum(1 for j in range(n) if j % 5 == i) for i in range(5)}
 
-        # Re-flushing the same turns is still idempotent (ON CONFLICT DO NOTHING)
-        # even when split across chunks.
+        # ON CONFLICT DO NOTHING keeps re-flush idempotent across chunk splits.
         store.flush(turns, sessions)
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (n,)
     finally:
