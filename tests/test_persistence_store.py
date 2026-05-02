@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -177,5 +177,63 @@ def test_flush_refreshes_updated_at_on_upsert(tmp_path: Path) -> None:
             "SELECT updated_at FROM sessions WHERE session_id = 'sess-1'"
         ).fetchone()[0]
         assert second_updated > first_updated
+    finally:
+        store.close()
+
+
+def test_hydrate_hot_returns_recent_turns_only(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        now = datetime.now(tz=timezone.utc)
+        old = _turn("old", "sess-1", ts=now - timedelta(days=120))
+        recent = _turn("recent", "sess-2", ts=now - timedelta(days=10))
+        store.flush(
+            [old, recent],
+            [_session("sess-1"), _session("sess-2")],
+        )
+
+        turns, sessions = store.hydrate_hot(window_days=90)
+        keys = {t.dedup_key for t in turns}
+        assert keys == {"recent"}
+        sids = {s.session_id for s in sessions}
+        # Sessions tied to hot-window turns are returned. sess-1 has no
+        # hot-window turn so it is not hydrated into memory.
+        assert sids == {"sess-2"}
+    finally:
+        store.close()
+
+
+def test_hydrate_hot_reconstructs_turn_fields(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush([_turn("k1", "sess-1")], [_session("sess-1")])
+        turns, _ = store.hydrate_hot(window_days=365)
+        assert len(turns) == 1
+        t = turns[0]
+        assert t.dedup_key == "k1"
+        assert t.session_id == "sess-1"
+        assert t.usage.input_tokens == 100
+        assert t.usage.cache_read_input_tokens == 20
+        assert dict(t.tool_names) == {"Read": 1, "Bash": 1}
+        assert [a.value for a in t.assumptions] == ["UNKNOWN_MODEL_FALLBACK"]
+    finally:
+        store.close()
+
+
+def test_last_ts_by_session(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        store.flush(
+            [
+                _turn("a", "sess-1", ts=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)),
+                _turn("b", "sess-1", ts=datetime(2026, 5, 1, 11, 0, tzinfo=timezone.utc)),
+                _turn("c", "sess-2", ts=datetime(2026, 5, 2, 9, 0, tzinfo=timezone.utc)),
+            ],
+            [_session("sess-1"), _session("sess-2")],
+        )
+        marks = store.last_ts_by_session()
+        # DuckDB returns naive datetimes from TIMESTAMP columns; we tag them UTC on read.
+        assert marks["sess-1"] == datetime(2026, 5, 1, 11, 0, tzinfo=timezone.utc)
+        assert marks["sess-2"] == datetime(2026, 5, 2, 9, 0, tzinfo=timezone.utc)
     finally:
         store.close()

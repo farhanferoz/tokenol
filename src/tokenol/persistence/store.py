@@ -14,14 +14,15 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 
-from tokenol.model.events import Session, Turn
+from tokenol.model.events import Session, Turn, Usage
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,40 @@ def _session_aggregate(turns: Iterable[Turn]) -> dict[str, dict]:
             a["last_ts"] = ts
         a["count"] += 1
     return agg
+
+
+def _row_to_turn(r: tuple) -> Turn:
+    """Reconstruct a Turn from a turns-table row.
+
+    Column order MUST match the SELECT in hydrate_hot / query_turns.
+    """
+    from tokenol.enums import AssumptionTag
+
+    (dedup_key, ts, sid, model, inp, out, cr, cc, cost, sidechain, interrupted,
+     stop_reason, tu, te, tool_names_json, assumptions_json) = r
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    tool_names = Counter(_json.loads(tool_names_json) if tool_names_json else {})
+    assumption_values = _json.loads(assumptions_json) if assumptions_json else []
+    assumptions = [AssumptionTag(v) for v in assumption_values]
+    return Turn(
+        dedup_key=dedup_key,
+        timestamp=ts,
+        session_id=sid,
+        model=model,
+        usage=Usage(
+            input_tokens=inp, output_tokens=out,
+            cache_read_input_tokens=cr, cache_creation_input_tokens=cc,
+        ),
+        is_sidechain=bool(sidechain),
+        stop_reason=stop_reason,
+        cost_usd=float(cost),
+        is_interrupted=bool(interrupted),
+        tool_use_count=int(tu),
+        tool_error_count=int(te),
+        tool_names=tool_names,
+        assumptions=assumptions,
+    )
 
 
 class HistoryStore:
@@ -230,6 +265,62 @@ class HistoryStore:
         except Exception:
             self._con.rollback()
             raise
+
+    def hydrate_hot(self, window_days: int) -> tuple[list[Turn], list[Session]]:
+        """Load Turn rows whose ts is within `window_days` of now, plus their sessions.
+
+        Returns ([], []) if the store is empty or no turns fall within the window.
+        Each Session's `turns` list is populated with its corresponding Turns from
+        the same hot-window query — callers can iterate sessions and treat them
+        as fully-hydrated.
+        """
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+        turn_rows = self._con.execute(
+            """
+            SELECT dedup_key, ts, session_id, model,
+                   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                   cost_usd, is_sidechain, is_interrupted, stop_reason,
+                   tool_use_count, tool_error_count, tool_names, assumptions
+            FROM turns
+            WHERE ts >= ?
+            ORDER BY ts
+            """,
+            [cutoff.replace(tzinfo=None)],
+        ).fetchall()
+
+        turns = [_row_to_turn(r) for r in turn_rows]
+        if not turns:
+            return [], []
+
+        session_ids = {t.session_id for t in turns}
+        placeholders = ",".join(["?"] * len(session_ids))
+        session_rows = self._con.execute(
+            f"SELECT session_id, source_file, cwd, is_sidechain "
+            f"FROM sessions WHERE session_id IN ({placeholders})",
+            list(session_ids),
+        ).fetchall()
+
+        turns_by_sid: dict[str, list[Turn]] = {}
+        for t in turns:
+            turns_by_sid.setdefault(t.session_id, []).append(t)
+
+        sessions: list[Session] = []
+        for sid, src, cwd, sidechain in session_rows:
+            sessions.append(Session(
+                session_id=sid,
+                source_file=src or "",
+                is_sidechain=bool(sidechain),
+                cwd=cwd,
+                turns=turns_by_sid.get(sid, []),
+            ))
+        return turns, sessions
+
+    def last_ts_by_session(self) -> dict[str, datetime]:
+        """High-water marks per session_id (UTC datetimes)."""
+        rows = self._con.execute(
+            "SELECT session_id, last_ts FROM sessions"
+        ).fetchall()
+        return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
 
 
 @contextmanager
