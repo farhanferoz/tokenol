@@ -177,9 +177,13 @@ def create_app(
         from tokenol.persistence.flusher import FlushQueue as _FlushQueue
         from tokenol.persistence.forget_handoff import (
             clear_pidfile as _clear_pidfile,
+        )
+        from tokenol.persistence.forget_handoff import (
             write_pidfile as _write_pidfile,
         )
-        from tokenol.persistence.store import HistoryStore as _HistoryStore
+        from tokenol.persistence.store import (
+            HistoryStore as _HistoryStore,
+        )
 
         history_store = _HistoryStore()
         # Hot-tier window is read by _store_backed_derivation as a duck-typed attr.
