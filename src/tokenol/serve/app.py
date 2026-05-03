@@ -97,28 +97,18 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _warn_if_orphan_store_exists() -> None:
-    """Yellow WARNING when default mode finds an existing ~/.tokenol/history.duckdb.
-
-    Prevents users who previously ran with --persist (or via the editable
-    feature/persistent-history-pr1 install) from silently losing their
-    persisted dashboard history when they upgrade to default 0.4.0+.
-    """
+    """Warn on stderr if a history store exists but persistence is off."""
     from rich.console import Console
 
     _env = os.environ.get("TOKENOL_HISTORY_PATH")
     store_path = Path(_env) if _env else Path.home() / ".tokenol" / "history.duckdb"
-    if not store_path.exists():
-        return
     try:
         size_mb = store_path.stat().st_size / (1024 * 1024)
     except OSError:
         return
-    console = Console(stderr=True)
-    console.print(
-        f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).[/yellow]"
-    )
-    console.print(
-        "[yellow]Persistence is OFF — pass --persist to use it.[/yellow]"
+    Console(stderr=True).print(
+        f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).\n"
+        f"Persistence is OFF — pass --persist to use it.[/yellow]"
     )
 
 
@@ -172,7 +162,7 @@ def create_app(
 
     history_store: HistoryStore | None = None
     flush_queue: FlushQueue | None = None
-    write_pidfile_fn = None  # bound below if persist is on
+    write_pidfile_fn = None
     clear_pidfile_fn = None
 
     if config.persist:
