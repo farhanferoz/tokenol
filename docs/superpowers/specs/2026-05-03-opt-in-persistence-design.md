@@ -17,6 +17,66 @@ Ship `feature/persistent-history-pr1`'s DuckDB-backed history store as an opt-in
 - Per-tenant or per-project persistence toggles. The flag is process-wide.
 - Hot-reload of the flag without restart. Toggling persistence requires a restart of `tokenol serve`.
 
+## Branching and release
+
+Land the `--persist` gate as the final commit on `feature/persistent-history-pr1`, then merge that branch into `main` and cut release `0.4.0`. Single PR. Rationale: PR1 is already "ready to merge" per RESUME (274 tests pass, ruff clean); the gate is a genuinely small additional commit; one PR is easier to review than two staged PRs covering the same conceptual change. The version bump to `0.4.0` is justified by a new user-facing flag (semantic versioning treats a new public CLI flag as a minor bump).
+
+## Optional dependency split
+
+`duckdb` becomes an optional dependency under a new `persist` extras group. Default `pip install tokenol` no longer pulls the DuckDB wheel (~30 MB). Users who want persistence run `pip install 'tokenol[persist]'`.
+
+`pyproject.toml` change (current state has `duckdb>=0.10` under top-level `dependencies` alongside `typer` and `rich`; `serve` and `dev` extras already exist):
+
+```toml
+[project]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    # duckdb removed from core; now under optional-dependencies.persist
+]
+
+[project.optional-dependencies]
+dev = [...]                      # unchanged
+serve = [...]                    # unchanged
+persist = ["duckdb>=0.10"]       # NEW
+```
+
+CLI behavior when `--persist` is passed but `duckdb` is not installed: fail fast at `tokenol serve` startup with a clear message. The check lives in `cli.py` so the error message reaches the user before any FastAPI machinery boots:
+
+```python
+if persist:
+    try:
+        import duckdb  # noqa: F401  — probe only
+    except ImportError:
+        err.print(
+            "[red]--persist requires the 'persist' extras.[/red] "
+            "Run: pip install 'tokenol[persist]'"
+        )
+        raise typer.Exit(code=1) from None
+```
+
+CI: `uv run pytest` resolves the project's `optional-dependencies` based on the install command. Either install all extras at the test boundary (`uv pip install -e '.[dev,serve,persist]'` or the equivalent `uv sync --all-extras`) or add `persist` to whatever extras combination the existing CI workflow uses. The repo already needs `[serve]` for the FastAPI tests; adding `[persist]` to the same install path keeps the matrix simple.
+
+Default-mode tests (the new `test_serve_app_no_persist.py`) work without the extras installed, but the existing PR1 persistence tests (`test_persistence_*`, `test_serve_archived_session.py`, the store-backed slices of `test_serve_state.py` and `test_serve_app.py`) require the extras. The two test groups are not separated by marker — they coexist; CI installs the extras and runs the full suite. End users who run `pytest` against the package without the extras would skip the persistence tests via a module-level `pytest.importorskip("duckdb")` at the top of every persistence test file. Files needing the import-skip line (verified to exist on the PR1 worktree):
+
+- `tests/test_persistence_store.py`
+- `tests/test_persistence_flusher.py`
+- `tests/test_persistence_forget_handoff.py`
+- `tests/test_serve_archived_session.py`
+- `tests/test_serve_state.py` *(only if it imports `tokenol.persistence` at module top)*
+- `tests/test_serve_app.py` *(only if it imports `tokenol.persistence` at module top)*
+
+The trailing two are conditional — verify with `grep -l "tokenol.persistence" tests/test_serve_app.py tests/test_serve_state.py` during implementation.
+
+README install snippet update:
+
+```markdown
+## Install
+
+pip install tokenol             # core dashboard, no persistence
+pip install 'tokenol[persist]'  # adds DuckDB-backed history that survives JSONL deletion
+```
+
 ## Architecture
 
 The change is concentrated in three files: `src/tokenol/cli.py` (one new flag), `src/tokenol/serve/app.py` (the gate + deferred imports), and a new test file. `serve/state.py`, `serve/streaming.py`, and the `tokenol.persistence.*` modules are untouched — PR1 already designed those for the `HistoryStore | None` case to support CLI report tools and existing tests, and both already wrap their persistence imports in `TYPE_CHECKING` so they do not transitively load `duckdb` at import time. (`streaming.py:227` does a function-level import of `take_forget_request` from `forget_handoff`, but that path only executes when `flush_queue` is non-None, so the default mode never triggers it.)
@@ -180,7 +240,7 @@ End-to-end smoke (manual or via the existing cold-start bench): `tokenol serve` 
 ## Docs
 
 - `README.md` gains a `### Persistent history (opt-in)` subsection under "Commands" with a 2-3 sentence description of `--persist` plus the cost summary (link to this spec for details).
-- `CHANGELOG.md` next-release entry: `feat(serve): persistent history landed as opt-in via --persist (default off matches v0.3.2 resource use)`.
+- `CHANGELOG.md` `0.4.0` entry: `feat(serve): persistent history landed as opt-in via --persist (default off matches v0.3.2 resource use); duckdb moved to optional 'persist' extras (default install no longer pulls the wheel).`
 - `docs/superpowers/specs/2026-05-02-persistent-history-design.md` gets a short header note: `**Update 2026-05-03:** shipped opt-in only via --persist. See 2026-05-03-opt-in-persistence-design.md for the gating design and rationale.`
 
 ## Pitfalls
@@ -189,4 +249,5 @@ End-to-end smoke (manual or via the existing cold-start bench): `tokenol serve` 
 - **Import side effects in `tokenol.persistence.__init__`.** Currently empty (1 line per `wc -l` earlier); adding any module-level import there in the future would defeat the deferral. Add a comment to `tokenol/persistence/__init__.py` flagging this so future contributors don't quietly re-trigger the cost.
 - **Existing PR1 tests.** PR1 ships 274 tests, 52 of which exercise the persistence path. Most should keep passing because they construct `HistoryStore` directly. The handful that go through `create_app` need an explicit `persist=True` — review with `grep -lE "create_app\(" tests/`.
 - **`forget` handoff via pidfile.** The `forget_handoff` module writes/clears a pidfile signalling that a `tokenol forget` invocation can request a live forget over the running server. With persistence off, no pidfile is written — `tokenol forget` running against a default-mode server simply finds no pidfile and proceeds against the (nonexistent) DuckDB file directly, which is the correct behavior.
-- **`pyproject.toml` `duckdb` dep.** The dependency stays — it's needed when `--persist` is on. Default users still install the wheel that includes `duckdb`. The deferral only avoids the *runtime* cost of `import duckdb`, not the disk cost of the wheel. (Splitting into an extras group like `tokenol[persist]` is a separate decision; not in scope here.)
+- **CI dev-deps + extras alignment.** The new `persist` extras group must be installed in CI for the existing 52 persistence tests to keep running. Verify the project's `uv` dev-dep config (or the equivalent CI install command) pulls `tokenol[persist]` before `pytest`, otherwise the persistence tests will start being silently skipped via the new `pytest.importorskip("duckdb")` markers and the regression coverage for that path disappears.
+- **`importorskip` placement.** Put `pytest.importorskip("duckdb")` at the *top* of each persistence test module, before any other top-level import that itself would chain into `duckdb`. Otherwise the import happens during collection and the skip never fires.
