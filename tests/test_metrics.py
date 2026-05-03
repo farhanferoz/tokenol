@@ -67,6 +67,29 @@ def test_daily_rollup():
     assert r.output_tokens == 500   # 200 + 300
 
 
+def test_daily_rollup_since_filters_older_turns():
+    # Regression: rollup_by_date used to zero-fill the [since, until] window but
+    # never dropped turns dated before `since`, so Daily History rendered the
+    # full series regardless of the selected 7D/30D/90D range.
+    from datetime import date
+    def _turn(d: date) -> Turn:
+        return Turn(
+            dedup_key=f"k-{d}", timestamp=datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc),
+            session_id="s", model="claude-opus-4-7",
+            usage=Usage(input_tokens=1, output_tokens=1,
+                cache_read_input_tokens=0, cache_creation_input_tokens=0),
+            is_sidechain=False, stop_reason=None,
+        )
+
+    turns = [_turn(date(2026, 1, 1)), _turn(date(2026, 4, 10)), _turn(date(2026, 4, 14))]
+    rollups = rollup_by_date(turns, since=date(2026, 4, 8), until=date(2026, 4, 14))
+    dates = [r.date for r in rollups]
+    assert dates[0] == date(2026, 4, 8) and dates[-1] == date(2026, 4, 14)
+    assert all(date(2026, 4, 8) <= d <= date(2026, 4, 14) for d in dates)
+    populated = {r.date: r.turns for r in rollups if r.turns}
+    assert populated == {date(2026, 4, 10): 1, date(2026, 4, 14): 1}
+
+
 def test_sidechain_cost():
     turns = build_turns([FIXTURES / "sidechain.jsonl"])
     assert len(turns) == 1

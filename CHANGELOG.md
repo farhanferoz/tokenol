@@ -4,6 +4,14 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.1 — 2026-05-03
+
+### Fixes
+- **Daily History range pills now actually filter the chart.** `rollup_by_date`
+  zero-filled the requested `[since, until]` window but never dropped turns
+  dated before `since`, so 7D / 30D / 90D rendered the same full series as
+  ALL. Turns outside the window are now skipped before bucketing.
+
 ## 0.4.0 — 2026-05-03
 
 ### Features

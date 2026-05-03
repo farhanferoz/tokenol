@@ -117,6 +117,10 @@ def rollup_by_date(
 
     for turn in turns:
         d = turn.timestamp.date()
+        if since is not None and d < since:
+            continue
+        if until is not None and d > until:
+            continue
         if d not in buckets:
             buckets[d] = _empty(d)
         r = buckets[d]
@@ -125,9 +129,9 @@ def rollup_by_date(
             r.interrupted_turns += 1
 
     if since is not None:
-        until = until or date.today()
+        fill_until = until or date.today()
         cur = since
-        while cur <= until:
+        while cur <= fill_until:
             if cur not in buckets:
                 buckets[cur] = _empty(cur)
             cur += timedelta(days=1)
