@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import glob
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -46,31 +45,30 @@ def find_jsonl_files(dirs: list[Path] | None = None) -> list[Path]:
 
 def select_edge_paths(
     paths: list[Path],
-    last_ts_by_session: dict[str, datetime],
+    last_mtime_ns_by_path: dict[Path, int],
 ) -> list[Path]:
     """Return the subset of *paths* worth re-parsing this tick.
 
     A path is kept when:
     - The marks dict is empty (no warm tier — caller falls back to "all"), or
-    - The file's session_id (filename stem) has no mark, or
-    - The file's mtime is greater than the persisted mark.
+    - The path has no mark (newly discovered file), or
+    - The file's `st_mtime_ns` differs from the persisted mark.
 
     Paths whose stat() fails are dropped silently.
     """
-    if not last_ts_by_session:
+    if not last_mtime_ns_by_path:
         return list(paths)
 
     kept: list[Path] = []
     for p in paths:
-        sid = p.stem
-        mark = last_ts_by_session.get(sid)
+        mark = last_mtime_ns_by_path.get(p)
         if mark is None:
             kept.append(p)
             continue
         try:
-            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            mtime_ns = p.stat().st_mtime_ns
         except OSError:
             continue
-        if mtime > mark:
+        if mtime_ns != mark:
             kept.append(p)
     return kept

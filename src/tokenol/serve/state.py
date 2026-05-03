@@ -863,17 +863,19 @@ def _store_backed_derivation(
         parse_cache._known_dedup_keys = {t.dedup_key for t in hot_turns}
         parse_cache._known_passthrough_locs = set()
         parse_cache._last_ts_by_session = history_store.last_ts_by_session()
+        parse_cache._last_mtime_ns_by_path = {}  # populated below as files are parsed
         parse_cache._fired = Counter()
         parse_cache._hot_initialized = True
 
-    # Filter to edge paths (mtime newer than persisted high-water marks).
-    edge_paths = select_edge_paths(paths, parse_cache._last_ts_by_session)
+    # Filter to edge paths (mtime_ns differs from persisted high-water mark).
+    edge_paths = select_edge_paths(paths, parse_cache._last_mtime_ns_by_path)
 
-    # Parse only edge files.
+    # Parse only edge files; record current mtime_ns for next tick's gate.
     new_events: list[RawEvent] = []
     for p in edge_paths:
         try:
             _key, evs = parse_cache.get_or_parse(p)
+            parse_cache._last_mtime_ns_by_path[p] = p.stat().st_mtime_ns
             new_events.extend(evs)
         except OSError:
             continue

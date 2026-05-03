@@ -3,53 +3,50 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tokenol.ingest.discovery import select_edge_paths
 
 
-def _touch(p: Path, *, seconds_ago: float) -> None:
-    p.write_text("")
-    ts = (datetime.now(tz=timezone.utc).timestamp()) - seconds_ago
-    os.utime(p, (ts, ts))
-
-
 def test_returns_all_paths_when_marks_empty(tmp_path: Path) -> None:
     a = tmp_path / "a.jsonl"
-    _touch(a, seconds_ago=10)
+    a.write_text("")
     b = tmp_path / "b.jsonl"
-    _touch(b, seconds_ago=10)
+    b.write_text("")
     assert sorted(select_edge_paths([a, b], {})) == sorted([a, b])
 
 
 def test_keeps_paths_with_no_persisted_mark(tmp_path: Path) -> None:
     a = tmp_path / "a.jsonl"
-    _touch(a, seconds_ago=10)
+    a.write_text("")
     new = tmp_path / "new.jsonl"
-    _touch(new, seconds_ago=10)
-    marks = {"a": datetime.now(tz=timezone.utc)}
-    # 'new' has no mark → kept; 'a' is older than its mark → dropped.
+    new.write_text("")
+    # 'a' has a mark equal to its current mtime → dropped; 'new' has no mark → kept.
+    marks = {a: a.stat().st_mtime_ns}
     assert select_edge_paths([a, new], marks) == [new]
 
 
-def test_keeps_paths_newer_than_mark(tmp_path: Path) -> None:
+def test_keeps_paths_whose_mtime_ns_changed(tmp_path: Path) -> None:
     a = tmp_path / "a.jsonl"
-    _touch(a, seconds_ago=10)
-    marks = {"a": datetime.now(tz=timezone.utc) - timedelta(hours=1)}
+    a.write_text("first")
+    old_mtime_ns = a.stat().st_mtime_ns
+    # Force mtime change via utime
+    new_mtime_ns = old_mtime_ns + 1_000_000  # +1 ms in nanoseconds
+    os.utime(a, ns=(new_mtime_ns, new_mtime_ns))
+    marks = {a: old_mtime_ns}
     assert select_edge_paths([a], marks) == [a]
 
 
-def test_drops_paths_older_than_mark(tmp_path: Path) -> None:
+def test_drops_paths_whose_mtime_ns_is_unchanged(tmp_path: Path) -> None:
     a = tmp_path / "a.jsonl"
-    _touch(a, seconds_ago=3600)  # 1-hour-old file
-    marks = {"a": datetime.now(tz=timezone.utc)}  # mark = now
+    a.write_text("")
+    mtime_ns = a.stat().st_mtime_ns
+    marks = {a: mtime_ns}
     assert select_edge_paths([a], marks) == []
 
 
-def test_session_id_is_filename_stem(tmp_path: Path) -> None:
-    p = tmp_path / "abc-123.jsonl"
-    _touch(p, seconds_ago=10)
-    # Mark keyed by 'abc-123' (the stem) drops the file.
-    marks = {"abc-123": datetime.now(tz=timezone.utc)}
-    assert select_edge_paths([p], marks) == []
+def test_drops_missing_paths_silently(tmp_path: Path) -> None:
+    a = tmp_path / "gone.jsonl"
+    # File does not exist; provide a mark so the OSError branch is exercised.
+    marks = {a: 12345}
+    assert select_edge_paths([a], marks) == []
