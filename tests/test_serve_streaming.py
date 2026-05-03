@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("duckdb")
+
 import asyncio
 import json
 from contextlib import contextmanager

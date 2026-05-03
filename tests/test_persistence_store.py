@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("duckdb")
+
 import json
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
