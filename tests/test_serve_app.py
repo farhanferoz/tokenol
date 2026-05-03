@@ -1165,7 +1165,7 @@ def test_daily_range_all_uses_warm_tier(tmp_path, monkeypatch) -> None:
 
     from tokenol.serve.app import ServerConfig, create_app
 
-    app = create_app(ServerConfig())
+    app = create_app(ServerConfig(persist=True))
     store = app.state.history_store
     # Insert one turn well outside any reasonable hot window.
     old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -1197,7 +1197,7 @@ def test_create_app_attaches_store_and_writes_pidfile(tmp_path, monkeypatch) -> 
 
     from tokenol.serve.app import ServerConfig, create_app
 
-    app = create_app(ServerConfig())
+    app = create_app(ServerConfig(persist=True))
     # Store attached
     assert app.state.history_store is not None
     # Flush queue attached (object exists; lifespan starts the task)
@@ -1213,7 +1213,7 @@ def test_lifespan_starts_and_stops_flusher(tmp_path, monkeypatch) -> None:
     from tokenol.persistence.forget_handoff import pidfile_path
     from tokenol.serve.app import ServerConfig, create_app
 
-    app = create_app(ServerConfig())
+    app = create_app(ServerConfig(persist=True))
 
     async def go():
         async with app.router.lifespan_context(app):
