@@ -23,7 +23,6 @@ classifiers = [
 dependencies = [
     "typer>=0.12",
     "rich>=13",
-    "duckdb>=0.10",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +38,9 @@ serve = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
     "watchfiles>=0.21",
+]
+persist = [
+    "duckdb>=0.10",
 ]
 
 [project.scripts]
