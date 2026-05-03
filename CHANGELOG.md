@@ -4,6 +4,61 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 — 2026-05-03
+
+### Features
+- **Persistent history that survives JSONL deletion** (opt-in via
+  `--persist`). `tokenol serve --persist` backs the live in-memory
+  dashboard with a single-file DuckDB store at `~/.tokenol/history.duckdb`
+  (override via `TOKENOL_HISTORY_PATH`). On startup the store seeds the
+  in-memory hot tier so cold start is bounded by `hot_window_days`
+  (default 90), not by total history length. Each tick parses only JSONLs
+  whose `mtime_ns` exceeds the per-session high-water mark — typically
+  just today's active files — and appends derived turns to both memory and
+  a background batch flush (every 30 s or 100 turns). Deleting a JSONL no
+  longer drops its data from the dashboard; the affected sessions are
+  marked `archived=True` and continue to render every quantitative panel.
+  Only the per-turn modal's content snippets (user prompt, assistant
+  preview, tool-call list) become unavailable for archived sessions, in
+  line with the privacy intent of the deletion. Default off — `tokenol
+  serve` without `--persist` matches the v0.3.2 resource profile
+  byte-for-byte (no `import duckdb`, no `~/.tokenol/` directory, no extra
+  steady RSS).
+- `Preferences.hot_window_days` (default `90`, accepted range `1..3650`),
+  exposed via the existing `/api/prefs` endpoint. Takes effect on next
+  startup.
+- `Session.archived: bool` field surfaced through `/api/session/{id}` and
+  `/api/session/{id}/turn/{idx}`; the session-detail page renders an
+  amber "Archived — text snippets unavailable" badge and hides the
+  per-turn snippet block when the flag is set.
+- `tokenol.persistence.forget_handoff` — a pidfile + atomic request-file
+  handshake so a future `tokenol forget` CLI (PR 2) can apply deletions
+  to a live serve within one tick, without requiring a restart.
+
+### Changes
+- `duckdb` moved from a core dependency to the new `[persist]` optional
+  extras group. Default `pip install tokenol` no longer pulls the DuckDB
+  binary wheel (~30 MB saved). Users who pass `--persist` install with
+  `pip install 'tokenol[persist]'`.
+- `build_snapshot_full` now accepts optional `history_store` and
+  `flush_queue` arguments. When neither is supplied the legacy whole-corpus
+  derivation path is used unchanged, so CLI report commands and any
+  existing test that constructs a bare `ParseCache` keep working.
+- Default mode prints a yellow `WARNING` at startup if it finds an existing
+  `~/.tokenol/history.duckdb` (or `TOKENOL_HISTORY_PATH`), prompting the
+  user to pass `--persist` if they want to use it (rather than silently
+  ignoring the file).
+- `select_edge_paths` now tracks per-file `mtime_ns` instead of comparing
+  filesystem mtime to turn timestamps — fixes a freshness bug in the
+  store-backed snapshot path where backdated turn timestamps could silently
+  exclude files from re-parse.
+
+### Notes
+- See `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` for
+  the gating-and-extras design.
+- See `docs/superpowers/specs/2026-05-02-persistent-history-design.md` for
+  the underlying store design.
+
 ## [0.3.2] — 2026-04-28
 
 ### Fixed

@@ -741,10 +741,9 @@ wheels = [
 
 [[package]]
 name = "tokenol"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
-    { name = "duckdb" },
     { name = "rich" },
     { name = "typer" },
 ]
@@ -758,6 +757,9 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+persist = [
+    { name = "duckdb" },
+]
 serve = [
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
@@ -766,7 +768,7 @@ serve = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", specifier = ">=0.10" },
+    { name = "duckdb", marker = "extra == 'persist'", specifier = ">=0.10" },
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.111" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6" },
@@ -779,7 +781,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'serve'", specifier = ">=0.29" },
     { name = "watchfiles", marker = "extra == 'serve'", specifier = ">=0.21" },
 ]
-provides-extras = ["dev", "serve"]
+provides-extras = ["dev", "serve", "persist"]
 
 [[package]]
 name = "tomli"

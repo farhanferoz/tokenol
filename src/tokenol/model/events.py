@@ -84,6 +84,7 @@ class Session:
     is_sidechain: bool
     cwd: str | None = None
     turns: list[Turn] = field(default_factory=list)
+    archived: bool = False
 
     @property
     def total_cost(self) -> float:

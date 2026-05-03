@@ -139,6 +139,7 @@ def build_turn_detail(session: Session, turn_idx: int) -> dict | None:
     return {
         "session_id": session.session_id,
         "turn_idx": turn_idx,
+        "archived": session.archived,
         "ts": t.timestamp.isoformat(),
         "model": t.model,
         "stop_reason": t.stop_reason,
@@ -211,6 +212,7 @@ def build_session_detail(session: Session) -> dict:
         "verdict": verdict.value,
         "first_ts": first_ts,
         "last_ts": last_ts,
+        "archived": session.archived,
         "totals": {
             "cost_usd": sr.cost_usd,
             "turns": len(turns),

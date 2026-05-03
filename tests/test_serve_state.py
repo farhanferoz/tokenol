@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("duckdb")
+
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
-from tokenol.model.events import Session, Turn, Usage
+from tokenol.model.events import RawEvent, Session, Turn, Usage
+from tokenol.persistence.store import HistoryStore
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     build_project_detail,
     build_snapshot_full,
     build_tool_detail,
+    derive_delta_turns,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -643,3 +649,138 @@ def test_build_tool_detail_excludes_interrupted():
     )
     sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p", turns=[interrupted])]
     assert build_tool_detail("Read", [interrupted], sessions) is None
+
+
+# ---- derive_delta_turns tests ------------------------------------------
+
+
+def _ev(
+    *,
+    sid: str,
+    msg_id: str | None,
+    req_id: str | None,
+    ts: datetime,
+    source: str = "/tmp/x.jsonl",
+    line: int = 1,
+    cwd: str = "/proj",
+    model: str = "claude-sonnet-4-6",
+) -> RawEvent:
+    return RawEvent(
+        source_file=source,
+        line_number=line,
+        event_type="assistant",
+        session_id=sid,
+        request_id=req_id,
+        message_id=msg_id,
+        uuid=f"u-{line}",
+        timestamp=ts,
+        usage=Usage(input_tokens=10, output_tokens=5),
+        model=model,
+        is_sidechain=False,
+        stop_reason="end_turn",
+        cwd=cwd,
+    )
+
+
+def test_derive_delta_turns_skips_known_dedup_keys() -> None:
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        _ev(sid="s", msg_id="m1", req_id="r1", ts=ts),
+        _ev(sid="s", msg_id="m2", req_id="r2", ts=ts, line=2),
+    ]
+    turns, _, _, _ = derive_delta_turns(
+        events,
+        existing_dedup_keys={"m1:r1"},
+        existing_passthrough_locations=set(),
+    )
+    assert {t.dedup_key for t in turns} == {"m2:r2"}
+
+
+def test_derive_delta_turns_skips_known_passthroughs() -> None:
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=4),
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=7),
+    ]
+    turns, _, _, _ = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations={("/x.jsonl", 4)},
+    )
+    # Line 4 known → skipped; line 7 emitted as a new passthrough turn.
+    assert len(turns) == 1
+    assert turns[0].dedup_key  # passthroughs use uuid or id() as fallback
+
+
+def test_derive_delta_turns_emits_session_metadata_for_new_sids() -> None:
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [_ev(sid="brand-new", msg_id="m1", req_id="r1", ts=ts, cwd="/proj/new")]
+    _, sessions, _, _ = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations=set(),
+    )
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "brand-new"
+    assert sessions[0].cwd == "/proj/new"
+
+
+def test_derive_delta_turns_returns_accepted_passthrough_locations() -> None:
+    """The 4th return value is the set of (source_file, line_number) for emitted passthroughs."""
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        # Accepted passthrough (no dedup key, not synthetic, not in known set).
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=10),
+        # Synthetic — must NOT appear in accepted set.
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=20, model="<synthetic>"),
+        # Skipped (already known) — must NOT appear in accepted set.
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=30),
+    ]
+    _, _, _, accepted = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations={("/x.jsonl", 30)},
+    )
+    assert accepted == {("/x.jsonl", 10)}
+
+
+def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
+    """Snapshot from JSONLs == snapshot from store-only after JSONL deletion.
+
+    Verifies that once turns are persisted to the store, deleting their source
+    JSONL files does not change the dashboard's quantitative payload.
+    """
+    proj = tmp_path / "claude" / "projects" / "p1"
+    proj.mkdir(parents=True)
+    _write_session(proj, "sid-A", "/proj/a", "claude-sonnet-4-6", "2026-05-01T12:00:00Z", "1")
+    _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7",   "2026-05-01T13:00:00Z", "2")
+
+    store = HistoryStore(tmp_path / "h.duckdb")
+    # Use a wide hot window so both turns hydrate into memory in run 2.
+    store._hot_window_days = 365
+
+    try:
+        with _mock_dirs(tmp_path / "claude"):
+            cache = ParseCache()
+            r1 = build_snapshot_full(cache, history_store=store)
+            # Force-flush whatever the broadcaster would normally batch.
+            store.flush(
+                turns=cache._hot_turns,
+                sessions=list(cache._hot_sessions_by_id.values()),
+            )
+
+        # Delete the live JSONLs.
+        for f in proj.glob("*.jsonl"):
+            f.unlink()
+
+        with _mock_dirs(tmp_path / "claude"):
+            cache2 = ParseCache()
+            r2 = build_snapshot_full(cache2, history_store=store)
+
+        # Quantitative payload sections must match across the deletion.
+        for k in ("topbar_summary", "tiles", "models", "recent_activity"):
+            assert r1.payload[k] == r2.payload[k], f"divergence in {k}"
+        # Sessions are preserved across deletion.
+        assert {s.session_id for s in r1.sessions} == {s.session_id for s in r2.sessions}
+    finally:
+        store.close()

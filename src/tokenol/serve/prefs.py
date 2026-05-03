@@ -25,6 +25,7 @@ def default_path() -> Path:
 class Preferences:
     tick_seconds: int = 5
     reference_usd: float = 50.0
+    hot_window_days: int = 90
     thresholds: dict = field(default_factory=lambda: dict(DEFAULTS))
 
     @classmethod
@@ -39,6 +40,8 @@ class Preferences:
                 prefs.tick_seconds = int(data["tick_seconds"])
             if "reference_usd" in data:
                 prefs.reference_usd = float(data["reference_usd"])
+            if "hot_window_days" in data:
+                prefs.hot_window_days = int(data["hot_window_days"])
             if "thresholds" in data and isinstance(data["thresholds"], dict):
                 prefs.thresholds = {k: data["thresholds"].get(k, v) for k, v in DEFAULTS.items()}
             return prefs
@@ -52,6 +55,7 @@ class Preferences:
         payload = {
             "tick_seconds": self.tick_seconds,
             "reference_usd": self.reference_usd,
+            "hot_window_days": self.hot_window_days,
             "thresholds": self.thresholds,
         }
         fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")

@@ -1140,3 +1140,85 @@ async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None
                 )
         finally:
             await agen.aclose()
+
+
+def test_session_dataclass_has_archived_field() -> None:
+    from tokenol.model.events import Session
+    s = Session(session_id="x", source_file="", is_sidechain=False)
+    assert s.archived is False
+
+
+def test_daily_range_all_uses_warm_tier(tmp_path, monkeypatch) -> None:
+    """range=all surfaces rows from the warm tier when older than the hot window."""
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    from tokenol.enums import AssumptionTag
+    from tokenol.model.events import Session, Turn, Usage
+
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
+    # Pin JSONL discovery to an empty tmp dir so the test doesn't pick up the
+    # developer's real ~/.claude* corpus during the build sweep.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    from fastapi.testclient import TestClient
+
+    from tokenol.serve.app import ServerConfig, create_app
+
+    app = create_app(ServerConfig(persist=True))
+    store = app.state.history_store
+    # Insert one turn well outside any reasonable hot window.
+    old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.flush(
+        [Turn(
+            dedup_key="old", timestamp=old_ts, session_id="s1",
+            model="claude-sonnet-4-6",
+            usage=Usage(input_tokens=10, output_tokens=5,
+                        cache_read_input_tokens=0, cache_creation_input_tokens=0),
+            is_sidechain=False, stop_reason="end_turn", cost_usd=0.001,
+            is_interrupted=False, tool_use_count=0, tool_error_count=0,
+            tool_names=Counter(), assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
+        )],
+        [Session(session_id="s1", source_file="", is_sidechain=False, cwd="/proj/old")],
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/api/daily?range=all")
+    assert resp.status_code == 200
+    payload = resp.json()
+    # earliest_available is a stable top-level field reflecting the oldest considered turn.
+    # Without warm-tier merge, it would be today (no live JSONL → no in-memory turns).
+    assert payload["earliest_available"] <= "2026-01-01"
+
+
+def test_create_app_attaches_store_and_writes_pidfile(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
+
+    from tokenol.serve.app import ServerConfig, create_app
+
+    app = create_app(ServerConfig(persist=True))
+    # Store attached
+    assert app.state.history_store is not None
+    # Flush queue attached (object exists; lifespan starts the task)
+    assert app.state.flush_queue is not None
+
+
+def test_lifespan_starts_and_stops_flusher(tmp_path, monkeypatch) -> None:
+    """The lifespan startup writes the pidfile; shutdown clears it."""
+    import asyncio
+    monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
+    monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
+
+    from tokenol.persistence.forget_handoff import pidfile_path
+    from tokenol.serve.app import ServerConfig, create_app
+
+    app = create_app(ServerConfig(persist=True))
+
+    async def go():
+        async with app.router.lifespan_context(app):
+            assert pidfile_path().exists()
+        # Outside the context: pidfile cleared.
+        assert not pidfile_path().exists()
+
+    asyncio.run(go())

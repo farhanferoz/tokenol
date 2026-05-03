@@ -39,9 +39,9 @@ def test_defaults_on_malformed_json(tmp_path: Path) -> None:
 
 
 def test_to_dict_shape() -> None:
-    """to_dict includes all three top-level keys."""
+    """to_dict includes all four top-level keys."""
     d = Preferences().to_dict()
-    assert set(d.keys()) == {"tick_seconds", "reference_usd", "thresholds"}
+    assert set(d.keys()) == {"tick_seconds", "reference_usd", "hot_window_days", "thresholds"}
 
 
 def test_load_merges_new_defaults(tmp_path: Path) -> None:
@@ -61,3 +61,24 @@ def test_save_creates_parent_dir(tmp_path: Path) -> None:
     p = tmp_path / "a" / "b" / "prefs.json"
     Preferences().save(p)
     assert p.exists()
+
+
+def test_hot_window_days_default(tmp_path: Path) -> None:
+    p = tmp_path / "prefs.json"
+    prefs = Preferences.load(p)
+    assert prefs.hot_window_days == 90
+
+
+def test_hot_window_days_round_trip(tmp_path: Path) -> None:
+    p = tmp_path / "prefs.json"
+    prefs = Preferences()
+    prefs.hot_window_days = 30
+    prefs.save(p)
+    loaded = Preferences.load(p)
+    assert loaded.hot_window_days == 30
+
+
+def test_hot_window_days_to_dict(tmp_path: Path) -> None:
+    prefs = Preferences()
+    prefs.hot_window_days = 45
+    assert prefs.to_dict()["hot_window_days"] == 45

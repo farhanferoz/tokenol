@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import Counter
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -18,6 +20,10 @@ from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.rollups import _rank_counter_with_others
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
+
+if TYPE_CHECKING:
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.store import HistoryStore
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
 from tokenol.serve.state import (
     VALID_METRICS,
@@ -41,7 +47,7 @@ from tokenol.serve.state import (
 from tokenol.serve.streaming import SnapshotBroadcaster
 
 _WINDOW_MINUTES: dict[str, int] = {"15m": 15, "60m": 60, "4h": 240, "24h": 1440}
-_KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "thresholds"})
+_KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "hot_window_days", "thresholds"})
 _BREAKDOWN_RANGES: frozenset[str] = frozenset({"7d", "30d", "90d", "all"})
 
 
@@ -90,11 +96,28 @@ def _is_compare_form(param: str) -> bool:
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _warn_if_orphan_store_exists() -> None:
+    """Warn on stderr if a history store exists but persistence is off."""
+    from rich.console import Console
+
+    _env = os.environ.get("TOKENOL_HISTORY_PATH")
+    store_path = Path(_env) if _env else Path.home() / ".tokenol" / "history.duckdb"
+    try:
+        size_mb = store_path.stat().st_size / (1024 * 1024)
+    except OSError:
+        return
+    Console(stderr=True).print(
+        f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).\n"
+        f"Persistence is OFF — pass --persist to use it.[/yellow]"
+    )
+
+
 @dataclass
 class ServerConfig:
     all_projects: bool = False
     reference_usd: float = 50.0
     tick_seconds: int = 5
+    persist: bool = False
 
 
 def _build_and_cache_snapshot(request: Request, period: str = "today") -> SnapshotResult:
@@ -108,6 +131,8 @@ def _build_and_cache_snapshot(request: Request, period: str = "today") -> Snapsh
         tick_seconds=prefs.tick_seconds,
         period=period,
         thresholds=prefs.thresholds,
+        history_store=request.app.state.history_store,
+        flush_queue=request.app.state.flush_queue,
     )
     request.app.state.snapshot_result = result
     return result
@@ -134,20 +159,61 @@ def create_app(
     prefs = Preferences.load(_prefs_path)
 
     parse_cache = ParseCache()
+
+    history_store: HistoryStore | None = None
+    flush_queue: FlushQueue | None = None
+    write_pidfile_fn = None
+    clear_pidfile_fn = None
+
+    if config.persist:
+        from tokenol.persistence.flusher import FlushQueue as _FlushQueue
+        from tokenol.persistence.forget_handoff import (
+            clear_pidfile as _clear_pidfile,
+        )
+        from tokenol.persistence.forget_handoff import (
+            write_pidfile as _write_pidfile,
+        )
+        from tokenol.persistence.store import (
+            HistoryStore as _HistoryStore,
+        )
+
+        history_store = _HistoryStore()
+        # Hot-tier window is read by _store_backed_derivation as a duck-typed attr.
+        history_store._hot_window_days = prefs.hot_window_days
+        flush_queue = _FlushQueue(history_store)
+        write_pidfile_fn = _write_pidfile
+        clear_pidfile_fn = _clear_pidfile
+    else:
+        _warn_if_orphan_store_exists()
+
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
         all_projects=config.all_projects,
         get_reference_usd=lambda: prefs.reference_usd,
         get_tick_seconds=lambda: prefs.tick_seconds,
         get_thresholds=lambda: prefs.thresholds,
+        history_store=history_store,
+        flush_queue=flush_queue,
     )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if config.persist:
+            assert write_pidfile_fn is not None
+            assert flush_queue is not None
+            write_pidfile_fn()
+            await flush_queue.start()
         try:
             yield
         finally:
             await broadcaster.shutdown()
+            if config.persist:
+                assert flush_queue is not None
+                assert history_store is not None
+                assert clear_pidfile_fn is not None
+                await flush_queue.stop()
+                history_store.close()
+                clear_pidfile_fn()
 
     app = FastAPI(title="tokenol", lifespan=lifespan)
     app.state.config = config
@@ -156,6 +222,8 @@ def create_app(
     app.state.parse_cache = parse_cache
     app.state.snapshot_result = None
     app.state.broadcaster = broadcaster
+    app.state.history_store = history_store
+    app.state.flush_queue = flush_queue
 
     if STATIC_DIR.exists():
         app.mount("/assets", StaticFiles(directory=str(STATIC_DIR)), name="assets")
@@ -229,6 +297,37 @@ def create_app(
         if range not in ("1d", "7d", "14d", "30d", "all"):
             raise HTTPException(status_code=400, detail="Invalid range — use 1d, 7d, 14d, 30d, or all")
         result = _current_snapshot_result(request)
+        if range == "all" and request.app.state.history_store is not None:
+            loop = asyncio.get_running_loop()
+            warm_turns = await loop.run_in_executor(
+                None,
+                lambda: request.app.state.history_store.query_turns(project=cwd),
+            )
+            if warm_turns:
+                existing_keys = {t.dedup_key for t in result.turns}
+                merged_turns = list(result.turns) + [
+                    t for t in warm_turns if t.dedup_key not in existing_keys
+                ]
+                merged_turns.sort(key=lambda t: t.timestamp)
+
+                # Build a superset of sessions: existing + warm-tier sessions for this cwd.
+                warm_sids = {t.session_id for t in warm_turns}
+                existing_sids = {s.session_id for s in result.sessions}
+                missing_sids = warm_sids - existing_sids
+                warm_sessions: list = []
+                for sid in missing_sids:
+                    s = await loop.run_in_executor(
+                        None,
+                        lambda sid=sid: request.app.state.history_store.query_session(sid),
+                    )
+                    if s is not None:
+                        s.archived = True  # JSONL is gone — content snippets unavailable
+                        warm_sessions.append(s)
+                result = replace(
+                    result,
+                    turns=merged_turns,
+                    sessions=list(result.sessions) + warm_sessions,
+                )
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_project_detail(cwd, result.sessions, range_key=range),
@@ -300,6 +399,23 @@ def create_app(
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
         result = _current_snapshot_result(request)
+        # Warm-tier merge: when range=all and a store is wired, fold in any persisted
+        # turns older than the in-memory hot window so the chart includes them.
+        if range == "all" and request.app.state.history_store is not None:
+            prefs: Preferences = request.app.state.prefs
+            hot_cutoff = date.today() - timedelta(days=prefs.hot_window_days)
+            loop = asyncio.get_running_loop()
+            warm_turns = await loop.run_in_executor(
+                None,
+                lambda: request.app.state.history_store.query_turns(until=hot_cutoff),
+            )
+            if warm_turns:
+                existing_keys = {t.dedup_key for t in result.turns}
+                merged = list(result.turns) + [
+                    t for t in warm_turns if t.dedup_key not in existing_keys
+                ]
+                merged.sort(key=lambda t: t.timestamp)
+                result = replace(result, turns=merged)
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
         # Returning 400 here forced clients to special-case "policy" failures even though
@@ -390,6 +506,15 @@ def create_app(
             if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
                 raise HTTPException(status_code=400, detail="reference_usd must be a positive number")
             prefs.reference_usd = float(v)
+
+        if "hot_window_days" in body:
+            v = body["hot_window_days"]
+            if not isinstance(v, int) or isinstance(v, bool) or not (1 <= v <= 3650):
+                raise HTTPException(
+                    status_code=400,
+                    detail="hot_window_days must be an integer between 1 and 3650 (takes effect on next startup)",
+                )
+            prefs.hot_window_days = v
 
         if "thresholds" in body:
             t = body["thresholds"]
