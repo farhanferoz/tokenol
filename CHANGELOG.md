@@ -37,6 +37,31 @@ All notable changes to tokenol are documented here. The format follows
   corpus derivation path is used unchanged, so CLI report commands and
   any existing test that constructs a bare `ParseCache` keep working.
 
+## 0.4.0 — 2026-05-03
+
+### Features
+- `tokenol serve --persist` enables a DuckDB-backed history store at
+  `~/.tokenol/history.duckdb`. Sessions are durable across JSONL deletion
+  and tokenol restarts. Default off — `tokenol serve` matches the v0.3.2
+  resource profile byte-for-byte (no `import duckdb`, no `~/.tokenol/`
+  directory, no extra steady RSS).
+
+### Changes
+- `duckdb` moved from a core dependency to the new `[persist]` optional
+  extras group. Default `pip install tokenol` no longer pulls the DuckDB
+  binary wheel (~30 MB saved). Users who pass `--persist` install with
+  `pip install 'tokenol[persist]'`.
+- Default mode prints a yellow `WARNING` at startup if it finds an existing
+  `~/.tokenol/history.duckdb`, prompting the user to pass `--persist` if
+  they want to use it (rather than silently ignoring the file).
+
+### Notes
+- See `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` for
+  the gating-and-extras design.
+- Underlying persistent-history store design is unchanged from
+  `feature/persistent-history-pr1` — see
+  `docs/superpowers/specs/2026-05-02-persistent-history-design.md`.
+
 ## [0.3.2] — 2026-04-28
 
 ### Fixed

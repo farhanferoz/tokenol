@@ -33,9 +33,8 @@ Project page — cache efficiency trend, verdict distribution, top turns:
 
 ## Install
 
-```bash
-pipx install tokenol
-```
+    pip install tokenol             # core dashboard, no persistence
+    pip install 'tokenol[persist]'  # adds DuckDB-backed history that survives JSONL deletion
 
 Requires Python 3.10+. See [tokenol on PyPI](https://pypi.org/project/tokenol/).
 
@@ -116,6 +115,22 @@ tokenol serve --open
 ```
 
 The dashboard updates via SSE as Claude Code writes events to disk. The server gates rebuilds on JSONL file changes — when no files have changed, it idles at near-zero CPU and forces a refresh at most once a minute (so time-windowed panels like Recent Activity don't drift more than ~60 s from wall clock). Multiple browser tabs share a single producer, so opening more tabs does not multiply server cost.
+
+### Persistent history (opt-in)
+
+By default, `tokenol serve` parses your `~/.claude*/projects/**/*.jsonl` files
+into an in-memory model on each restart — fast, but the dashboard loses any
+session whose JSONL has been deleted or rotated.
+
+Pass `--persist` to enable a DuckDB-backed history store at
+`~/.tokenol/history.duckdb`. Sessions are durable across JSONL deletion and
+restarts. Cost on a moderate corpus (~500 sessions): ~+500 MiB steady RSS,
+~30 MB durable disk, a one-time multi-minute backfill on the first start.
+Requires the persist extras (`pip install 'tokenol[persist]'`).
+
+See `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` for
+design rationale and `docs/superpowers/specs/2026-05-02-persistent-history-design.md`
+for the underlying store design.
 
 #### Persistent history (`~/.tokenol/history.duckdb`)
 
