@@ -76,3 +76,21 @@ def test_default_warns_when_orphan_store_exists(tmp_path, monkeypatch, capsys):
     # Rich strips ANSI when not in a TTY; the literal text still appears.
     assert "Found existing history store" in captured.err
     assert "--persist" in captured.err
+
+
+def test_default_warns_when_orphan_store_at_custom_env_path(tmp_path, monkeypatch, capsys):
+    """Orphan-store warning fires for TOKENOL_HISTORY_PATH, not the default ~/.tokenol/ path."""
+    custom_db = tmp_path / "custom" / "my_history.duckdb"
+    custom_db.parent.mkdir()
+    custom_db.write_bytes(b"x" * 2048)
+    monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(custom_db))
+    # Set HOME to a clean dir so the default path definitely doesn't exist.
+    monkeypatch.setenv("HOME", str(tmp_path / "clean_home"))
+    from tokenol.serve.app import ServerConfig, create_app
+    create_app(ServerConfig())
+    captured = capsys.readouterr()
+    # Rich may word-wrap long paths; collapse newlines before asserting.
+    err_flat = captured.err.replace("\n", "")
+    assert "Found existing history store" in err_flat
+    assert str(custom_db) in err_flat
+    assert "--persist" in err_flat

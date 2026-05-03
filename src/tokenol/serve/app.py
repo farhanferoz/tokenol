@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -104,7 +105,8 @@ def _warn_if_orphan_store_exists() -> None:
     """
     from rich.console import Console
 
-    store_path = Path.home() / ".tokenol" / "history.duckdb"
+    _env = os.environ.get("TOKENOL_HISTORY_PATH")
+    store_path = Path(_env) if _env else Path.home() / ".tokenol" / "history.duckdb"
     if not store_path.exists():
         return
     try:
