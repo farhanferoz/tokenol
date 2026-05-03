@@ -33,8 +33,9 @@ Project page — cache efficiency trend, verdict distribution, top turns:
 
 ## Install
 
-    pip install tokenol             # core dashboard, no persistence
-    pip install 'tokenol[persist]'  # adds DuckDB-backed history that survives JSONL deletion
+    pip install tokenol                        # CLI commands (daily, sessions, projects, ...)
+    pip install 'tokenol[serve]'               # adds the live dashboard (tokenol serve)
+    pip install 'tokenol[serve,persist]'       # adds DuckDB-backed history that survives JSONL deletion
 
 Requires Python 3.10+. See [tokenol on PyPI](https://pypi.org/project/tokenol/).
 
@@ -116,32 +117,32 @@ tokenol serve --open
 
 The dashboard updates via SSE as Claude Code writes events to disk. The server gates rebuilds on JSONL file changes — when no files have changed, it idles at near-zero CPU and forces a refresh at most once a minute (so time-windowed panels like Recent Activity don't drift more than ~60 s from wall clock). Multiple browser tabs share a single producer, so opening more tabs does not multiply server cost.
 
+If SSE delivery silently stalls (browser tab throttling, extension hooks, long-lived `EventSource` quirks), the client self-heals: it polls `/api/snapshot` every 30 s as a backstop, force-reconnects on tab-visibility return, and runs a 90 s staleness watchdog. `/api/snapshot` reuses the broadcaster's cached payload while an SSE group is live, so the backstop costs only a JSON serialize. Hover the live-status dot for a "last update Ns ago" indicator.
+
 ### Persistent history (opt-in)
 
-By default, `tokenol serve` parses your `~/.claude*/projects/**/*.jsonl` files
-into an in-memory model on each restart — fast, but the dashboard loses any
-session whose JSONL has been deleted or rotated.
+By default, `tokenol serve` parses your `~/.claude*/projects/**/*.jsonl` files into an in-memory model on each restart — fast, but the dashboard loses any session whose JSONL has been deleted or rotated.
 
-Pass `--persist` to enable a DuckDB-backed history store at
-`~/.tokenol/history.duckdb`. Sessions are durable across JSONL deletion and
-restarts. Cost on a moderate corpus (~500 sessions): ~+500 MiB steady RSS,
-~30 MB durable disk, a one-time multi-minute backfill on the first start.
-Requires the persist extras (`pip install 'tokenol[persist]'`).
+Pass `--persist` to enable a DuckDB-backed history store at `~/.tokenol/history.duckdb` (override with `TOKENOL_HISTORY_PATH`). The store contains **no message content** — only token counts, costs, models, timestamps, tool counts, and session metadata, comparable to a billing receipt. With persistence on:
 
-See `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` for
-design rationale and `docs/superpowers/specs/2026-05-02-persistent-history-design.md`
-for the underlying store design.
+- **Deleting a JSONL no longer drops it from the dashboard.** Quantitative panels render as before; only the per-turn modal's verbatim content snippets become unavailable, indicated by an "Archived — text snippets unavailable" badge. Metrics survive; words don't (matching the privacy intent of the deletion).
+- **Restart picks up where you left off.** A background flusher batches writes (every 30 s or 100 turns, whichever first) and force-drains on graceful shutdown. The JSONLs remain the durable substrate — a process crash mid-flush loses nothing because the next start re-derives the missing window from the JSONLs (idempotent on `message.id:requestId`).
+- **Cold start stays bounded.** The hot tier loads only the last `hot_window_days` of turns (default 90, tunable via `/api/prefs`); older history is read on demand from the warm tier.
 
-#### Persistent history (`~/.tokenol/history.duckdb`)
+Measured cost on the author's full `~/.claude*` corpus (~1820 files, ~2 GB of JSONLs, page cache cold both runs):
 
-`tokenol serve` mirrors derived turn and session metrics into a single-file DuckDB database at `~/.tokenol/history.duckdb` (override the location with `TOKENOL_HISTORY_PATH`). The store contains **no message content** — only token counts, costs, models, timestamps, tool counts, and session metadata, comparable to a billing receipt. It backs the in-memory dashboard so:
+| | Default mode | `--persist` first start | `--persist` subsequent starts |
+|---|---|---|---|
+| Time to first paint | ~5 s | ~12 s | ~12 s |
+| Wall to settle | ~5 s | ~4 min (one-time backfill) | <30 s |
+| Steady RSS | ~250 MiB | — | ~750 MiB |
+| Durable disk | 0 | ~40 MB after backfill | grows incrementally |
 
-- **Cold start is bounded by `hot_window_days`** (default 90, tunable via the `/api/prefs` endpoint), not by total history length. With a populated store the dashboard is interactive within ~1–2 s regardless of how many years of JSONLs exist.
-- **Deleting a JSONL no longer drops its data from the dashboard.** The affected sessions render every quantitative panel as before; only the per-turn modal's verbatim content snippets become unavailable, indicated by an "Archived — text snippets unavailable" badge. Metrics survive; words don't (matching the privacy intent of the deletion).
+Requires the persist extras (`pip install 'tokenol[serve,persist]'`).
 
-A background flusher batches writes (every 30 s or 100 turns, whichever first) and force-drains on graceful shutdown. The JSONLs remain the durable substrate — a process crash mid-flush loses nothing because the next start re-derives the missing window from the JSONLs (idempotent on `message.id:requestId`).
+See `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` for design rationale and `docs/superpowers/specs/2026-05-02-persistent-history-design.md` for the underlying store design.
 
-If SSE delivery silently stalls (browser tab throttling, extension hooks, long-lived `EventSource` quirks), the client self-heals: it polls `/api/snapshot` every 30 s as a backstop, force-reconnects on tab-visibility return, and runs a 90 s staleness watchdog. `/api/snapshot` reuses the broadcaster's cached payload while an SSE group is live, so the backstop costs only a JSON serialize. Hover the live-status dot for a "last update Ns ago" indicator.
+### Main dashboard
 
 Main page layout (top to bottom):
 
