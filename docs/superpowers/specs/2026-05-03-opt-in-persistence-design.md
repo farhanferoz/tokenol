@@ -12,7 +12,8 @@ Ship `feature/persistent-history-pr1`'s DuckDB-backed history store as an opt-in
 ## Non-goals
 
 - A prefs.json key for persistence. Adding `prefs.persist: bool` later is fine if demand surfaces; we don't add it preemptively.
-- Auto-detection of an existing `~/.tokenol/history.duckdb`. If a user previously ran with `--persist`, removed the flag, and then wants persistence back, they re-add `--persist`. We do not silently re-enable persistence based on disk state — that would be surprising magic.
+- A `--persist <path>` form that points at a non-default location. `--persist` stays a boolean; the store lives at `~/.tokenol/history.duckdb` always. Path overrides can be added later as `--persist-path <path>` if real users ask. YAGNI for now.
+- Auto-detection of an existing `~/.tokenol/history.duckdb`. If a user previously ran with `--persist`, removed the flag, and then wants persistence back, they re-add `--persist`. We do not silently re-enable persistence based on disk state — that would be surprising magic. (We do warn, loudly — see the error-handling section.)
 - Removing PR1's persistence code or downgrading any of its capabilities. The store, flusher, forget-handoff, hot/warm tiering, archived-session detail UI, and warm-tier merge for `/api/daily` and `/api/project` all stay. The only difference is whether they're wired up at startup.
 - Per-tenant or per-project persistence toggles. The flag is process-wide.
 - Hot-reload of the flag without restart. Toggling persistence requires a restart of `tokenol serve`.
@@ -220,7 +221,14 @@ The two modes never interact within a single process. Switching modes between ru
 ## Error handling
 
 - **`--persist` fails to construct `HistoryStore`** (disk-permission denied, corrupt DB file, DuckDB import failure): startup fails fast with a clear error message naming the path and suggesting either fixing the permission or running without `--persist`. Do not silently fall back to default mode — that would mask broken state and surprise the user with missing persistence.
-- **Default mode encounters an old `~/.tokenol/`**: log a single info-level line on startup ("found existing history store at ~/.tokenol/history.duckdb; pass --persist to use it") and continue. No data loss, no surprise.
+- **Default mode encounters an old `~/.tokenol/history.duckdb`**: print a yellow `WARNING`-level rich-formatted line at startup, before uvicorn boots so it's not buried in request logs:
+
+  ```
+  [yellow]Found existing history store at ~/.tokenol/history.duckdb (NN MB).[/yellow]
+  [yellow]Persistence is OFF — pass --persist to use it.[/yellow]
+  ```
+
+  Hard-to-miss treatment chosen deliberately: this user (and likely others upgrading from a `feature/persistent-history-pr1` editable install) hit exactly this confusion in May 2026. A quiet INFO line wouldn't have surfaced the mismatch.
 - **Test code that constructs `create_app()` without arguments**: gets `persist=False` automatically. Tests that need persistence pass `ServerConfig(persist=True)` explicitly.
 
 ## Testing
