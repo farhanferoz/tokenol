@@ -366,6 +366,17 @@ def serve(
     reference: float = typer.Option(50.0, "--reference", help="$/window alarm threshold."),
     open_browser: bool = typer.Option(False, "--open", help="Open dashboard in default browser."),
     all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
+    persist: bool = typer.Option(
+        False,
+        "--persist",
+        help=(
+            "Enable persistent history store at ~/.tokenol/history.duckdb. "
+            "Dashboard survives JSONL deletion. Adds ~500 MiB steady RSS and a "
+            "one-time multi-minute backfill on first start. "
+            "Default off — matches v0.3.2 resource usage. "
+            "Requires the persist extras: pip install 'tokenol[persist]'."
+        ),
+    ),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
 ) -> None:
     """Start the live dashboard server."""
@@ -384,10 +395,21 @@ def serve(
         )
         raise typer.Exit(code=1) from None
 
+    if persist:
+        try:
+            import duckdb  # noqa: F401  — probe only
+        except ImportError:
+            err.print(
+                "[red]--persist requires the 'persist' extras.[/red] "
+                "Run: pip install 'tokenol[persist]'"
+            )
+            raise typer.Exit(code=1) from None
+
     config = ServerConfig(
         all_projects=all_projects,
         reference_usd=reference,
         tick_seconds=tick_seconds,
+        persist=persist,
     )
     application = create_app(config)
     url = f"http://127.0.0.1:{port}"
