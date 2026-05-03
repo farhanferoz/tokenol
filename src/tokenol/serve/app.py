@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -17,10 +18,11 @@ from starlette.responses import StreamingResponse
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.rollups import _rank_counter_with_others
 from tokenol.metrics.thresholds import DEFAULTS
-from tokenol.persistence.flusher import FlushQueue
-from tokenol.persistence.forget_handoff import clear_pidfile, write_pidfile
-from tokenol.persistence.store import HistoryStore
 from tokenol.serve.prefs import Preferences, default_path
+
+if TYPE_CHECKING:
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.store import HistoryStore
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
 from tokenol.serve.state import (
     VALID_METRICS,
