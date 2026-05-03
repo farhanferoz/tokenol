@@ -98,6 +98,7 @@ class ServerConfig:
     all_projects: bool = False
     reference_usd: float = 50.0
     tick_seconds: int = 5
+    persist: bool = False
 
 
 def _build_and_cache_snapshot(request: Request, period: str = "today") -> SnapshotResult:
