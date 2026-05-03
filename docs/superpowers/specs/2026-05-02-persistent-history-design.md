@@ -1,5 +1,7 @@
 # Persistent history — design
 
+> **Update 2026-05-03:** shipped opt-in only via `--persist`. See `2026-05-03-opt-in-persistence-design.md` for the gating design and rationale.
+
 A durable on-disk store for tokenol's derived analytics so the dashboard survives deletion or rotation of the source `~/.claude*/projects/**/*.jsonl` files. Today every metric is recomputed from JSONL on each cold start and every restart re-parses the full history; deleting a JSONL silently drops its data from the dashboard. This design adds a single-file DuckDB store of derived `Turn` and `Session` rows (no message content), backing the existing in-memory model so the live dashboard is functionally identical with full history regardless of which JSONLs still exist on disk.
 
 ## Goals
