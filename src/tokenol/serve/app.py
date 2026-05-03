@@ -95,6 +95,31 @@ def _is_compare_form(param: str) -> bool:
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _warn_if_orphan_store_exists() -> None:
+    """Yellow WARNING when default mode finds an existing ~/.tokenol/history.duckdb.
+
+    Prevents users who previously ran with --persist (or via the editable
+    feature/persistent-history-pr1 install) from silently losing their
+    persisted dashboard history when they upgrade to default 0.4.0+.
+    """
+    from rich.console import Console
+
+    store_path = Path.home() / ".tokenol" / "history.duckdb"
+    if not store_path.exists():
+        return
+    try:
+        size_mb = store_path.stat().st_size / (1024 * 1024)
+    except OSError:
+        return
+    console = Console(stderr=True)
+    console.print(
+        f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).[/yellow]"
+    )
+    console.print(
+        "[yellow]Persistence is OFF — pass --persist to use it.[/yellow]"
+    )
+
+
 @dataclass
 class ServerConfig:
     all_projects: bool = False
@@ -142,10 +167,28 @@ def create_app(
     prefs = Preferences.load(_prefs_path)
 
     parse_cache = ParseCache()
-    history_store = HistoryStore()
-    # Hot-tier window is read by _store_backed_derivation as a duck-typed attr.
-    history_store._hot_window_days = prefs.hot_window_days
-    flush_queue = FlushQueue(history_store)
+
+    history_store: HistoryStore | None = None
+    flush_queue: FlushQueue | None = None
+    write_pidfile_fn = None  # bound below if persist is on
+    clear_pidfile_fn = None
+
+    if config.persist:
+        from tokenol.persistence.flusher import FlushQueue as _FlushQueue
+        from tokenol.persistence.forget_handoff import (
+            clear_pidfile as _clear_pidfile,
+            write_pidfile as _write_pidfile,
+        )
+        from tokenol.persistence.store import HistoryStore as _HistoryStore
+
+        history_store = _HistoryStore()
+        # Hot-tier window is read by _store_backed_derivation as a duck-typed attr.
+        history_store._hot_window_days = prefs.hot_window_days
+        flush_queue = _FlushQueue(history_store)
+        write_pidfile_fn = _write_pidfile
+        clear_pidfile_fn = _clear_pidfile
+    else:
+        _warn_if_orphan_store_exists()
 
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
@@ -159,15 +202,22 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        write_pidfile()
-        await flush_queue.start()
+        if config.persist:
+            assert write_pidfile_fn is not None
+            assert flush_queue is not None
+            write_pidfile_fn()
+            await flush_queue.start()
         try:
             yield
         finally:
             await broadcaster.shutdown()
-            await flush_queue.stop()
-            history_store.close()
-            clear_pidfile()
+            if config.persist:
+                assert flush_queue is not None
+                assert history_store is not None
+                assert clear_pidfile_fn is not None
+                await flush_queue.stop()
+                history_store.close()
+                clear_pidfile_fn()
 
     app = FastAPI(title="tokenol", lifespan=lifespan)
     app.state.config = config
