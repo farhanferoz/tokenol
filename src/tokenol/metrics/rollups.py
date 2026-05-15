@@ -425,6 +425,18 @@ def _rank_counter_with_others(total: Counter[str], top_n: int) -> list[dict]:
     return rows
 
 
+def _rank_dict_with_others(values: dict[str, float], top_n: int) -> list[dict]:
+    """Top-N by value, sum the rest into one 'other' row. Returns list of
+    {name, value, [count]} dicts."""
+    ranked = sorted(values.items(), key=lambda kv: kv[1], reverse=True)
+    head = ranked[:top_n]
+    tail = ranked[top_n:]
+    out = [{"name": name, "value": v} for name, v in head]
+    if tail:
+        out.append({"name": "other", "value": sum(v for _, v in tail), "count": len(tail)})
+    return out
+
+
 def build_tool_mix(
     session_rollups: list[SessionRollup],
     top_n: int = 10,

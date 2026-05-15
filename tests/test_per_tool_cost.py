@@ -370,3 +370,22 @@ def test_build_tool_cost_daily_zero_fills():
     nonzero = [p for p in series if p.cost_usd > 0]
     assert len(nonzero) == 1
     assert nonzero[0].date == today
+
+
+def test_rank_dict_with_others_top_n_plus_other():
+    from tokenol.metrics.rollups import _rank_dict_with_others
+    d = {"Read": 10.0, "Bash": 7.0, "Grep": 5.0, "Edit": 3.0, "Glob": 1.5}
+    out = _rank_dict_with_others(d, top_n=3)
+    names = [r["name"] for r in out]
+    assert names == ["Read", "Bash", "Grep", "other"]
+    assert out[-1]["name"] == "other"
+    assert abs(out[-1]["value"] - 4.5) < 1e-9
+    assert out[-1].get("count") == 2
+
+
+def test_rank_dict_with_others_skips_other_when_short():
+    from tokenol.metrics.rollups import _rank_dict_with_others
+    d = {"Read": 10.0, "Bash": 7.0}
+    out = _rank_dict_with_others(d, top_n=5)
+    names = [r["name"] for r in out]
+    assert names == ["Read", "Bash"]
