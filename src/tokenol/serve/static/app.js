@@ -418,28 +418,36 @@ const _METRIC_LABEL = {
   cache_reuse: 'Cache reuse', output: 'Output', cost: 'Cost',
 };
 
-function _renderLegend(elId, state) {
+function _renderLegend(elId, state, compare) {
   const el = document.getElementById(elId);
   if (!el) return;
-  el.hidden = false;
-  if (!state.secondary) {
-    el.innerHTML = '<em class="tl-legend-hint">click two pills to compare</em>';
+  if (state.secondary) {
+    el.hidden = false;
+    const primaryColor   = readCssVar('--amber') || '#a66408';
+    const secondaryColor = readCssVar('--series-secondary') || '#2a6389';
+    el.innerHTML =
+      `<span class="swatch" style="background:${primaryColor}"></span>` +
+      `${_METRIC_LABEL[state.primary] ?? state.primary} (left)` +
+      `<span class="swatch" style="background:${secondaryColor}; margin-left:1em"></span>` +
+      `${_METRIC_LABEL[state.secondary] ?? state.secondary} (right)`;
     return;
   }
-  const primaryColor   = readCssVar('--amber') || '#a66408';
-  const secondaryColor = readCssVar('--series-secondary') || '#2a6389';
-  el.innerHTML =
-    `<span class="swatch" style="background:${primaryColor}"></span>` +
-    `${_METRIC_LABEL[state.primary] ?? state.primary} (left)` +
-    `<span class="swatch" style="background:${secondaryColor}; margin-left:1em"></span>` +
-    `${_METRIC_LABEL[state.secondary] ?? state.secondary} (right)`;
+  if (compare) {
+    el.hidden = false;
+    el.innerHTML = '<em class="tl-legend-hint">pick a second metric to overlay</em>';
+    return;
+  }
+  el.hidden = true;
+  el.innerHTML = '';
 }
 
 // ---- y-scale (linear / log) per panel, persisted ----
-const _LS_H_SCALE  = 'tokenol.hourly.scale';
-const _LS_D_SCALE  = 'tokenol.daily.scale';
-const _LS_H_METRIC = 'tokenol.hourly.metric';
-const _LS_D_METRIC = 'tokenol.daily.metric';
+const _LS_H_SCALE   = 'tokenol.hourly.scale';
+const _LS_D_SCALE   = 'tokenol.daily.scale';
+const _LS_H_METRIC  = 'tokenol.hourly.metric';
+const _LS_D_METRIC  = 'tokenol.daily.metric';
+const _LS_H_COMPARE = 'tokenol.hourly.compare';
+const _LS_D_COMPARE = 'tokenol.daily.compare';
 const _scaleFor = (metric, stored) => {
   // Hit% is bounded [0,1], log would be meaningless there — force linear.
   if (metric === 'hit_pct') return 'linear';
@@ -471,6 +479,12 @@ function _formatMetricState(st) {
 
 // ---- hourly timeline ----
 let _hMetric    = _parseMetricState(localStorage.getItem(_LS_H_METRIC));
+let _hCompare   = localStorage.getItem(_LS_H_COMPARE) === '1';
+// Drop a stale secondary if compare mode was turned off in a previous session.
+if (!_hCompare && _hMetric.secondary) {
+  _hMetric = { primary: _hMetric.primary };
+  localStorage.setItem(_LS_H_METRIC, _formatMetricState(_hMetric));
+}
 let _hScaleRaw  = localStorage.getItem(_LS_H_SCALE) || 'linear';
 let _hDay       = null;   // null = today
 let _hEarliest  = null;
@@ -554,7 +568,7 @@ function _paintHourly(data, secondaryRaw) {
       location.href = `/day/${_toLocalDate(d)}#hour=${d.getHours()}`;
     },
   }, secondaryData);
-  _renderLegend('hourly-legend', _hMetric);
+  _renderLegend('hourly-legend', _hMetric, _hCompare);
 }
 
 // ---- dropdown ----
@@ -719,6 +733,15 @@ function _wireHourly() {
   _wireMetricPills('hourly-metric-pills', _LS_H_METRIC,
     () => _hMetric,
     st => { _hMetric = st; },
+    () => _hCompare,
+    () => _fetchHourly(),
+  );
+  _wireCompareToggle('hourly-compare-toggle', _LS_H_COMPARE,
+    () => _hCompare,
+    on => { _hCompare = on; },
+    () => _hMetric,
+    st => { _hMetric = st; },
+    _LS_H_METRIC,
     () => _fetchHourly(),
   );
   _wireRange('hourly-scale-pills',  s => {
@@ -758,6 +781,11 @@ const _DAILY_META = {
 };
 
 let _dMetric   = _parseMetricState(localStorage.getItem(_LS_D_METRIC));
+let _dCompare  = localStorage.getItem(_LS_D_COMPARE) === '1';
+if (!_dCompare && _dMetric.secondary) {
+  _dMetric = { primary: _dMetric.primary };
+  localStorage.setItem(_LS_D_METRIC, _formatMetricState(_dMetric));
+}
 let _dRange    = '30d';
 let _dEarliest = null;
 let _dScaleRaw = localStorage.getItem(_LS_D_SCALE) || 'linear';
@@ -870,7 +898,7 @@ function _paintDaily(data, secondaryRaw) {
     yScale: scale,
     onPointClick: ts => { location.href = `/day/${_toLocalDate(new Date(ts * 1000))}`; },
   }, secondaryData);
-  _renderLegend('daily-legend', _dMetric);
+  _renderLegend('daily-legend', _dMetric, _dCompare);
 }
 
 function _wireDaily() {
@@ -878,6 +906,15 @@ function _wireDaily() {
   _wireMetricPills('daily-metric-pills', _LS_D_METRIC,
     () => _dMetric,
     st => { _dMetric = st; },
+    () => _dCompare,
+    () => _fetchDaily(),
+  );
+  _wireCompareToggle('daily-compare-toggle', _LS_D_COMPARE,
+    () => _dCompare,
+    on => { _dCompare = on; },
+    () => _dMetric,
+    st => { _dMetric = st; },
+    _LS_D_METRIC,
     () => _fetchDaily(),
   );
   _wireRange('daily-scale-pills',  s => {
@@ -1005,7 +1042,7 @@ function _wireRange(groupId, onChange) {
   });
 }
 
-function _wireMetricPills(groupId, lsKey, getState, setState, onChange) {
+function _wireMetricPills(groupId, lsKey, getState, setState, getCompare, onChange) {
   const group = document.getElementById(groupId);
   if (!group) return;
   const renderPills = () => {
@@ -1023,25 +1060,55 @@ function _wireMetricPills(groupId, lsKey, getState, setState, onChange) {
       const m   = btn.dataset.metric;
       const cur = getState();
       let next;
-      if (m === cur.primary) {
-        // Primary → secondary (the other slot, if it existed, becomes primary).
-        // Edge case: if only one pill was selected and it's clicked again, no-op.
-        next = cur.secondary ? { primary: cur.secondary, secondary: m } : cur;
+      if (!getCompare()) {
+        if (m === cur.primary) return;  // no-op
+        next = { primary: m };
+      } else if (m === cur.primary) {
+        // Click on primary in compare mode: deselect it. Secondary (if any) is
+        // promoted to primary so the chart never becomes empty.
+        next = cur.secondary ? { primary: cur.secondary } : cur;
+        if (next === cur) return;
       } else if (m === cur.secondary) {
-        // Secondary → unselected. Primary stays primary.
         next = { primary: cur.primary };
+      } else if (!cur.primary) {
+        next = { primary: m };
+      } else if (!cur.secondary) {
+        next = { primary: cur.primary, secondary: m };
       } else {
-        // Unselected click → becomes primary. Old primary becomes secondary.
-        next = cur.primary
-          ? { primary: m, secondary: cur.primary }
-          : { primary: m };
+        // Both slots full: newest click replaces secondary.
+        next = { primary: cur.primary, secondary: m };
       }
-      if (next === cur) return;
       setState(next);
       localStorage.setItem(lsKey, _formatMetricState(next));
       renderPills();
       onChange(next);
     });
+  });
+}
+
+function _wireCompareToggle(groupId, lsKey, getOn, setOn, getMetric, setMetric, metricLsKey, onChange) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  const btn = group.querySelector('[data-compare-toggle]');
+  if (!btn) return;
+  const sync = () => btn.classList.toggle('on', getOn());
+  sync();
+  btn.addEventListener('click', () => {
+    const next = !getOn();
+    setOn(next);
+    localStorage.setItem(lsKey, next ? '1' : '0');
+    // Turning compare off drops any active secondary so the chart returns to
+    // single-series mode and persisted state stays consistent.
+    if (!next) {
+      const cur = getMetric();
+      if (cur.secondary) {
+        const trimmed = { primary: cur.primary };
+        setMetric(trimmed);
+        localStorage.setItem(metricLsKey, _formatMetricState(trimmed));
+      }
+    }
+    sync();
+    onChange();
   });
 }
 
