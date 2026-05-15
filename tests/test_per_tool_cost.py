@@ -259,3 +259,34 @@ def test_compaction_resets_tallies(tmp_path):
     post = assistants[1]
     assert "Read" not in post.tool_costs
     assert post.unattributed_input_tokens >= 0
+
+
+def test_unknown_tool_use_id_goes_to_unknown_bucket(tmp_path):
+    """A tool_result whose tool_use_id has no matching prior tool_use block
+    (e.g. compaction lost the call) lands in __unknown__ — never crashes."""
+    lines = [
+        {
+            "type": "user", "timestamp": "2026-05-15T10:00:00Z",
+            "sessionId": "s1", "uuid": "u1", "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "ghost", "content": "leftover"}
+            ]},
+        },
+        {
+            "type": "assistant", "timestamp": "2026-05-15T10:01:00Z",
+            "sessionId": "s1", "requestId": "r1", "uuid": "u2", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m1", "role": "assistant", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 50, "output_tokens": 10,
+                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "text", "text": "ok"}],
+            },
+        },
+    ]
+    p = _write_jsonl(tmp_path, "s1.jsonl", lines)
+    events = list(parse_file(p))
+    assistants = [e for e in events if e.event_type == "assistant"]
+    t1 = assistants[0]
+    assert "__unknown__" in t1.tool_costs
+    assert t1.tool_costs["__unknown__"].input_tokens > 0
