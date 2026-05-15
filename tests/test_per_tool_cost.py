@@ -319,3 +319,18 @@ def test_golden_fixture_reconciliation():
 
     reconciled = total_attributed_cost + total_unattr_cost
     assert abs(reconciled - total_turn_cost) / max(total_turn_cost, 1e-9) < 0.05
+
+
+def test_builder_propagates_tool_costs():
+    from tokenol.ingest.builder import build_sessions, build_turns
+    fixture = FIXTURES / "per_tool_basic.jsonl"
+    turns = build_turns([fixture])
+    sessions = build_sessions(turns, [fixture])
+    assert len(sessions) == 1
+    session = sessions[0]
+    assert len(session.turns) == 3
+
+    t1 = session.turns[0]
+    assert "Read" in t1.tool_costs
+    assert t1.tool_costs["Read"].output_tokens > 0
+    assert t1.unattributed_cost_usd >= 0

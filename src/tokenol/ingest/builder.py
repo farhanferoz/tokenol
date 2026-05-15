@@ -40,6 +40,10 @@ def build_turns(paths: list[Path]) -> list[Turn]:
                 tool_use_count=ev.tool_use_count,
                 tool_error_count=ev.tool_error_count,
                 tool_names=ev.tool_names,
+                tool_costs=ev.tool_costs,
+                unattributed_input_tokens=ev.unattributed_input_tokens,
+                unattributed_output_tokens=ev.unattributed_output_tokens,
+                unattributed_cost_usd=ev.unattributed_cost_usd,
             )
         )
 
