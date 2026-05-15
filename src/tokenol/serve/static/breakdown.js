@@ -415,7 +415,6 @@ async function loadThresholdsFromPrefs() {
   }
 }
 
-let _chartTools = null; // dead after this task; safe to remove in a follow-up
 let _toolsData = null;
 
 function renderToolMix(data) {

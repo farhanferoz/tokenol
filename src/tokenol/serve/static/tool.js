@@ -1,13 +1,6 @@
-import { renderRankedBars } from '/assets/components.js';
+import { renderRankedBars, fmtUSD, fmtTok } from '/assets/components.js';
 
 const $ = (id) => document.getElementById(id);
-const fmtUSD = (n) => '$' + (n || 0).toFixed(2);
-const fmtCompact = (n) => {
-  n = n || 0;
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
-  return String(Math.round(n));
-};
 
 const name = decodeURIComponent(location.pathname.split('/').pop() || '');
 
@@ -20,8 +13,8 @@ function renderScorecards(sc) {
     },
     {
       label: 'Output tokens',
-      primary: fmtCompact(sc.output_tokens),
-      sub: sc.invocations ? `avg ${fmtCompact(sc.output_tokens / sc.invocations)} / call` : '',
+      primary: fmtTok(sc.output_tokens),
+      sub: sc.invocations ? `avg ${fmtTok(sc.output_tokens / sc.invocations)} / call` : '',
     },
     {
       label: 'Invocations',
@@ -81,21 +74,6 @@ function renderDailyChart(daily, totalCost) {
   });
 }
 
-function renderBars(containerId, rows, hrefMaker) {
-  renderRankedBars(
-    $(containerId),
-    rows.map((r) => ({
-      label: r.project_label || r.name,
-      sublabel: r.last_active
-        ? `${r.invocations} call${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
-        : `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
-      value: r.cost_usd,
-      href: hrefMaker(r),
-    })),
-    { valueFormat: fmtUSD },
-  );
-}
-
 async function load() {
   $('tool-name').textContent = name;
   document.title = `tokenol — ${name}`;
@@ -108,12 +86,34 @@ async function load() {
     if (!data.by_project.length) {
       $('tool-no-projects').classList.remove('hidden');
     } else {
-      renderBars('tool-by-project', data.by_project, (r) => r.cwd_b64 ? '/project/' + r.cwd_b64 : undefined);
+      renderRankedBars(
+        $('tool-by-project'),
+        data.by_project.map((r) => ({
+          label: r.project_label || r.name,
+          sublabel: r.last_active
+            ? `${r.invocations} call${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
+            : `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
+          value: r.cost_usd,
+          href: r.cwd_b64 ? '/project/' + r.cwd_b64 : undefined,
+        })),
+        { valueFormat: fmtUSD },
+      );
     }
     if (!data.by_model.length) {
       $('tool-no-models').classList.remove('hidden');
     } else {
-      renderBars('tool-by-model', data.by_model, (r) => '/model/' + encodeURIComponent(r.name));
+      renderRankedBars(
+        $('tool-by-model'),
+        data.by_model.map((r) => ({
+          label: r.project_label || r.name,
+          sublabel: r.last_active
+            ? `${r.invocations} call${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
+            : `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
+          value: r.cost_usd,
+          href: '/model/' + encodeURIComponent(r.name),
+        })),
+        { valueFormat: fmtUSD },
+      );
     }
   } catch (err) {
     const el = $('tool-error');

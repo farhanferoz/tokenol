@@ -74,7 +74,7 @@ function render(d) {
         value: r.cost_usd,
         href: '/tool/' + encodeURIComponent(r.name),
       })),
-      { valueFormat: (n) => '$' + (n || 0).toFixed(2) },
+      { valueFormat: fmtUSD },
     );
   }
 }
