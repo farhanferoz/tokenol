@@ -380,7 +380,8 @@ function _normApiSeries(d, keyOf, tsOf, cmp) {
 
 // Paint a timeline chart into a container, rendering an empty-state placeholder when
 // data is absent. Shared by both hourly and daily panels.
-function _paintTimeline(containerId, data, emptyText, drawOpts) {
+// When secondaryData is provided, draws a dual-axis chart via {primary, secondary} shape.
+function _paintTimeline(containerId, data, emptyText, drawOpts, secondaryData) {
   const cont = $(containerId);
   if (!cont) return;
   if (!data.xs.length) {
@@ -388,7 +389,14 @@ function _paintTimeline(containerId, data, emptyText, drawOpts) {
     cont.innerHTML = `<div class="tl-insufficient">${emptyText}</div>`;
     return;
   }
-  drawChart(cont, { ...data, ...drawOpts });
+  if (secondaryData) {
+    drawChart(cont, {
+      primary: { ...data, ...drawOpts },
+      secondary: secondaryData,
+    });
+  } else {
+    drawChart(cont, { ...data, ...drawOpts });
+  }
 }
 
 // Guarded async fetcher: skips when already in-flight, paints on 2xx.
@@ -402,6 +410,28 @@ function _makeFetcher({ urlFn, xform, paint }) {
       if (res.ok) paint(xform(await res.json()));
     } finally { busy = false; }
   };
+}
+
+// ---- metric labels for legend ----
+const _METRIC_LABEL = {
+  hit_pct: 'Hit%', cost_per_kw: '$/kW', ctx_ratio: 'Ctx',
+  cache_reuse: 'Cache reuse', output: 'Output', cost: 'Cost',
+};
+
+function _renderLegend(elId, state) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!state.secondary) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  const primaryColor = getComputedStyle(document.documentElement)
+    .getPropertyValue('--amber').trim() || '#a66408';
+  const secondaryColor = getComputedStyle(document.documentElement)
+    .getPropertyValue('--series-secondary').trim() || '#2a6389';
+  el.innerHTML =
+    `<span class="swatch" style="background:${primaryColor}"></span>` +
+    `${_METRIC_LABEL[state.primary] ?? state.primary} (left)` +
+    `<span class="swatch" style="background:${secondaryColor}; margin-left:1em"></span>` +
+    `${_METRIC_LABEL[state.secondary] ?? state.secondary} (right)`;
 }
 
 // ---- y-scale (linear / log) per panel, persisted ----
@@ -465,38 +495,56 @@ function _renderHourly(payload) {
   if (!ht) return;
   if (_hEarliest === null) _hEarliest = ht.earliest_available;
   const canUseSnapshot = _hMetric.primary === 'hit_pct' && _hDay === null
+    && !_hMetric.secondary
     && _hProjFs.mode === 'all' && _hModelFs.mode === 'all';
   if (canUseSnapshot) {
     // Snapshot is today-scoped → its active lists are today's cwds/models.
     _hActiveProjects = ht.active_projects ?? [];
     _hActiveModels   = ht.active_models   ?? [];
-    _paintHourly(_snapshotToChartData(ht));
+    _paintHourly(_snapshotToChartData(ht), null);
   } else {
     _fetchHourly();
   }
 }
 
-const _fetchHourly = _makeFetcher({
-  urlFn: () => {
+let _hFetchBusy = false;
+async function _fetchHourly() {
+  if (_hFetchBusy) return;
+  _hFetchBusy = true;
+  try {
     const day = _hDay ?? _toLocalDate(new Date());
-    const p = new URLSearchParams({
-      metric: _hMetric.primary,
-      project: _filterParam(_hProjFs),
-      model:   _filterParam(_hModelFs),
-    });
-    return `/api/hourly/${day}?${p}`;
-  },
-  xform: _apiToChartData,
-  paint: data => {
-    _hActiveProjects = data._activeProjects ?? _hActiveProjects;
-    _hActiveModels   = data._activeModels   ?? _hActiveModels;
-    _paintHourly(data);
-  },
-});
+    const baseParams = { project: _filterParam(_hProjFs), model: _filterParam(_hModelFs) };
+    const primaryUrl = `/api/hourly/${day}?${new URLSearchParams({ metric: _hMetric.primary, ...baseParams })}`;
+    const promises = [fetch(primaryUrl).then(r => r.json())];
+    if (_hMetric.secondary) {
+      const secondaryUrl = `/api/hourly/${day}?${new URLSearchParams({ metric: _hMetric.secondary, ...baseParams })}`;
+      promises.push(fetch(secondaryUrl).then(r => r.json()));
+    }
+    const [p, s] = await Promise.all(promises);
+    const primaryData = _apiToChartData(p);
+    _hActiveProjects = primaryData._activeProjects ?? _hActiveProjects;
+    _hActiveModels   = primaryData._activeModels   ?? _hActiveModels;
+    _paintHourly(primaryData, s ?? null);
+  } finally { _hFetchBusy = false; }
+}
 
-function _paintHourly(data) {
+function _paintHourly(data, secondaryRaw) {
   const scale = _scaleFor(_hMetric.primary, _hScaleRaw);
   _syncScalePills('hourly-scale-pills', _hMetric.primary === 'hit_pct' ? 'linear-forced' : scale);
+  let secondaryData = null;
+  if (secondaryRaw && _hMetric.secondary) {
+    const secSeries = secondaryRaw.series?.[0];
+    if (secSeries?.points?.length) {
+      // Build lookup by timestamp (seconds) — same conversion as _apiToChartData uses.
+      const byTs = new Map(secSeries.points.map(p => [new Date(p.hour).getTime() / 1000, p.value]));
+      const secArr = new Float64Array(Array.from(data.xs, x => byTs.get(x) ?? NaN));
+      secondaryData = {
+        label: _METRIC_LABEL[_hMetric.secondary] ?? _hMetric.secondary,
+        data: secArr,
+        yUnit: secondaryRaw.y_unit,
+      };
+    }
+  }
   _paintTimeline('hourly-chart', data, 'No data for this selection.', {
     stepped: true,
     yScale: scale,
@@ -504,7 +552,8 @@ function _paintHourly(data) {
       const d = new Date(ts * 1000);
       location.href = `/day/${_toLocalDate(d)}#hour=${d.getHours()}`;
     },
-  });
+  }, secondaryData);
+  _renderLegend('hourly-legend', _hMetric);
 }
 
 // ---- dropdown ----
@@ -755,35 +804,43 @@ function _renderDaily(payload) {
     _updateDailyRangePills();
   }
   const canUseSnapshot = _dMetric.primary === 'hit_pct' && _dRange === '30d'
+    && !_dMetric.secondary
     && _dProjFs.mode === 'all' && _dModelFs.mode === 'all';
   if (canUseSnapshot) {
     // Snapshot daily is 30-day-scoped → its active lists are last-30d cwds/models.
     _dActiveProjects = daily.active_projects ?? [];
     _dActiveModels   = daily.active_models   ?? [];
-    _paintDaily(_snapshotToDailyData(daily, _dMetric.primary));
+    _paintDaily(_snapshotToDailyData(daily, _dMetric.primary), null);
   } else {
     _fetchDaily();
   }
 }
 
-const _fetchDaily = _makeFetcher({
-  urlFn: () => {
-    const p = new URLSearchParams({
-      range: _dRange, metric: _dMetric.primary,
+let _dFetchBusy = false;
+async function _fetchDaily() {
+  if (_dFetchBusy) return;
+  _dFetchBusy = true;
+  try {
+    const baseParams = {
+      range: _dRange,
       project: _filterParam(_dProjFs),
       model:   _filterParam(_dModelFs),
-    });
-    return `/api/daily?${p}`;
-  },
-  xform: _apiToDailyChartData,
-  paint: data => {
-    _dActiveProjects = data._activeProjects ?? _dActiveProjects;
-    _dActiveModels   = data._activeModels   ?? _dActiveModels;
-    _paintDaily(data);
-  },
-});
+    };
+    const primaryUrl = `/api/daily?${new URLSearchParams({ metric: _dMetric.primary, ...baseParams })}`;
+    const promises = [fetch(primaryUrl).then(r => r.json())];
+    if (_dMetric.secondary) {
+      const secondaryUrl = `/api/daily?${new URLSearchParams({ metric: _dMetric.secondary, ...baseParams })}`;
+      promises.push(fetch(secondaryUrl).then(r => r.json()));
+    }
+    const [p, s] = await Promise.all(promises);
+    const primaryData = _apiToDailyChartData(p);
+    _dActiveProjects = primaryData._activeProjects ?? _dActiveProjects;
+    _dActiveModels   = primaryData._activeModels   ?? _dActiveModels;
+    _paintDaily(primaryData, s ?? null);
+  } finally { _dFetchBusy = false; }
+}
 
-function _paintDaily(data) {
+function _paintDaily(data, secondaryRaw) {
   const scale = _scaleFor(_dMetric.primary, _dScaleRaw);
   _syncScalePills('daily-scale-pills', _dMetric.primary === 'hit_pct' ? 'linear-forced' : scale);
   const note = $('daily-note');
@@ -791,13 +848,28 @@ function _paintDaily(data) {
     if (data._note) { note.textContent = data._note; note.classList.remove('hidden'); }
     else            { note.textContent = '';         note.classList.add('hidden');    }
   }
+  let secondaryData = null;
+  if (secondaryRaw && _dMetric.secondary) {
+    const secSeries = secondaryRaw.series?.[0];
+    if (secSeries?.points?.length) {
+      // Build lookup by timestamp (seconds) — same conversion as _apiToDailyChartData uses.
+      const byTs = new Map(secSeries.points.map(p => [new Date(p.date + 'T00:00:00').getTime() / 1000, p.value]));
+      const secArr = new Float64Array(Array.from(data.xs, x => byTs.get(x) ?? NaN));
+      secondaryData = {
+        label: _METRIC_LABEL[_dMetric.secondary] ?? _dMetric.secondary,
+        data: secArr,
+        yUnit: secondaryRaw.y_unit,
+      };
+    }
+  }
   _paintTimeline('daily-chart', data, 'No history yet — check back after a few days.', {
     xFmt: _xFmtDate,
     stepped: data.labels.map(lbl => lbl !== '7d avg'),
     dashes: [null, [4, 4]],
     yScale: scale,
     onPointClick: ts => { location.href = `/day/${_toLocalDate(new Date(ts * 1000))}`; },
-  });
+  }, secondaryData);
+  _renderLegend('daily-legend', _dMetric);
 }
 
 function _wireDaily() {

@@ -280,6 +280,18 @@ header.topbar {
 .pill-row span.secondary { color: var(--series-secondary); border: 1px solid var(--series-secondary); background: transparent; }
 .pill-group span.off, .pill-row span.off { opacity: 0.32; cursor: not-allowed; pointer-events: none; }
 .pill-group span.disabled, .pill-row span.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+.tl-legend {
+  font-size: 0.85em;
+  color: var(--mute, #7a7062);
+  margin-left: 0.5em;
+}
+.tl-legend .swatch {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.15em;
+  vertical-align: middle;
+  margin: 0 0.25em;
+}
 .pill-group-label {
   font-size: 11px;
   color: var(--mute);
