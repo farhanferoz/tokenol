@@ -210,3 +210,52 @@ def test_attribute_cost_unknown_model_zero():
     assert tool_costs["Read"].input_tokens == 1000.0
     assert tool_costs["Read"].output_tokens == 200.0
     assert unattr_cost == 0.0
+
+
+def test_compaction_resets_tallies(tmp_path):
+    """Turn 1 calls Read with a 50 KB result. Turn 2 has input_tokens that drop
+    sharply (compaction). Turn 2 should not attribute to Read because the
+    context was reset by the compaction heuristic."""
+    big_result = "x" * 50_000
+    lines = [
+        {
+            "type": "assistant", "timestamp": "2026-05-15T10:00:00Z",
+            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10_000, "output_tokens": 20,
+                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Read",
+                             "input": {"file_path": "/x"}}],
+            },
+        },
+        {
+            "type": "user", "timestamp": "2026-05-15T10:01:00Z",
+            "sessionId": "s1", "uuid": "u2", "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": big_result}
+            ]},
+        },
+        # Compaction: input_tokens drops from peak (60_000) to 500 (< 20%).
+        {
+            "type": "assistant", "timestamp": "2026-05-15T10:02:00Z",
+            "sessionId": "s1", "requestId": "r2", "uuid": "u3", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m2", "role": "assistant", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 500, "output_tokens": 30,
+                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "text", "text": "Compacted then asked again."}],
+            },
+        },
+    ]
+    p = _write_jsonl(tmp_path, "s1.jsonl", lines)
+    events = list(parse_file(p))
+    assistants = [e for e in events if e.event_type == "assistant"]
+
+    assert "Read" in assistants[0].tool_costs
+
+    post = assistants[1]
+    assert "Read" not in post.tool_costs
+    assert post.unattributed_input_tokens >= 0
