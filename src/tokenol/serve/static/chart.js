@@ -120,19 +120,39 @@ const _xFmtHour = v => {
   return d.getMinutes() === 0 ? `${d.getHours()}:00` : '';
 };
 
-export function drawChart(container, {
-  xs, ySeries, labels, yUnit, height = 180,
-  onPointClick, xFmt, dashes, stepped = false, turnsByX, yScale = 'linear',
-}) {
+// Read a CSS custom property from :root at chart-creation time.
+// uPlot (unlike Chart.js) resolves colours eagerly on canvas — CSS vars must be
+// unwrapped to real colour strings before being passed into series/axes config.
+function _readCssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+export function drawChart(container, rawOpts) {
+  // Backward-compat shim: legacy flat opts (no `primary` key) → wrap as primary.
+  // Task 10/11 callers will pass { primary: {...}, secondary?: {...} } directly.
+  let opts = rawOpts;
+  if (!opts.primary) {
+    opts = { primary: opts };
+  }
+  const { primary, secondary } = opts;
+
+  const {
+    xs, ySeries, labels, yUnit, height = 180,
+    onPointClick, xFmt, dashes, stepped = false, turnsByX, yScale = 'linear',
+  } = primary;
+
   const xFmtFn  = xFmt ?? _xFmtHour;
   const existing = container._uplot;
-  // Fast path only works when every axis config is unchanged. Changing scale
-  // (linear ↔ log) reshapes the y distribution, so fall through to a rebuild.
+  // Fast path: reuse the existing chart instance when axis config is unchanged.
+  // Changing scale (linear ↔ log) reshapes the y distribution, so fall through
+  // to a rebuild. Also rebuild when secondary presence changes.
+  const totalSeries = ySeries.length + (secondary ? 1 : 0);
   if (existing
-      && existing.series.length === ySeries.length + 1
+      && existing.series.length === totalSeries + 1
       && container._yUnit === yUnit
-      && container._yScale === yScale) {
-    existing.setData([xs, ...ySeries]);
+      && container._yScale === yScale
+      && !!container._hasSecondary === !!secondary) {
+    existing.setData([xs, ...ySeries, ...(secondary ? [secondary.data] : [])]);
     container._xs = xs;
     container._turnsByX = turnsByX;
     return;
@@ -145,58 +165,104 @@ export function drawChart(container, {
   const g   = { stroke: '#d6cab0', width: 1 };
   const steppedArr = Array.isArray(stepped) ? stepped : ySeries.map(() => !!stepped);
 
+  // Resolve secondary colour at chart-creation time (CSS var → real hex string).
+  const secondaryColor = secondary ? (_readCssVar('--series-secondary') || '#2a6389') : null;
+  const secondaryFmt   = secondary
+    ? (Y_FMTRS[secondary.yUnit] ?? (v => Number.isFinite(v) ? String(v) : ''))
+    : null;
+
   const series = [
     {},
     ...ySeries.map((_, i) => ({
       label: labels[i] ?? `s${i}`, stroke: _PAL[i % _PAL.length],
+      scale: 'y',
       width: 2, spanGaps: false, value: (_u, v) => fmt(v),
       ...(steppedArr[i] ? { paths: _steppedGapAware } : {}),
       ...(dashes?.[i] ? { dash: dashes[i] } : {}),
     })),
   ];
 
+  if (secondary) {
+    series.push({
+      label:    secondary.label ?? 'secondary',
+      scale:    'y2',
+      stroke:   secondaryColor,
+      width:    1.5,
+      spanGaps: false,
+      points:   { size: 4, fill: secondaryColor },
+      value:    (_u, v) => secondaryFmt(v),
+    });
+  }
+
   // Read turns via closure so fast-path setData() picks up fresh counts.
   container._turnsByX = turnsByX;
   const turnsAt = (x) => container._turnsByX?.get(x);
 
+  // Build scales: primary y always present; y2 added when secondary is present.
+  const scales = yScale === 'log'
+    ? { y: { distr: 3, range: (_u, lo, hi) => {
+        const lower = Math.max(1e-4, Number.isFinite(lo) ? lo : 1e-4);
+        const upper = Number.isFinite(hi) && hi > lower ? hi : lower * 10;
+        return [lower, upper];
+      }}}
+    : { y: { range: (_u, lo, hi) => {
+        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+        const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
+        return [lo - pad, hi + pad];
+      }}};
+
+  if (secondary) {
+    // Secondary axis is always linear; auto-fit with 5% padding.
+    scales.y2 = {
+      range: (_u, lo, hi) => {
+        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+        const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
+        return [lo - pad, hi + pad];
+      },
+    };
+  }
+
+  // Build axes.
+  const axes = [
+    { stroke: '#7a7062', ticks: g, grid: g, values: (_u, vs) => vs.map(xFmtFn) },
+    { scale: 'y', stroke: '#7a7062', ticks: g, grid: g, size: _Y_AXIS_SIZE[yUnit] ?? 50, values: (_u, vs) => vs.map(fmt) },
+  ];
+
+  if (secondary) {
+    axes.push({
+      scale: 'y2',
+      side:  1,   // right side
+      stroke: secondaryColor,
+      ticks:  { ...g, stroke: secondaryColor },
+      grid:   { show: false },   // avoid double gridlines
+      size:   _Y_AXIS_SIZE[secondary.yUnit] ?? 50,
+      values: (_u, vs) => vs.map(secondaryFmt),
+    });
+  }
+
+  const allSeries = ySeries.length + (secondary ? 1 : 0);
   const u = new uPlot({
     width:   container.offsetWidth || 600,
     height,
     padding: [8, 4, 0, 0],
     select:  { show: false },
-    legend:  { show: ySeries.length > 1 },
+    legend:  { show: allSeries > 1 },
     cursor:  { drag: { x: false, y: false } },
-    // Linear: auto-fit with 5% padding.
-    // Log: distr:3 is uPlot's log10; zero or negative values would blow up, so
-    // floor the bottom at 1/10 of a cent so a handful of $0 turns don't kill
-    // the scale for the whole chart.
-    scales:  yScale === 'log'
-      ? { y: { distr: 3, range: (_u, lo, hi) => {
-          const lower = Math.max(1e-4, Number.isFinite(lo) ? lo : 1e-4);
-          const upper = Number.isFinite(hi) && hi > lower ? hi : lower * 10;
-          return [lower, upper];
-        }}}
-      : { y: { range: (_u, lo, hi) => {
-          if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
-          const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
-          return [lo - pad, hi + pad];
-        }}},
-    axes: [
-      { stroke: '#7a7062', ticks: g, grid: g, values: (_u, vs) => vs.map(xFmtFn) },
-      { stroke: '#7a7062', ticks: g, grid: g, size: _Y_AXIS_SIZE[yUnit] ?? 50, values: (_u, vs) => vs.map(fmt) },
-    ],
+    scales,
+    axes,
     plugins: [
       ...(yUnit === 'percent' || yUnit === 'ratio' || yUnit === 'tokens' ? [_gapConnectorPlugin()] : []),
       _tooltipPlugin(fmt, xFmtFn, turnsAt),
     ],
     series,
-  }, [xs, ...ySeries], container);
+  }, [xs, ...ySeries, ...(secondary ? [secondary.data] : [])], container);
 
-  container._uplot  = u;
-  container._xs     = xs;
-  container._yUnit  = yUnit;
-  container._yScale = yScale;
-  container.tabIndex = 0;
+  container._uplot        = u;
+  container._xs           = xs;
+  container._yUnit        = yUnit;
+  container._yScale       = yScale;
+  container._hasSecondary = !!secondary;
+  container.tabIndex      = 0;
 
   if (onPointClick) {
     const handler = () => { const { idx } = u.cursor; if (idx != null) onPointClick(container._xs[idx]); };
