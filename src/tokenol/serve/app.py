@@ -641,14 +641,25 @@ def create_app(
         )
 
         total_billable = sum(b["input"] + b["output"] for b in buckets.values()) or 1
+        total_cost = sum(
+            b["input_cost"] + b["output_cost"]
+            + b["cache_read_cost"] + b["cache_creation_cost"]
+            for b in buckets.values()
+        )
         models = []
         for name, b in buckets.items():
             billable = b["input"] + b["output"]
+            cost_usd = (
+                b["input_cost"] + b["output_cost"]
+                + b["cache_read_cost"] + b["cache_creation_cost"]
+            )
             models.append({
                 "model": name,
                 "input": b["input"],
                 "output": b["output"],
                 "share": billable / total_billable,
+                "cost_usd": cost_usd,
+                "cost_share": (cost_usd / total_cost) if total_cost > 0 else 0,
             })
         models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
         return JSONResponse({"range": range, "models": models})

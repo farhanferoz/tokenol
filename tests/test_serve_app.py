@@ -931,18 +931,23 @@ async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
         assert "models" in data
         assert len(data["models"]) >= 1
         m = data["models"][0]
-        for key in ["model", "input", "output", "share"]:
+        for key in ["model", "input", "output", "share", "cost_usd", "cost_share"]:
             assert key in m, f"Missing field: {key}"
         # Shares sum to ~1 (floating point tolerance).
         total = sum(mm["share"] for mm in data["models"])
         assert abs(total - 1.0) < 1e-6
+        # Cost shares sum to ~1 too, when any model has cost; else they are all 0.
+        cost_total = sum(mm["cost_usd"] for mm in data["models"])
+        cost_share_total = sum(mm["cost_share"] for mm in data["models"])
+        if cost_total > 0:
+            assert abs(cost_share_total - 1.0) < 1e-6
+        else:
+            assert cost_share_total == 0
         # Sort desc by billable tokens.
         billable = [mm["input"] + mm["output"] for mm in data["models"]]
         assert billable == sorted(billable, reverse=True)
 
-        # Oracle cross-check: sums of per-model input/output must match the
-        # raw non-interrupted turn totals from the cached snapshot. Cache
-        # tokens are deliberately NOT part of share math.
+        # Oracle cross-check: sums of per-model input/output match raw totals.
         snap = app.state.snapshot_result
         assert snap is not None
         expected_input = sum(
@@ -953,6 +958,15 @@ async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
         )
         assert sum(mm["input"] for mm in data["models"]) == expected_input
         assert sum(mm["output"] for mm in data["models"]) == expected_output
+
+        # Cost oracle: per-model cost_usd sum matches cost_for_turn() applied
+        # to each non-interrupted turn.
+        from tokenol.metrics.cost import cost_for_turn
+        expected_cost = sum(
+            cost_for_turn(t.model, t.usage).total_usd
+            for t in snap.turns if not t.is_interrupted
+        )
+        assert abs(cost_total - expected_cost) < 1e-9
 
 
 @pytest.mark.asyncio
