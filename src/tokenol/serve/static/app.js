@@ -405,8 +405,10 @@ function _makeFetcher({ urlFn, xform, paint }) {
 }
 
 // ---- y-scale (linear / log) per panel, persisted ----
-const _LS_H_SCALE = 'tokenol.hourly.scale';
-const _LS_D_SCALE = 'tokenol.daily.scale';
+const _LS_H_SCALE  = 'tokenol.hourly.scale';
+const _LS_D_SCALE  = 'tokenol.daily.scale';
+const _LS_H_METRIC = 'tokenol.hourly.metric';
+const _LS_D_METRIC = 'tokenol.daily.metric';
 const _scaleFor = (metric, stored) => {
   // Hit% is bounded [0,1], log would be meaningless there — force linear.
   if (metric === 'hit_pct') return 'linear';
@@ -423,8 +425,21 @@ function _syncScalePills(groupId, active) {
   if (logPill) logPill.classList.toggle('disabled', active === 'linear-forced');
 }
 
+// ---- metric state helpers (cyclic primary/secondary) ----
+// Persist as 'primary' or 'primary,secondary'. Returns {primary, secondary?}.
+function _parseMetricState(raw) {
+  if (!raw) return { primary: 'hit_pct' };
+  const parts = raw.split(',').filter(Boolean);
+  return parts.length === 2
+    ? { primary: parts[0], secondary: parts[1] }
+    : { primary: parts[0] || 'hit_pct' };
+}
+function _formatMetricState(st) {
+  return st.secondary ? `${st.primary},${st.secondary}` : st.primary;
+}
+
 // ---- hourly timeline ----
-let _hMetric    = 'hit_pct';
+let _hMetric    = _parseMetricState(localStorage.getItem(_LS_H_METRIC));
 let _hScaleRaw  = localStorage.getItem(_LS_H_SCALE) || 'linear';
 let _hDay       = null;   // null = today
 let _hEarliest  = null;
@@ -449,7 +464,7 @@ function _renderHourly(payload) {
   const ht = payload.hourly_today;
   if (!ht) return;
   if (_hEarliest === null) _hEarliest = ht.earliest_available;
-  const canUseSnapshot = _hMetric === 'hit_pct' && _hDay === null
+  const canUseSnapshot = _hMetric.primary === 'hit_pct' && _hDay === null
     && _hProjFs.mode === 'all' && _hModelFs.mode === 'all';
   if (canUseSnapshot) {
     // Snapshot is today-scoped → its active lists are today's cwds/models.
@@ -465,7 +480,7 @@ const _fetchHourly = _makeFetcher({
   urlFn: () => {
     const day = _hDay ?? _toLocalDate(new Date());
     const p = new URLSearchParams({
-      metric: _hMetric,
+      metric: _hMetric.primary,
       project: _filterParam(_hProjFs),
       model:   _filterParam(_hModelFs),
     });
@@ -480,8 +495,8 @@ const _fetchHourly = _makeFetcher({
 });
 
 function _paintHourly(data) {
-  const scale = _scaleFor(_hMetric, _hScaleRaw);
-  _syncScalePills('hourly-scale-pills', _hMetric === 'hit_pct' ? 'linear-forced' : scale);
+  const scale = _scaleFor(_hMetric.primary, _hScaleRaw);
+  _syncScalePills('hourly-scale-pills', _hMetric.primary === 'hit_pct' ? 'linear-forced' : scale);
   _paintTimeline('hourly-chart', data, 'No data for this selection.', {
     stepped: true,
     yScale: scale,
@@ -651,7 +666,11 @@ function _initTzLabel() {
 }
 
 function _wireHourly() {
-  _wireRange('hourly-metric-pills', m => { _hMetric = m; _fetchHourly(); });
+  _wireMetricPills('hourly-metric-pills', _LS_H_METRIC,
+    () => _hMetric,
+    st => { _hMetric = st; },
+    () => _fetchHourly(),
+  );
   _wireRange('hourly-scale-pills',  s => {
     _hScaleRaw = s;
     localStorage.setItem(_LS_H_SCALE, s);
@@ -688,7 +707,7 @@ const _DAILY_META = {
   cost:       { field: 'cost_usd',      yUnit: 'usd' },
 };
 
-let _dMetric   = 'hit_pct';
+let _dMetric   = _parseMetricState(localStorage.getItem(_LS_D_METRIC));
 let _dRange    = '30d';
 let _dEarliest = null;
 let _dScaleRaw = localStorage.getItem(_LS_D_SCALE) || 'linear';
@@ -735,13 +754,13 @@ function _renderDaily(payload) {
     _dEarliest = daily.earliest_available;
     _updateDailyRangePills();
   }
-  const canUseSnapshot = _dMetric === 'hit_pct' && _dRange === '30d'
+  const canUseSnapshot = _dMetric.primary === 'hit_pct' && _dRange === '30d'
     && _dProjFs.mode === 'all' && _dModelFs.mode === 'all';
   if (canUseSnapshot) {
     // Snapshot daily is 30-day-scoped → its active lists are last-30d cwds/models.
     _dActiveProjects = daily.active_projects ?? [];
     _dActiveModels   = daily.active_models   ?? [];
-    _paintDaily(_snapshotToDailyData(daily, _dMetric));
+    _paintDaily(_snapshotToDailyData(daily, _dMetric.primary));
   } else {
     _fetchDaily();
   }
@@ -750,7 +769,7 @@ function _renderDaily(payload) {
 const _fetchDaily = _makeFetcher({
   urlFn: () => {
     const p = new URLSearchParams({
-      range: _dRange, metric: _dMetric,
+      range: _dRange, metric: _dMetric.primary,
       project: _filterParam(_dProjFs),
       model:   _filterParam(_dModelFs),
     });
@@ -765,8 +784,8 @@ const _fetchDaily = _makeFetcher({
 });
 
 function _paintDaily(data) {
-  const scale = _scaleFor(_dMetric, _dScaleRaw);
-  _syncScalePills('daily-scale-pills', _dMetric === 'hit_pct' ? 'linear-forced' : scale);
+  const scale = _scaleFor(_dMetric.primary, _dScaleRaw);
+  _syncScalePills('daily-scale-pills', _dMetric.primary === 'hit_pct' ? 'linear-forced' : scale);
   const note = $('daily-note');
   if (note) {
     if (data._note) { note.textContent = data._note; note.classList.remove('hidden'); }
@@ -783,7 +802,11 @@ function _paintDaily(data) {
 
 function _wireDaily() {
   _wireRange('daily-range-pills',  r => { _dRange  = r; _fetchDaily(); });
-  _wireRange('daily-metric-pills', m => { _dMetric = m; _fetchDaily(); });
+  _wireMetricPills('daily-metric-pills', _LS_D_METRIC,
+    () => _dMetric,
+    st => { _dMetric = st; },
+    () => _fetchDaily(),
+  );
   _wireRange('daily-scale-pills',  s => {
     _dScaleRaw = s;
     localStorage.setItem(_LS_D_SCALE, s);
@@ -905,6 +928,46 @@ function _wireRange(groupId, onChange) {
       group.querySelectorAll(_PILL_SEL).forEach(b => b.classList.remove('on'));
       btn.classList.add('on');
       onChange(btn.dataset.range ?? btn.dataset.metric ?? btn.dataset.window ?? btn.dataset.scale);
+    });
+  });
+}
+
+function _wireMetricPills(groupId, lsKey, getState, setState, onChange) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  const renderPills = () => {
+    const st = getState();
+    group.querySelectorAll('[data-metric]').forEach(b => {
+      const m = b.dataset.metric;
+      b.classList.remove('on', 'secondary');
+      if (m === st.primary) b.classList.add('on');
+      else if (m === st.secondary) b.classList.add('secondary');
+    });
+  };
+  renderPills();
+  group.querySelectorAll('[data-metric]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const m   = btn.dataset.metric;
+      const cur = getState();
+      let next;
+      if (m === cur.primary) {
+        // Primary → secondary (the other slot, if it existed, becomes primary).
+        // Edge case: if only one pill was selected and it's clicked again, no-op.
+        next = cur.secondary ? { primary: cur.secondary, secondary: m } : cur;
+      } else if (m === cur.secondary) {
+        // Secondary → unselected. Primary stays primary.
+        next = { primary: cur.primary };
+      } else {
+        // Unselected click → becomes primary. Old primary becomes secondary.
+        next = cur.primary
+          ? { primary: m, secondary: cur.primary }
+          : { primary: m };
+      }
+      if (next === cur) return;
+      setState(next);
+      localStorage.setItem(lsKey, _formatMetricState(next));
+      renderPills();
+      onChange(next);
     });
   });
 }
