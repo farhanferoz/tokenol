@@ -2,9 +2,12 @@
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from tokenol.ingest.parser import _attribute_cost, _output_byte_shares, parse_file
 from tokenol.model.events import RawEvent, ToolCost, Turn, Usage
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _write_jsonl(tmp_path, name, lines):
@@ -290,3 +293,29 @@ def test_unknown_tool_use_id_goes_to_unknown_bucket(tmp_path):
     t1 = assistants[0]
     assert "__unknown__" in t1.tool_costs
     assert t1.tool_costs["__unknown__"].input_tokens > 0
+
+
+def test_golden_fixture_reconciliation():
+    """Three-turn fixture with Read + Bash. Per-tool cost + unattributed = total cost
+    within 5% reconciliation tolerance."""
+    from tokenol.metrics.cost import cost_for_turn
+    events = list(parse_file(FIXTURES / "per_tool_basic.jsonl"))
+    assistants = [e for e in events if e.event_type == "assistant"]
+    assert len(assistants) == 3
+
+    total_attributed_cost = 0.0
+    total_unattr_cost = 0.0
+    total_turn_cost = 0.0
+    seen_tools: set[str] = set()
+
+    for ev in assistants:
+        for tc in ev.tool_costs.values():
+            total_attributed_cost += tc.cost_usd
+            seen_tools.add(tc.tool_name)
+        total_unattr_cost += ev.unattributed_cost_usd
+        total_turn_cost += cost_for_turn(ev.model, ev.usage).total_usd
+
+    assert seen_tools == {"Read", "Bash"}
+
+    reconciled = total_attributed_cost + total_unattr_cost
+    assert abs(reconciled - total_turn_cost) / max(total_turn_cost, 1e-9) < 0.05
