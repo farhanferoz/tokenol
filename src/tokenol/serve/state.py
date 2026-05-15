@@ -1402,7 +1402,7 @@ def build_tool_detail(
         model_cost[model] += tc.cost_usd if tc else 0.0
         model_invs[model] += invs
 
-    grand_total_cost = sum(tt.cost_usd for tt in turns if not tt.is_interrupted) or 1.0
+    grand_total_cost = sum(tt.cost_usd for tt in turns if not tt.is_interrupted)
 
     top_cwd = max(proj_cost.items(), key=lambda kv: kv[1], default=("(unknown)", 0.0))
     top_project = {
@@ -1445,7 +1445,7 @@ def build_tool_detail(
             "output_tokens": total_output_tokens,
             "invocations": total_invocations,
             "invocations_7d": invs_7d,
-            "share_of_total": total_cost / grand_total_cost,
+            "share_of_total": (total_cost / grand_total_cost) if grand_total_cost else 0.0,
             "top_project": top_project,
         },
         "daily_cost": [{"date": d.date.isoformat(), "cost_usd": d.cost_usd} for d in daily],

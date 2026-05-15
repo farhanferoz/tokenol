@@ -115,8 +115,8 @@ def _attribute_cost(
     input-side pool and distributed by `input_shares`.
 
     Precondition: `sum(output_shares.values()) <= 1.0` and
-    `sum(input_shares.values()) <= 1.0`. Callers in Task 4 satisfy this by
-    construction (shares are computed from `bytes_per_tool / total_bytes`).
+    `sum(input_shares.values()) <= 1.0`. Callers satisfy this by construction
+    (shares are computed from `bytes_per_tool / total_bytes`).
     The `max(0.0, ...)` guards below only protect the *unattributed* leg from
     negative values; they do NOT rescale per-tool amounts if a caller violates
     the precondition.
@@ -236,7 +236,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 # This is a known coarseness of the heuristic, acknowledged in the spec.
                 peak_input_tokens = max(peak_input_tokens, input_pool)
 
-                output_shares, _out_unattr_share = _output_byte_shares(content)
+                output_shares, _ = _output_byte_shares(content)
                 total_ctx_bytes = sum(bytes_in_context_by_tool.values()) + non_tool_bytes_in_context
                 if total_ctx_bytes > 0:
                     input_shares = {
@@ -251,10 +251,9 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
             # Fold this line's content into the running tallies so the next
             # assistant turn can attribute its input side against them.
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                b = _block_bytes(block)
+            # Pre-compute block sizes once to avoid redundant json.dumps calls.
+            block_sizes = [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
+            for block, b in block_sizes:
                 btype = block.get("type")
                 if btype == "tool_use":
                     name = block.get("name")
@@ -268,7 +267,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                         non_tool_bytes_in_context += b
                 elif btype == "tool_result":
                     bid = block.get("tool_use_id")
-                    name = tool_use_id_to_name.get(bid, UNKNOWN_TOOL) if bid else UNKNOWN_TOOL
+                    name = tool_use_id_to_name.pop(bid, UNKNOWN_TOOL) if bid else UNKNOWN_TOOL
                     bytes_in_context_by_tool[name] = (
                         bytes_in_context_by_tool.get(name, 0) + b
                     )

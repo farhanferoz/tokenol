@@ -134,8 +134,8 @@ def build_tool_cost_rollups(turns: list[Turn]) -> list[ToolCostRollup]:
             r.input_tokens += tc.input_tokens
             r.output_tokens += tc.output_tokens
             r.cost_usd += tc.cost_usd
-            if name in turn.tool_names:
-                r.invocations += turn.tool_names[name]
+            if (count := turn.tool_names.get(name, 0)) > 0:
+                r.invocations += count
                 if r.last_active is None or turn.timestamp > r.last_active:
                     r.last_active = turn.timestamp
     return sorted(buckets.values(), key=lambda r: r.cost_usd, reverse=True)
@@ -157,10 +157,12 @@ def build_tool_cost_daily(
     for turn in turns:
         if turn.is_interrupted:
             continue
+        d = turn.timestamp.date()
+        if d < start:
+            continue
         tc = turn.tool_costs.get(tool_name)
         if not tc:
             continue
-        d = turn.timestamp.date()
         if d in buckets:
             buckets[d] += tc.cost_usd
     return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
