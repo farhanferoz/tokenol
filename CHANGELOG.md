@@ -4,6 +4,39 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.0 — 2026-05-15
+
+### Added
+
+- **Per-tool cost attribution.** Causal model that splits a turn's four cost
+  components (`input_usd + output_usd + cache_read_usd + cache_creation_usd`)
+  across each tool by JSON byte share. Output side attributes by `tool_use`
+  block bytes; input side attributes by lingering `tool_use` + `tool_use_result`
+  bytes still in the conversation window. Compaction is detected heuristically
+  (input pool drop below 20% of running peak) and resets the lingering tallies.
+- **Breakdown → Tool Mix in `$` mode.** The TOKENS/$ toggle now extends to the
+  Tool Mix panel; chart switches from Chart.js bars to a ranked-bar list. A
+  dim italic `__unattributed__` row surfaces residual so totals reconcile to
+  overall spend.
+- **Tool detail page redesign** (`/tool/<name>`). 30-day daily-cost line chart,
+  four scorecards (Est. Cost · Output tokens · Invocations · Top project), and
+  cost-by-project + cost-by-model ranked bars replace the previous tables.
+- **Project + model detail pages** gain a "Cost by tool" ranked-bar list.
+- New API fields:
+  - `/api/breakdown/tools` rows now include `cost_usd`, `count`, `last_active`,
+    and a final `__unattributed__` sentinel row.
+  - `/api/tool/{name}` adds `scorecards`, `daily_cost` (30 zero-filled points),
+    `by_project`, `by_model`. Old `projects_using_tool` / `models_using_tool`
+    keys removed.
+  - `/api/project/{cwd_b64}` and `/api/model/{name}` add a `by_tool` block.
+
+### Notes
+
+- No DuckDB schema change. Attribution is computed in-memory at parse time and
+  attached to `Turn.tool_costs`.
+- Per-tool token fields are floats (fractional after share split); aggregate
+  reconciliation is exact to floating-point precision.
+
 ## 0.5.1 — 2026-05-15
 
 ### Fixes
