@@ -63,15 +63,19 @@ def _bucket_turns(
     sessions: list,
     since,
     key_fn,
-) -> dict[str, dict[str, int]]:
-    """Group non-interrupted turns into buckets and sum the usage fields.
+) -> dict[str, dict[str, float]]:
+    """Group non-interrupted turns into buckets and sum the usage + cost fields.
 
     `key_fn` receives `(session, turn)` and returns the bucket key; handlers
     pass a lambda that closes over whatever grouping dict they precomputed
-    (e.g. `cwd_by_sid`). Returns `{key: {"input", "output", "cache_read",
-    "cache_creation"}}`. Callers may ignore unused fields.
+    (e.g. `cwd_by_sid`). Returns a dict mapping each key to a sub-dict with
+    token totals (`input`, `output`, `cache_read`, `cache_creation`) and
+    per-component cost totals in USD (`input_cost`, `output_cost`,
+    `cache_read_cost`, `cache_creation_cost`). Callers may ignore unused
+    fields.
     """
-    buckets: dict[str, dict[str, int]] = {}
+    from tokenol.metrics.cost import cost_for_turn
+    buckets: dict[str, dict[str, float]] = {}
     for s in sessions:
         for t in s.turns:
             if since is not None and t.timestamp.date() < since:
@@ -81,11 +85,18 @@ def _bucket_turns(
             key = key_fn(s, t)
             b = buckets.setdefault(key, {
                 "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+                "input_cost": 0.0, "output_cost": 0.0,
+                "cache_read_cost": 0.0, "cache_creation_cost": 0.0,
             })
             b["input"] += t.usage.input_tokens
             b["output"] += t.usage.output_tokens
             b["cache_read"] += t.usage.cache_read_input_tokens
             b["cache_creation"] += t.usage.cache_creation_input_tokens
+            tc = cost_for_turn(t.model, t.usage)
+            b["input_cost"] += tc.input_usd
+            b["output_cost"] += tc.output_usd
+            b["cache_read_cost"] += tc.cache_read_usd
+            b["cache_creation_cost"] += tc.cache_creation_usd
     return buckets
 
 
