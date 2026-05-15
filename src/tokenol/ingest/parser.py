@@ -106,6 +106,17 @@ def _attribute_cost(
 ) -> tuple[dict[str, ToolCost], float, float, float]:
     """Split a turn's four cost components by the given byte shares.
 
+    `output_usd` is distributed by `output_shares`.
+    `input_usd + cache_read_usd + cache_creation_usd` are combined into a single
+    input-side pool and distributed by `input_shares`.
+
+    Precondition: `sum(output_shares.values()) <= 1.0` and
+    `sum(input_shares.values()) <= 1.0`. Callers in Task 4 satisfy this by
+    construction (shares are computed from `bytes_per_tool / total_bytes`).
+    The `max(0.0, ...)` guards below only protect the *unattributed* leg from
+    negative values; they do NOT rescale per-tool amounts if a caller violates
+    the precondition.
+
     Returns (tool_costs, unattributed_input_tokens, unattributed_output_tokens, unattributed_cost_usd).
     """
     turn_cost = cost_for_turn(model, usage)
