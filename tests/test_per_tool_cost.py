@@ -45,4 +45,6 @@ def test_turn_has_tool_costs_default_empty():
         stop_reason="end_turn",
     )
     assert t.tool_costs == {}
+    assert t.unattributed_input_tokens == 0.0
+    assert t.unattributed_output_tokens == 0.0
     assert t.unattributed_cost_usd == 0.0

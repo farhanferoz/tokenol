@@ -19,12 +19,16 @@ class Usage:
 
 @dataclass
 class ToolCost:
-    """Attributed slice of a turn's cost for one tool."""
+    """Attributed slice of a turn's cost for one tool.
+
+    cost_usd combines the per-tool shares of all four pricing components
+    (input_usd + output_usd + cache_read_usd + cache_creation_usd).
+    """
 
     tool_name: str
     input_tokens: float = 0.0        # fractional after share split
     output_tokens: float = 0.0
-    cost_usd: float = 0.0            # input_usd + output_usd + cache_read_usd + cache_creation_usd shares
+    cost_usd: float = 0.0
 
 
 @dataclass
