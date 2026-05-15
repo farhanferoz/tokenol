@@ -365,7 +365,14 @@ def serve(
     tick: str = typer.Option("5s", "--tick", help="SSE tick interval, e.g. '2s', '5s'."),
     reference: float = typer.Option(50.0, "--reference", help="$/window alarm threshold."),
     open_browser: bool = typer.Option(False, "--open", help="Open dashboard in default browser."),
-    all_projects: bool = _ALL_PROJECTS_OPT,  # noqa: B008
+    scoped: bool = typer.Option(  # noqa: B008
+        False,
+        "--scoped",
+        help=(
+            "Honor CLAUDE_CONFIG_DIR and scan only that project. "
+            "Default scans every ~/.claude* directory."
+        ),
+    ),
     persist: bool = typer.Option(
         False,
         "--persist",
@@ -406,7 +413,7 @@ def serve(
             raise typer.Exit(code=1) from None
 
     config = ServerConfig(
-        all_projects=all_projects,
+        all_projects=not scoped,
         reference_usd=reference,
         tick_seconds=tick_seconds,
         persist=persist,

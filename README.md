@@ -62,17 +62,21 @@ All commands scan every JSONL file under `$CLAUDE_CONFIG_DIR` (falling back to t
 
 ### Scanning multiple projects
 
-If you use workspace isolation (one `~/.claude-<project>` directory per repo, pointed at via `CLAUDE_CONFIG_DIR`), `tokenol` by default only sees the currently-active project. Pass **`--all-projects`** (or `-A`) to any command to scan every `~/.claude*` directory and get a cross-project view:
+If you use workspace isolation (one `~/.claude-<project>` directory per repo, pointed at via `CLAUDE_CONFIG_DIR`):
 
-```bash
-# Total spend across every project in the last 14 days
-tokenol daily --since 14d --all-projects
+- **CLI commands** (`daily`, `sessions`, `projects`, …) default to the currently-active project. Pass **`--all-projects`** (or `-A`) for a cross-project view:
 
-# Which sessions cost the most, globally
-tokenol sessions --since 30d --top 10 -A
-```
+  ```bash
+  # Total spend across every project in the last 14 days
+  tokenol daily --since 14d --all-projects
 
-You can also set `CLAUDE_CONFIG_DIR` to a colon- or comma-separated list of paths to scan a specific subset.
+  # Which sessions cost the most, globally
+  tokenol sessions --since 30d --top 10 -A
+  ```
+
+- **The dashboard** (`tokenol serve`) defaults to **all projects** — `CLAUDE_CONFIG_DIR` is ignored so the dashboard is never silently scoped to a single workspace. Pass `--scoped` to opt into single-project view.
+
+You can also set `CLAUDE_CONFIG_DIR` to a colon- or comma-separated list of paths to scan a specific subset (CLI commands only).
 
 ## Commands
 
@@ -108,8 +112,8 @@ pipx install 'tokenol[serve]'
 # Start the dashboard (binds to http://127.0.0.1:8787)
 tokenol serve
 
-# Cross-project view, faster tick, custom reference threshold
-tokenol serve --all-projects --tick 2s --reference 25
+# Scope to the currently-active project (honor CLAUDE_CONFIG_DIR); faster tick, custom reference threshold
+tokenol serve --scoped --tick 2s --reference 25
 
 # Open browser automatically
 tokenol serve --open

@@ -4,6 +4,22 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.1 — 2026-05-15
+
+### Fixes
+
+- **`tokenol serve` now scans every `~/.claude*` directory by default.**
+  Previously the dashboard honored `CLAUDE_CONFIG_DIR` and silently scoped
+  itself to a single project when workspace isolation pointed the env var
+  at one directory — which made Daily History look mysteriously empty for
+  days when you were working in other projects. The dashboard is now
+  always cross-project unless you explicitly pass `--scoped`. CLI commands
+  (`daily`, `sessions`, `projects`, …) are unchanged — they still default
+  to single-project with `--all-projects` / `-A` as the opt-in.
+- The old `--all-projects` / `-A` flag on `serve` has been removed (the
+  behavior it produced is now the default). Update any scripts that
+  passed it; otherwise no action needed.
+
 ## 0.5.0 — 2026-05-15
 
 ### Features
