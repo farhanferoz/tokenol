@@ -622,6 +622,8 @@ def create_app(
                 "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
                 "input": b["input"],
                 "output": b["output"],
+                "input_cost": b["input_cost"],
+                "output_cost": b["output_cost"],
                 "cache_hit_rate": hit_rate,
             })
         projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)

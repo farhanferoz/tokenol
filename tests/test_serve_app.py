@@ -852,18 +852,22 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     assert "projects" in data
     assert len(data["projects"]) >= 1
     p = data["projects"][0]
-    for key in ["project", "cwd", "cwd_b64", "input", "output", "cache_hit_rate"]:
+    for key in [
+        "project", "cwd", "cwd_b64",
+        "input", "output", "cache_hit_rate",
+        "input_cost", "output_cost",
+    ]:
         assert key in p, f"Missing field: {key}"
     # Billable-token sort is descending.
     billable = [pp["input"] + pp["output"] for pp in data["projects"]]
     assert billable == sorted(billable, reverse=True)
     # cache_hit_rate is a decimal or null.
     assert p["cache_hit_rate"] is None or 0.0 <= p["cache_hit_rate"] <= 1.0
+    # Costs are non-negative floats.
+    assert isinstance(p["input_cost"], (int, float)) and p["input_cost"] >= 0
+    assert isinstance(p["output_cost"], (int, float)) and p["output_cost"] >= 0
 
-    # Oracle cross-check: the endpoint's per-project token sums must match the
-    # raw (non-interrupted) turn totals from the cached snapshot. This catches
-    # aggregation bugs (e.g. counting interrupted turns, double-counting across
-    # sessions) that the shape/sort assertions above would miss.
+    # Oracle cross-check: per-project token sums match raw snapshot totals.
     snap = app.state.snapshot_result
     assert snap is not None, "snapshot should be cached after the endpoint call"
     expected_input = sum(
@@ -878,6 +882,22 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     )
     assert sum(p["input"] for p in data["projects"]) == expected_input
     assert sum(p["output"] for p in data["projects"]) == expected_output
+
+    # Cost oracle: per-project input_cost + output_cost sums match
+    # cost_for_turn() applied to each non-interrupted turn.
+    from tokenol.metrics.cost import cost_for_turn
+    expected_input_cost = sum(
+        cost_for_turn(t.model, t.usage).input_usd
+        for s in snap.sessions for t in s.turns
+        if not t.is_interrupted
+    )
+    expected_output_cost = sum(
+        cost_for_turn(t.model, t.usage).output_usd
+        for s in snap.sessions for t in s.turns
+        if not t.is_interrupted
+    )
+    assert abs(sum(p["input_cost"] for p in data["projects"]) - expected_input_cost) < 1e-9
+    assert abs(sum(p["output_cost"] for p in data["projects"]) - expected_output_cost) < 1e-9
 
 
 @pytest.mark.asyncio
