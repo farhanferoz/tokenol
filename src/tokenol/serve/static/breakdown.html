@@ -76,6 +76,10 @@
     <section class="breakdown-panel" aria-labelledby="bp-daily-work-title">
       <div class="breakdown-panel-heading">
         <h3 id="bp-daily-work-title">Daily Billable Tokens</h3>
+        <span class="pill-row" id="bd-time-unit-pills" role="group" aria-label="Unit">
+          <span data-bdunit="tokens" class="on">Tokens</span>
+          <span data-bdunit="cost">$</span>
+        </span>
         <span class="chart-subheading" id="bp-daily-work-sub"></span>
       </div>
       <div class="breakdown-chart"><canvas id="chart-daily-work" height="200"></canvas></div>
@@ -96,6 +100,10 @@
     <section class="breakdown-panel" aria-labelledby="bp-by-project-title">
       <div class="breakdown-panel-heading">
         <h3 id="bp-by-project-title">Tokens by Project</h3>
+        <span class="pill-row" id="bd-project-unit-pills" role="group" aria-label="Unit">
+          <span data-bdunit="tokens" class="on">Tokens</span>
+          <span data-bdunit="cost">$</span>
+        </span>
         <span class="chart-subheading" id="bp-by-project-sub"></span>
       </div>
       <div class="breakdown-caption" id="bp-by-project-caption" aria-label="Legend for per-project cache hit rate dots"></div>
@@ -104,6 +112,10 @@
     <section class="breakdown-panel" aria-labelledby="bp-by-model-title">
       <div class="breakdown-panel-heading">
         <h3 id="bp-by-model-title">Model Mix</h3>
+        <span class="pill-row" id="bd-model-unit-pills" role="group" aria-label="Unit">
+          <span data-bdunit="tokens" class="on">Tokens</span>
+          <span data-bdunit="cost">$</span>
+        </span>
         <span class="chart-subheading" id="bp-by-model-sub"></span>
       </div>
       <div class="breakdown-chart"><canvas id="chart-by-model" height="260"></canvas></div>
