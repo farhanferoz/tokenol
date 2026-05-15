@@ -18,6 +18,16 @@ class Usage:
 
 
 @dataclass
+class ToolCost:
+    """Attributed slice of a turn's cost for one tool."""
+
+    tool_name: str
+    input_tokens: float = 0.0        # fractional after share split
+    output_tokens: float = 0.0
+    cost_usd: float = 0.0            # input_usd + output_usd + cache_read_usd + cache_creation_usd shares
+
+
+@dataclass
 class RawEvent:
     """One parsed line from a JSONL file, after type filtering."""
 
@@ -55,6 +65,12 @@ class RawEvent:
     # Working directory (from system events)
     cwd: str | None = None
 
+    # Per-tool cost attribution
+    tool_costs: dict[str, ToolCost] = field(default_factory=dict)
+    unattributed_input_tokens: float = 0.0
+    unattributed_output_tokens: float = 0.0
+    unattributed_cost_usd: float = 0.0
+
 
 @dataclass
 class Turn:
@@ -73,6 +89,12 @@ class Turn:
     tool_use_count: int = 0
     tool_error_count: int = 0
     tool_names: Counter[str] = field(default_factory=Counter)
+
+    # Per-tool cost attribution
+    tool_costs: dict[str, ToolCost] = field(default_factory=dict)
+    unattributed_input_tokens: float = 0.0
+    unattributed_output_tokens: float = 0.0
+    unattributed_cost_usd: float = 0.0
 
 
 @dataclass
