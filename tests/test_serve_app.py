@@ -1078,15 +1078,13 @@ async def test_api_tool_detail_returns_payload(tmp_path: Path) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "Read"
-    # From multi.jsonl: Read is used 4 times total (2 in sess-a + 1 in sess-b + 1 in sess-c).
     assert data["total_invocations"] == 4
-    # projA has Read in both sess-a (2) and sess-c (1) = 3; projB has Read in sess-b = 1.
-    projs = {p["cwd"]: p for p in data["projects_using_tool"]}
-    assert projs["/home/u/projA"]["count"] == 3
-    assert projs["/home/u/projB"]["count"] == 1
-    # Sorted desc.
-    counts = [p["count"] for p in data["projects_using_tool"]]
-    assert counts == sorted(counts, reverse=True)
+    by_project = {p["project_label"]: p for p in data["by_project"]}
+    assert by_project["projA"]["invocations"] == 3
+    assert by_project["projB"]["invocations"] == 1
+    # Sorted desc by cost_usd
+    costs = [p["cost_usd"] for p in data["by_project"]]
+    assert costs == sorted(costs, reverse=True)
 
 
 @pytest.mark.asyncio
@@ -1295,3 +1293,35 @@ async def test_breakdown_tools_includes_cost_and_unattributed(tmp_path: Path) ->
     sentinels = [r for r in rows if r["name"] == "__unattributed__"]
     assert len(sentinels) == 1
     assert sentinels[0]["cost_usd"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_includes_scorecards_and_breakdowns(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-pt.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "per_tool_basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/tool/Read")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    sc = data["scorecards"]
+    assert sc["cost_usd"] > 0
+    assert sc["invocations"] >= 1
+    assert "output_tokens" in sc
+    top = sc["top_project"]
+    assert "name" in top and "cost_usd" in top and "share" in top
+    daily = data["daily_cost"]
+    assert len(daily) == 30
+    assert all("date" in d and "cost_usd" in d for d in daily)
+    bp = data["by_project"]
+    assert len(bp) >= 1
+    assert all({"cwd_b64", "project_label", "cost_usd", "invocations", "last_active"} <= set(p) for p in bp)
+    bm = data["by_model"]
+    assert len(bm) >= 1
+    assert all({"name", "cost_usd", "invocations"} <= set(m) for m in bm)

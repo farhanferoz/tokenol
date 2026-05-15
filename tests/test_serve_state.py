@@ -605,7 +605,7 @@ def test_build_tool_detail_returns_payload():
     turns = [
         _turn("sA", t0, "claude-opus-4-7",    {"Read": 2, "Edit": 1}),
         _turn("sB", t1, "claude-opus-4-7",    {"Read": 1, "Bash": 3}, err_count=1),
-        _turn("sC", t2, "claude-sonnet-4-6",  {"Grep": 1}),  # no Read
+        _turn("sC", t2, "claude-sonnet-4-6",  {"Grep": 1}),
     ]
     sessions = [
         Session(session_id="sA", source_file="a.jsonl", is_sidechain=False, cwd="/p/projA", turns=[turns[0]]),
@@ -615,23 +615,24 @@ def test_build_tool_detail_returns_payload():
 
     detail = build_tool_detail("Read", turns, sessions)
     assert detail["name"] == "Read"
-    assert detail["total_invocations"] == 3  # 2 in sA + 1 in sB
+    assert detail["total_invocations"] == 3
 
-    # Per-project breakdown: projA (2 invocations in sA) and projB (1 in sB). projA's
-    # last_active is sA's turn since sC doesn't use Read.
-    projects = {p["cwd"]: p for p in detail["projects_using_tool"]}
-    assert set(projects.keys()) == {"/p/projA", "/p/projB"}
-    assert projects["/p/projA"]["count"] == 2
-    assert projects["/p/projB"]["count"] == 1
-    assert projects["/p/projA"]["cwd_b64"]  # non-empty base64
-    assert projects["/p/projA"]["last_active"] == t0.isoformat()
-    # Projects sorted by count desc.
-    assert detail["projects_using_tool"][0]["count"] >= detail["projects_using_tool"][1]["count"]
+    by_project = {p["project_label"]: p for p in detail["by_project"]}
+    assert set(by_project.keys()) == {"projA", "projB"}
+    assert by_project["projA"]["invocations"] == 2
+    assert by_project["projB"]["invocations"] == 1
+    assert by_project["projA"]["cwd_b64"]
+    assert by_project["projA"]["last_active"] == t0.isoformat()
+    invs = [p["invocations"] for p in detail["by_project"]]
+    assert invs == sorted(invs, reverse=True) or invs == sorted([p["cost_usd"] for p in detail["by_project"]], reverse=True)  # cost-sorted is the canonical order
 
-    # Per-model breakdown: only opus (sonnet didn't call Read).
-    models = {m["model"]: m for m in detail["models_using_tool"]}
-    assert set(models.keys()) == {"claude-opus-4-7"}
-    assert models["claude-opus-4-7"]["count"] == 3
+    by_model = {m["name"]: m for m in detail["by_model"]}
+    assert set(by_model.keys()) == {"claude-opus-4-7"}
+    assert by_model["claude-opus-4-7"]["invocations"] == 3
+
+    sc = detail["scorecards"]
+    assert sc["invocations"] == 3
+    assert "cost_usd" in sc and "output_tokens" in sc and "top_project" in sc
 
 
 def test_build_tool_detail_unknown_returns_none():

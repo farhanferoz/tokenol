@@ -41,6 +41,7 @@ from tokenol.metrics.rollups import (
     build_model_rollups,
     build_project_rollups,
     build_session_rollup,
+    build_tool_cost_daily,
 )
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.metrics.verdicts import compute_verdict
@@ -1334,10 +1335,7 @@ def build_tool_detail(
     turns: list[Turn],
     sessions: list[Session],
 ) -> dict | None:
-    """Build the tool drill-down payload for GET /api/tool/{name}.
-
-    Returns None if the tool was never used in a billable (non-interrupted) turn.
-    """
+    """Build the tool drill-down payload for GET /api/tool/{name}."""
     tool_turns = [
         t for t in turns
         if not t.is_interrupted and t.tool_names.get(name, 0) > 0
@@ -1346,40 +1344,81 @@ def build_tool_detail(
         return None
 
     cwd_by_sid = _grouped_cwd_by_sid(sessions)
-    proj_counts: defaultdict[str, int] = defaultdict(int)
-    proj_last_turn: dict[str, Turn] = {}
-    model_counts: defaultdict[str, int] = defaultdict(int)
+
+    total_cost = 0.0
+    total_output_tokens = 0.0
     total_invocations = 0
+    proj_cost: defaultdict[str, float] = defaultdict(float)
+    proj_invs: defaultdict[str, int] = defaultdict(int)
+    proj_last: dict[str, datetime] = {}
+    model_cost: defaultdict[str, float] = defaultdict(float)
+    model_invs: defaultdict[str, int] = defaultdict(int)
 
     for t in tool_turns:
-        invocations = t.tool_names.get(name, 0)
-        total_invocations += invocations
+        tc = t.tool_costs.get(name)
+        if tc:
+            total_cost += tc.cost_usd
+            total_output_tokens += tc.output_tokens
+        invs = t.tool_names.get(name, 0)
+        total_invocations += invs
         cwd = cwd_by_sid.get(t.session_id, "(unknown)")
-        proj_counts[cwd] += invocations
-        if cwd not in proj_last_turn or t.timestamp > proj_last_turn[cwd].timestamp:
-            proj_last_turn[cwd] = t
+        proj_cost[cwd] += tc.cost_usd if tc else 0.0
+        proj_invs[cwd] += invs
+        if cwd not in proj_last or t.timestamp > proj_last[cwd]:
+            proj_last[cwd] = t.timestamp
         model = t.model or "(unknown)"
-        model_counts[model] += invocations
+        model_cost[model] += tc.cost_usd if tc else 0.0
+        model_invs[model] += invs
 
-    projects = sorted(
-        [{
-            "cwd": cwd,
-            "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
-            "count": proj_counts[cwd],
-            "last_active": proj_last_turn[cwd].timestamp.isoformat(),
-        } for cwd in proj_counts],
-        key=lambda x: -x["count"],
+    grand_total_cost = sum(tt.cost_usd for tt in turns if not tt.is_interrupted) or 1.0
+
+    top_cwd = max(proj_cost.items(), key=lambda kv: kv[1], default=("(unknown)", 0.0))
+    top_project = {
+        "name": top_cwd[0].rsplit("/", 1)[-1] if top_cwd[0] != "(unknown)" else "—",
+        "cost_usd": top_cwd[1],
+        "share": top_cwd[1] / total_cost if total_cost > 0 else 0.0,
+    }
+
+    today = date.today()
+    seven_days_ago_ts = datetime.combine(
+        today - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc
     )
-    models = sorted(
-        [{"model": model, "count": model_counts[model]} for model in model_counts],
-        key=lambda x: -x["count"],
+    invs_7d = sum(
+        t.tool_names.get(name, 0) for t in tool_turns if t.timestamp >= seven_days_ago_ts
+    )
+
+    daily = build_tool_cost_daily(turns, tool_name=name, days=30)
+
+    by_project = sorted(
+        [{
+            "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
+            "project_label": cwd.rsplit("/", 1)[-1] if cwd != "(unknown)" else "(unknown)",
+            "cost_usd": proj_cost[cwd],
+            "invocations": proj_invs[cwd],
+            "last_active": proj_last[cwd].isoformat(),
+        } for cwd in proj_cost],
+        key=lambda r: -r["cost_usd"],
+    )
+    by_model = sorted(
+        [{"name": m, "cost_usd": model_cost[m], "invocations": model_invs[m]}
+         for m in model_cost],
+        key=lambda r: -r["cost_usd"],
     )
 
     return {
         "name": name,
         "total_invocations": total_invocations,
-        "projects_using_tool": projects,
-        "models_using_tool": models,
+        "scorecards": {
+            "cost_usd": total_cost,
+            "output_tokens": total_output_tokens,
+            "invocations": total_invocations,
+            "invocations_7d": invs_7d,
+            "share_of_total": total_cost / grand_total_cost,
+            "top_project": top_project,
+        },
+        "daily_cost": [{"date": d.date.isoformat(), "cost_usd": d.cost_usd} for d in daily],
+        "by_project": by_project,
+        "by_model": by_model,
     }
 
 
