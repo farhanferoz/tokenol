@@ -120,16 +120,17 @@ const _xFmtHour = v => {
   return d.getMinutes() === 0 ? `${d.getHours()}:00` : '';
 };
 
-// Read a CSS custom property from :root at chart-creation time.
-// uPlot (unlike Chart.js) resolves colours eagerly on canvas — CSS vars must be
-// unwrapped to real colour strings before being passed into series/axes config.
-function _readCssVar(name) {
+// Read a :root CSS custom property and return its trimmed value. uPlot resolves
+// colours eagerly on canvas, so series/axes config can't hold raw `var(--...)`
+// strings — they must be unwrapped at chart-creation time.
+export function readCssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
 export function drawChart(container, rawOpts) {
-  // Backward-compat shim: legacy flat opts (no `primary` key) → wrap as primary.
-  // Task 10/11 callers will pass { primary: {...}, secondary?: {...} } directly.
+  // Accept either the new `{ primary, secondary? }` shape or the legacy flat
+  // shape (treated as a single primary series). Internal callers in app.js and
+  // session.js still pass the flat shape for single-series charts.
   let opts = rawOpts;
   if (!opts.primary) {
     opts = { primary: opts };
@@ -166,7 +167,7 @@ export function drawChart(container, rawOpts) {
   const steppedArr = Array.isArray(stepped) ? stepped : ySeries.map(() => !!stepped);
 
   // Resolve secondary colour at chart-creation time (CSS var → real hex string).
-  const secondaryColor = secondary ? (_readCssVar('--series-secondary') || '#2a6389') : null;
+  const secondaryColor = secondary ? (readCssVar('--series-secondary') || '#2a6389') : null;
   const secondaryFmt   = secondary
     ? (Y_FMTRS[secondary.yUnit] ?? (v => Number.isFinite(v) ? String(v) : ''))
     : null;

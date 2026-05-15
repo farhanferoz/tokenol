@@ -282,7 +282,7 @@ header.topbar {
 .pill-group span.disabled, .pill-row span.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
 .tl-legend {
   font-size: 0.85em;
-  color: var(--mute, #7a7062);
+  color: var(--mute);
   margin-left: 0.5em;
 }
 .tl-legend .swatch {

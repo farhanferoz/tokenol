@@ -220,7 +220,7 @@ function renderByProject(data) {
   const useCost = _bdProjectUnit === 'cost';
   const inputData  = projects.map(p => useCost ? p.input_cost  : p.input);
   const outputData = projects.map(p => useCost ? p.output_cost : p.output);
-  const tickFmt    = useCost ? (v => '$' + v.toFixed(2)) : fmtTok;
+  const tickFmt    = useCost ? fmtUSD : fmtTok;
 
   const datasets = [
     { label: 'input',  data: inputData,  backgroundColor: pal[0] },
@@ -538,7 +538,7 @@ function renderDailyWork(data) {
         { label: 'cache created', data: d.days.map(day => day.cache_creation), backgroundColor: pal[2], stack: 'tokens' },
       ];
 
-  const tickFmt = useCost ? (v => '$' + v.toFixed(0)) : fmtTok;
+  const tickFmt = useCost ? fmtUSD : fmtTok;
 
   const totalCost = d.days.reduce((s, day) => s + day.cost_usd, 0);
   const days = Math.max(1, d.days.length);

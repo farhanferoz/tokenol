@@ -87,6 +87,7 @@ def _bucket_turns(
                 "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
                 "input_cost": 0.0, "output_cost": 0.0,
                 "cache_read_cost": 0.0, "cache_creation_cost": 0.0,
+                "total_cost": 0.0,
             })
             b["input"] += t.usage.input_tokens
             b["output"] += t.usage.output_tokens
@@ -97,6 +98,7 @@ def _bucket_turns(
             b["output_cost"] += tc.output_usd
             b["cache_read_cost"] += tc.cache_read_usd
             b["cache_creation_cost"] += tc.cache_creation_usd
+            b["total_cost"] += tc.total_usd
     return buckets
 
 
@@ -641,18 +643,11 @@ def create_app(
         )
 
         total_billable = sum(b["input"] + b["output"] for b in buckets.values()) or 1
-        total_cost = sum(
-            b["input_cost"] + b["output_cost"]
-            + b["cache_read_cost"] + b["cache_creation_cost"]
-            for b in buckets.values()
-        )
+        total_cost = sum(b["total_cost"] for b in buckets.values())
         models = []
         for name, b in buckets.items():
             billable = b["input"] + b["output"]
-            cost_usd = (
-                b["input_cost"] + b["output_cost"]
-                + b["cache_read_cost"] + b["cache_creation_cost"]
-            )
+            cost_usd = b["total_cost"]
             models.append({
                 "model": name,
                 "input": b["input"],

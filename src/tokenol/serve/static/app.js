@@ -1,5 +1,5 @@
 import { fmtUSD, fmtTok, fmtRelTime, fmtRatio, cwdBasename, shortModel, verdictPill, esc, GLOSSARY } from './components.js';
-import { drawChart }                             from './chart.js';
+import { drawChart, readCssVar }                 from './chart.js';
 
 // ---- DOM helpers ----
 const $ = id => document.getElementById(id);
@@ -423,10 +423,8 @@ function _renderLegend(elId, state) {
   if (!el) return;
   if (!state.secondary) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
-  const primaryColor = getComputedStyle(document.documentElement)
-    .getPropertyValue('--amber').trim() || '#a66408';
-  const secondaryColor = getComputedStyle(document.documentElement)
-    .getPropertyValue('--series-secondary').trim() || '#2a6389';
+  const primaryColor   = readCssVar('--amber') || '#a66408';
+  const secondaryColor = readCssVar('--series-secondary') || '#2a6389';
   el.innerHTML =
     `<span class="swatch" style="background:${primaryColor}"></span>` +
     `${_METRIC_LABEL[state.primary] ?? state.primary} (left)` +
