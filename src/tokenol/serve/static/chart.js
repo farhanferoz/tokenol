@@ -152,7 +152,8 @@ export function drawChart(container, rawOpts) {
       && existing.series.length === totalSeries + 1
       && container._yUnit === yUnit
       && container._yScale === yScale
-      && !!container._hasSecondary === !!secondary) {
+      && !!container._hasSecondary === !!secondary
+      && container._secondaryYUnit === (secondary ? secondary.yUnit : null)) {
     existing.setData([xs, ...ySeries, ...(secondary ? [secondary.data] : [])]);
     container._xs = xs;
     container._turnsByX = turnsByX;
@@ -237,10 +238,11 @@ export function drawChart(container, rawOpts) {
   if (secondary) {
     axes.push({
       scale: 'y2',
-      side:  1,   // right side
+      side:  1,                              // right side
       stroke: secondaryColor,
-      ticks:  { ...g, stroke: secondaryColor },
-      grid:   { show: false },   // avoid double gridlines
+      ticks:  { show: false },               // hide inward ticks — they read as
+                                             // minus signs adjacent to right labels
+      grid:   { show: false },               // avoid double gridlines
       size:   _Y_AXIS_SIZE[secondary.yUnit] ?? 50,
       values: (_u, vs) => vs.map(secondaryFmt),
     });
@@ -265,12 +267,13 @@ export function drawChart(container, rawOpts) {
     series,
   }, [xs, ...ySeries, ...(secondary ? [secondary.data] : [])], container);
 
-  container._uplot        = u;
-  container._xs           = xs;
-  container._yUnit        = yUnit;
-  container._yScale       = yScale;
-  container._hasSecondary = !!secondary;
-  container.tabIndex      = 0;
+  container._uplot          = u;
+  container._xs             = xs;
+  container._yUnit          = yUnit;
+  container._yScale         = yScale;
+  container._hasSecondary   = !!secondary;
+  container._secondaryYUnit = secondary ? secondary.yUnit : null;
+  container.tabIndex        = 0;
 
   if (onPointClick) {
     const handler = () => { const { idx } = u.cursor; if (idx != null) onPointClick(container._xs[idx]); };
