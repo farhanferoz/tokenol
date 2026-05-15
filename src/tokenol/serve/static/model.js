@@ -1,4 +1,4 @@
-import { fmtUSD, fmtRelTime, cwdBasename, esc } from '/assets/components.js';
+import { fmtUSD, fmtRelTime, cwdBasename, esc, renderRankedBars } from '/assets/components.js';
 
 const $ = id => document.getElementById(id);
 const name = decodeURIComponent(location.pathname.split('/').pop());
@@ -41,17 +41,40 @@ function render(d) {
   const tbody   = $('model-projects-tbody');
   const noProj  = $('model-no-projects');
   const projects = d.projects_using_model ?? [];
-  if (!projects.length) { noProj?.classList.remove('hidden'); return; }
-  noProj?.classList.add('hidden');
-  tbody.innerHTML = projects.map(p =>
-    `<tr ${p.cwd_b64 ? `style="cursor:pointer" data-href="/project/${esc(p.cwd_b64)}"` : ''}>
-      <td title="${esc(p.cwd ?? '')}">${cwdBasename(p.cwd)}</td>
-      <td class="num">${fmtUSD(p.cost)}</td>
-      <td class="num">${p.turns}</td>
-      <td>${p.last_active ? fmtRelTime(p.last_active) : '–'}</td>
-    </tr>`
-  ).join('');
-  tbody.querySelectorAll('tr[data-href]').forEach(row =>
-    row.addEventListener('click', () => { location.href = row.dataset.href; })
-  );
+  if (!projects.length) {
+    noProj?.classList.remove('hidden');
+  } else {
+    noProj?.classList.add('hidden');
+    tbody.innerHTML = projects.map(p =>
+      `<tr ${p.cwd_b64 ? `style="cursor:pointer" data-href="/project/${esc(p.cwd_b64)}"` : ''}>
+        <td title="${esc(p.cwd ?? '')}">${cwdBasename(p.cwd)}</td>
+        <td class="num">${fmtUSD(p.cost)}</td>
+        <td class="num">${p.turns}</td>
+        <td>${p.last_active ? fmtRelTime(p.last_active) : '–'}</td>
+      </tr>`
+    ).join('');
+    tbody.querySelectorAll('tr[data-href]').forEach(row =>
+      row.addEventListener('click', () => { location.href = row.dataset.href; })
+    );
+  }
+
+  const byTool = d.by_tool || [];
+  const btContainer = $('model-by-tool');
+  const btEmpty = $('model-by-tool-empty');
+  if (!byTool.length) {
+    btContainer.innerHTML = '';
+    btEmpty.classList.remove('hidden');
+  } else {
+    btEmpty.classList.add('hidden');
+    renderRankedBars(
+      btContainer,
+      byTool.map((r) => ({
+        label: r.name,
+        sublabel: `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
+        value: r.cost_usd,
+        href: '/tool/' + encodeURIComponent(r.name),
+      })),
+      { valueFormat: (n) => '$' + (n || 0).toFixed(2) },
+    );
+  }
 }
