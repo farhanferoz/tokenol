@@ -1316,13 +1316,7 @@ def build_model_detail(
         key=lambda x: -x["cost"],
     )
 
-    tool_cost: defaultdict[str, float] = defaultdict(float)
-    tool_invs: defaultdict[str, int] = defaultdict(int)
-    for t in model_turns:
-        for tname, tc in t.tool_costs.items():
-            tool_cost[tname] += tc.cost_usd
-        for tname, count in t.tool_names.items():
-            tool_invs[tname] += count
+    tool_cost, tool_invs, _ = _accumulate_tool_costs(model_turns, with_last_active=False)
 
     by_tool = sorted(
         [{
@@ -1346,6 +1340,26 @@ def build_model_detail(
         "projects_using_model": projects,
         "by_tool": by_tool,
     }
+
+
+def _accumulate_tool_costs(
+    turns: list[Turn], *, with_last_active: bool = True,
+) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
+    """Walk *turns* and aggregate per-tool cost, invocations, and last_active.
+
+    If with_last_active=False, the returned dict is empty (callers can skip it).
+    """
+    cost: defaultdict[str, float] = defaultdict(float)
+    invs: defaultdict[str, int] = defaultdict(int)
+    last: dict[str, datetime] = {}
+    for t in turns:
+        for name, tc in t.tool_costs.items():
+            cost[name] += tc.cost_usd
+        for name, count in t.tool_names.items():
+            invs[name] += count
+            if with_last_active and (name not in last or t.timestamp > last[name]):
+                last[name] = t.timestamp
+    return cost, invs, last
 
 
 def build_tool_detail(
@@ -1655,16 +1669,7 @@ def build_project_detail(
         u = t.usage
         return cache_hit_rate(u.cache_read_input_tokens, u.cache_creation_input_tokens, u.input_tokens)
 
-    tool_cost: defaultdict[str, float] = defaultdict(float)
-    tool_invs: defaultdict[str, int] = defaultdict(int)
-    tool_last: dict[str, datetime] = {}
-    for t in project_turns:
-        for tname, tc in t.tool_costs.items():
-            tool_cost[tname] += tc.cost_usd
-        for tname, count in t.tool_names.items():
-            tool_invs[tname] += count
-            if tname not in tool_last or t.timestamp > tool_last[tname]:
-                tool_last[tname] = t.timestamp
+    tool_cost, tool_invs, tool_last = _accumulate_tool_costs(project_turns)
 
     by_tool = sorted(
         [{

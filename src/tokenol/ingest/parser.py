@@ -12,6 +12,10 @@ from tokenol.enums import AssumptionTag
 from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import RawEvent, ToolCost, Usage
 
+UNATTRIBUTED_TOOL = "__unattributed__"
+UNKNOWN_TOOL = "__unknown__"
+COMPACTION_DROP_RATIO = 0.2
+
 
 def _parse_timestamp(ts: str) -> datetime:
     try:
@@ -174,7 +178,6 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
     bytes_in_context_by_tool: dict[str, int] = {}
     non_tool_bytes_in_context = 0
     peak_input_tokens = 0
-    COMPACTION_DROP_RATIO = 0.2
 
     with path.open(encoding="utf-8", errors="replace") as fh:
         for lineno, raw_line in enumerate(fh, start=1):
@@ -265,7 +268,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                         non_tool_bytes_in_context += b
                 elif btype == "tool_result":
                     bid = block.get("tool_use_id")
-                    name = tool_use_id_to_name.get(bid, "__unknown__") if bid else "__unknown__"
+                    name = tool_use_id_to_name.get(bid, UNKNOWN_TOOL) if bid else UNKNOWN_TOOL
                     bytes_in_context_by_tool[name] = (
                         bytes_in_context_by_tool.get(name, 0) + b
                     )

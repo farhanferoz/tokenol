@@ -16,6 +16,7 @@ import { renderRankedBars } from './components.js';
 
 const SS_PERIOD = 'tokenol.breakdown.period';
 const VALID_RANGES = new Set(['7d', '30d', '90d', 'all']);
+const UNATTRIBUTED_TOOL = UNATTRIBUTED_TOOL;
 
 function getPeriod() {
   const v = sessionStorage.getItem(SS_PERIOD);
@@ -426,7 +427,7 @@ function renderToolMix(data) {
 
   // Filter the unattributed sentinel out of the count for the subheading, and
   // show "N tools · $X total" in cost mode, "N tools · Y calls" in tokens mode.
-  const realTools = tools.filter(t => t.name !== '__unattributed__');
+  const realTools = tools.filter(t => t.name !== UNATTRIBUTED_TOOL);
   const totalCalls = realTools.reduce((s, t) => s + (t.count || 0), 0);
   const totalCost = realTools.reduce((s, t) => s + (t.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-tools-sub');
@@ -441,8 +442,8 @@ function renderToolMix(data) {
   const rows = tools.map(t => {
     let kind;
     if (t.name === 'other') kind = 'other';
-    if (t.name === '__unattributed__') kind = 'unattributed';
-    const displayName = t.name === '__unattributed__'
+    if (t.name === UNATTRIBUTED_TOOL) kind = 'unattributed';
+    const displayName = t.name === UNATTRIBUTED_TOOL
       ? 'unattributed'
       : (t.name === 'other' ? `other (${t.count || 0})` : t.name);
     const lastActiveDate = t.last_active ? t.last_active.slice(0, 10) : null;

@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
+from tokenol.ingest.parser import UNATTRIBUTED_TOOL
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.rollups import _rank_dict_with_others
 from tokenol.metrics.thresholds import DEFAULTS
@@ -716,7 +717,7 @@ def create_app(
             if name in last_active:
                 row["last_active"] = last_active[name].isoformat()
             row["cost_usd"] = row.pop("value")
-        ranked.append({"name": "__unattributed__", "cost_usd": unattr_cost})
+        ranked.append({"name": UNATTRIBUTED_TOOL, "cost_usd": unattr_cost})
 
         return JSONResponse({"range": range, "tools": ranked})
 
