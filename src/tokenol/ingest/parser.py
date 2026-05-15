@@ -60,7 +60,10 @@ def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
 
 
 def _block_bytes(block: dict) -> int:
-    """Byte-size of a content block as it'd appear in the request (JSON-serialized)."""
+    """Byte-size of a content block when JSON-serialized with compact separators.
+
+    Used as a proxy for token count; exact wire size is not the goal.
+    """
     try:
         return len(json.dumps(block, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     except (TypeError, ValueError):
