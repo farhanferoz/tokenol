@@ -218,13 +218,15 @@ function renderByProject(data) {
   const hitRate = projects.map(p => p.cache_hit_rate);
 
   const useCost = _bdProjectUnit === 'cost';
-  const inputData  = projects.map(p => useCost ? p.input_cost  : p.input);
-  const outputData = projects.map(p => useCost ? p.output_cost : p.output);
+  const inputData  = projects.map(p => useCost ? p.input_cost          : p.input);
+  const outputData = projects.map(p => useCost ? p.output_cost         : p.output);
+  const cacheData  = projects.map(p => useCost ? p.cache_creation_cost : p.cache_creation);
   const tickFmt    = useCost ? fmtUSD : fmtTok;
 
   const datasets = [
-    { label: 'input',  data: inputData,  backgroundColor: pal[0] },
-    { label: 'output', data: outputData, backgroundColor: pal[1] },
+    { label: 'input',         data: inputData,  backgroundColor: pal[0], stack: 'all' },
+    { label: 'output',        data: outputData, backgroundColor: pal[1], stack: 'all' },
+    { label: 'cache created', data: cacheData,  backgroundColor: pal[2], stack: 'all' },
   ];
 
   // Caption always uses token counts regardless of mode (share metric).
@@ -243,10 +245,7 @@ function renderByProject(data) {
   if (_chartByProject) {
     _chartByProject.$tokenol = { cwdB64, hitRate };
     _chartByProject.data.labels = labels;
-    for (let i = 0; i < datasets.length; i++) {
-      _chartByProject.data.datasets[i].data = datasets[i].data;
-      _chartByProject.data.datasets[i].backgroundColor = datasets[i].backgroundColor;
-    }
+    _chartByProject.data.datasets = datasets;
     _chartByProject.options.plugins.cacheHealthDots.colors = dotColors;
     _chartByProject.options.scales.y.ticks.callback = tickFmt;
     _chartByProject.update('none');
@@ -260,12 +259,12 @@ function renderByProject(data) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { bottom: 46 } },  // room for rotated labels + dot band
+      layout: { padding: { bottom: 46 } },
       scales: {
-        x: {
+        x: { stacked: true,
           ticks: { maxRotation: 45, minRotation: 45, autoSkip: false, padding: 4 },
         },
-        y: { beginAtZero: true, ticks: { callback: tickFmt } },
+        y: { stacked: true, beginAtZero: true, ticks: { callback: tickFmt } },
       },
       plugins: {
         legend: { position: 'top', align: 'end' },
@@ -525,18 +524,14 @@ function renderDailyWork(data) {
   const labels = d.days.map(day => day.date);
 
   const useCost = _bdTimeUnit === 'cost';
-  const datasets = useCost
-    ? [{
-        label: 'cost',
-        data: d.days.map(day => day.cost_usd),
-        backgroundColor: pal[0],
-        stack: 'cost',
-      }]
-    : [
-        { label: 'input',         data: d.days.map(day => day.input),          backgroundColor: pal[0], stack: 'tokens' },
-        { label: 'output',        data: d.days.map(day => day.output),         backgroundColor: pal[1], stack: 'tokens' },
-        { label: 'cache created', data: d.days.map(day => day.cache_creation), backgroundColor: pal[2], stack: 'tokens' },
-      ];
+  const fields = useCost
+    ? ['input_cost', 'output_cost', 'cache_creation_cost']
+    : ['input',      'output',      'cache_creation'];
+  const datasets = [
+    { label: 'input',         data: d.days.map(day => day[fields[0]]), backgroundColor: pal[0], stack: 'all' },
+    { label: 'output',        data: d.days.map(day => day[fields[1]]), backgroundColor: pal[1], stack: 'all' },
+    { label: 'cache created', data: d.days.map(day => day[fields[2]]), backgroundColor: pal[2], stack: 'all' },
+  ];
 
   const tickFmt = useCost ? fmtUSD : fmtTok;
 
@@ -547,12 +542,8 @@ function renderDailyWork(data) {
 
   const canvas = document.getElementById('chart-daily-work');
   if (_chartDailyWork) {
-    // In-place update: replace datasets wholesale to handle count changes
-    // (3 datasets in tokens mode, 1 in cost mode).
     _chartDailyWork.data.labels = labels;
     _chartDailyWork.data.datasets = datasets;
-    _chartDailyWork.options.scales.x.stacked = !useCost;
-    _chartDailyWork.options.scales.y.stacked = !useCost;
     _chartDailyWork.options.scales.y.ticks.callback = tickFmt;
     _chartDailyWork.update('none');
     return;
@@ -565,8 +556,8 @@ function renderDailyWork(data) {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { stacked: !useCost, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
-        y: { stacked: !useCost, beginAtZero: true, ticks: { callback: tickFmt } },
+        x: { stacked: true, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+        y: { stacked: true, beginAtZero: true, ticks: { callback: tickFmt } },
       },
       plugins: { legend: { position: 'top', align: 'end' } },
     },

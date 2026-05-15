@@ -586,6 +586,20 @@ def create_app(
             turns = [t for t in result.turns if t.timestamp.date() >= since]
             rollups = rollup_by_date(turns, since=since)
 
+        # Per-component cost per day, computed once and joined in below.
+        from tokenol.metrics.cost import cost_for_turn
+        cost_by_date: dict = {}
+        for t in turns:
+            if t.is_interrupted:
+                continue
+            d = t.timestamp.date()
+            slot = cost_by_date.setdefault(d, {"input": 0.0, "output": 0.0, "cache_creation": 0.0})
+            tc = cost_for_turn(t.model, t.usage)
+            slot["input"] += tc.input_usd
+            slot["output"] += tc.output_usd
+            slot["cache_creation"] += tc.cache_creation_usd
+
+        _empty_cost = {"input": 0.0, "output": 0.0, "cache_creation": 0.0}
         return JSONResponse({
             "range": range,
             "days": [
@@ -596,6 +610,9 @@ def create_app(
                     "cache_creation": r.cache_creation_tokens,
                     "cache_read": r.cache_read_tokens,
                     "cost_usd": r.cost_usd,
+                    "input_cost": cost_by_date.get(r.date, _empty_cost)["input"],
+                    "output_cost": cost_by_date.get(r.date, _empty_cost)["output"],
+                    "cache_creation_cost": cost_by_date.get(r.date, _empty_cost)["cache_creation"],
                 }
                 for r in rollups
             ],
@@ -624,8 +641,10 @@ def create_app(
                 "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
                 "input": b["input"],
                 "output": b["output"],
+                "cache_creation": b["cache_creation"],
                 "input_cost": b["input_cost"],
                 "output_cost": b["output_cost"],
+                "cache_creation_cost": b["cache_creation_cost"],
                 "cache_hit_rate": hit_rate,
             })
         projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
