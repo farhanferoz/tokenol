@@ -7,6 +7,8 @@
 //  - Two Time-section charts
 //  - SSE-driven refresh
 
+import { readCssVar } from './chart.js';
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -95,22 +97,21 @@ function renderScorecard(data) {
 // Chart.js configuration (run once)
 // ---------------------------------------------------------------------------
 
+// CSS-var reads are memoized — design tokens are static for the page lifetime,
+// and these are hit several times per chart × every SSE tick.
+const _cssVarCache = new Map();
 function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  let v = _cssVarCache.get(name);
+  if (v === undefined) { v = readCssVar(name); _cssVarCache.set(name, v); }
+  return v;
 }
 
 // Tokenol dataset color cycle, semantic.
 // 0 → amber (input, primary), 1 → alarm (output), 2 → green (cache),
 // 3 → cool (model axis), 4 → mute, 5 → amber-dim.
+const _PAL_NAMES = ['--amber', '--alarm', '--green', '--cool', '--mute', '--amber-dim'];
 function tokenolPalette() {
-  return [
-    cssVar('--amber'),
-    cssVar('--alarm'),
-    cssVar('--green'),
-    cssVar('--cool'),
-    cssVar('--mute'),
-    cssVar('--amber-dim'),
-  ];
+  return _PAL_NAMES.map(cssVar);
 }
 
 // ---------------------------------------------------------------------------

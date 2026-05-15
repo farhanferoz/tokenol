@@ -380,7 +380,6 @@ function _normApiSeries(d, keyOf, tsOf, cmp) {
 
 // Paint a timeline chart into a container, rendering an empty-state placeholder when
 // data is absent. Shared by both hourly and daily panels.
-// When secondaryData is provided, draws a dual-axis chart via {primary, secondary} shape.
 function _paintTimeline(containerId, data, emptyText, drawOpts, secondaryData) {
   const cont = $(containerId);
   if (!cont) return;
@@ -399,32 +398,39 @@ function _paintTimeline(containerId, data, emptyText, drawOpts, secondaryData) {
   }
 }
 
-// Guarded async fetcher: skips when already in-flight, paints on 2xx.
-function _makeFetcher({ urlFn, xform, paint }) {
-  let busy = false;
-  return async () => {
-    if (busy) return;
-    busy = true;
-    try {
-      const res = await fetch(urlFn());
-      if (res.ok) paint(xform(await res.json()));
-    } finally { busy = false; }
-  };
-}
-
 // ---- metric labels for legend ----
 const _METRIC_LABEL = {
   hit_pct: 'Hit%', cost_per_kw: '$/kW', ctx_ratio: 'Ctx',
   cache_reuse: 'Cache reuse', output: 'Output', cost: 'Cost',
 };
 
+// Build the {label, data, yUnit} secondary-series object from a raw /api/* payload,
+// aligned to the primary chart's x-axis. `tsOf` converts a payload point to the
+// same epoch-seconds value the primary uses, so a Map lookup pairs them up.
+function _buildSecondarySeries(secondaryRaw, primaryXs, tsOf, metricKey) {
+  if (!secondaryRaw || !metricKey) return null;
+  const secSeries = secondaryRaw.series?.[0];
+  if (!secSeries?.points?.length) return null;
+  const byTs = new Map(secSeries.points.map(p => [tsOf(p), p.value]));
+  return {
+    label: _METRIC_LABEL[metricKey] ?? metricKey,
+    data:  new Float64Array(Array.from(primaryXs, x => byTs.get(x) ?? NaN)),
+    yUnit: secondaryRaw.y_unit,
+  };
+}
+
+// Swatch colours are resolved once at module load — design tokens are static
+// for the page lifetime and the legend repaints on every SSE tick.
+const _LEGEND_PRIMARY   = readCssVar('--amber')             || '#a66408';
+const _LEGEND_SECONDARY = readCssVar('--series-secondary')  || '#2a6389';
+
 function _renderLegend(elId, state, compare) {
   const el = document.getElementById(elId);
   if (!el) return;
   if (state.secondary) {
     el.hidden = false;
-    const primaryColor   = readCssVar('--amber') || '#a66408';
-    const secondaryColor = readCssVar('--series-secondary') || '#2a6389';
+    const primaryColor   = _LEGEND_PRIMARY;
+    const secondaryColor = _LEGEND_SECONDARY;
     el.innerHTML =
       `<span class="swatch" style="background:${primaryColor}"></span>` +
       `${_METRIC_LABEL[state.primary] ?? state.primary} (left)` +
@@ -546,20 +552,11 @@ async function _fetchHourly() {
 function _paintHourly(data, secondaryRaw) {
   const scale = _scaleFor(_hMetric.primary, _hScaleRaw);
   _syncScalePills('hourly-scale-pills', _hMetric.primary === 'hit_pct' ? 'linear-forced' : scale);
-  let secondaryData = null;
-  if (secondaryRaw && _hMetric.secondary) {
-    const secSeries = secondaryRaw.series?.[0];
-    if (secSeries?.points?.length) {
-      // Build lookup by timestamp (seconds) — same conversion as _apiToChartData uses.
-      const byTs = new Map(secSeries.points.map(p => [new Date(p.hour).getTime() / 1000, p.value]));
-      const secArr = new Float64Array(Array.from(data.xs, x => byTs.get(x) ?? NaN));
-      secondaryData = {
-        label: _METRIC_LABEL[_hMetric.secondary] ?? _hMetric.secondary,
-        data: secArr,
-        yUnit: secondaryRaw.y_unit,
-      };
-    }
-  }
+  const secondaryData = _buildSecondarySeries(
+    secondaryRaw, data.xs,
+    p => new Date(p.hour).getTime() / 1000,
+    _hMetric.secondary,
+  );
   _paintTimeline('hourly-chart', data, 'No data for this selection.', {
     stepped: true,
     yScale: scale,
@@ -877,20 +874,11 @@ function _paintDaily(data, secondaryRaw) {
     if (data._note) { note.textContent = data._note; note.classList.remove('hidden'); }
     else            { note.textContent = '';         note.classList.add('hidden');    }
   }
-  let secondaryData = null;
-  if (secondaryRaw && _dMetric.secondary) {
-    const secSeries = secondaryRaw.series?.[0];
-    if (secSeries?.points?.length) {
-      // Build lookup by timestamp (seconds) — same conversion as _apiToDailyChartData uses.
-      const byTs = new Map(secSeries.points.map(p => [new Date(p.date + 'T00:00:00').getTime() / 1000, p.value]));
-      const secArr = new Float64Array(Array.from(data.xs, x => byTs.get(x) ?? NaN));
-      secondaryData = {
-        label: _METRIC_LABEL[_dMetric.secondary] ?? _dMetric.secondary,
-        data: secArr,
-        yUnit: secondaryRaw.y_unit,
-      };
-    }
-  }
+  const secondaryData = _buildSecondarySeries(
+    secondaryRaw, data.xs,
+    p => new Date(p.date + 'T00:00:00').getTime() / 1000,
+    _dMetric.secondary,
+  );
   _paintTimeline('daily-chart', data, 'No history yet — check back after a few days.', {
     xFmt: _xFmtDate,
     stepped: data.labels.map(lbl => lbl !== '7d avg'),

@@ -128,13 +128,9 @@ export function readCssVar(name) {
 }
 
 export function drawChart(container, rawOpts) {
-  // Accept either the new `{ primary, secondary? }` shape or the legacy flat
-  // shape (treated as a single primary series). Internal callers in app.js and
-  // session.js still pass the flat shape for single-series charts.
-  let opts = rawOpts;
-  if (!opts.primary) {
-    opts = { primary: opts };
-  }
+  // Single-series callers pass a flat opts object; dual-axis callers wrap it as
+  // { primary, secondary }. Normalize before destructuring.
+  const opts = rawOpts.primary ? rawOpts : { primary: rawOpts };
   const { primary, secondary } = opts;
 
   const {
@@ -144,9 +140,8 @@ export function drawChart(container, rawOpts) {
 
   const xFmtFn  = xFmt ?? _xFmtHour;
   const existing = container._uplot;
-  // Fast path: reuse the existing chart instance when axis config is unchanged.
-  // Changing scale (linear ↔ log) reshapes the y distribution, so fall through
-  // to a rebuild. Also rebuild when secondary presence changes.
+  // Reuse the existing uPlot when axis shape is unchanged; rebuild when scale
+  // (linear ↔ log), yUnit, or secondary presence/unit changes.
   const totalSeries = ySeries.length + (secondary ? 1 : 0);
   if (existing
       && existing.series.length === totalSeries + 1
@@ -167,7 +162,6 @@ export function drawChart(container, rawOpts) {
   const g   = { stroke: '#d6cab0', width: 1 };
   const steppedArr = Array.isArray(stepped) ? stepped : ySeries.map(() => !!stepped);
 
-  // Resolve secondary colour at chart-creation time (CSS var → real hex string).
   const secondaryColor = secondary ? (readCssVar('--series-secondary') || '#2a6389') : null;
   const secondaryFmt   = secondary
     ? (Y_FMTRS[secondary.yUnit] ?? (v => Number.isFinite(v) ? String(v) : ''))
@@ -185,7 +179,7 @@ export function drawChart(container, rawOpts) {
   ];
 
   if (secondary) {
-    // Match primary's step / smooth treatment so the two lines read as siblings.
+    // Match primary's step treatment so the two lines read as siblings.
     const secondaryStepped = steppedArr.some(Boolean);
     series.push({
       label:    secondary.label ?? 'secondary',
@@ -203,33 +197,24 @@ export function drawChart(container, rawOpts) {
   container._turnsByX = turnsByX;
   const turnsAt = (x) => container._turnsByX?.get(x);
 
-  // Build scales: primary y always present; y2 added when secondary is present.
+  // Tokenol metrics are non-negative — clamp lower bound to 0 so low-value
+  // points don't sit in a phantom negative-padding zone.
+  const _linearRange = (_u, lo, hi) => {
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+    const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
+    return [Math.max(0, lo - pad), hi + pad];
+  };
+
   const scales = yScale === 'log'
     ? { y: { distr: 3, range: (_u, lo, hi) => {
         const lower = Math.max(1e-4, Number.isFinite(lo) ? lo : 1e-4);
         const upper = Number.isFinite(hi) && hi > lower ? hi : lower * 10;
         return [lower, upper];
       }}}
-    : { y: { range: (_u, lo, hi) => {
-        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
-        const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
-        // Tokenol metrics are non-negative — clamp lower bound so the chart
-        // never extends below 0 and low-value points don't sit in a phantom
-        // negative-padding zone.
-        return [Math.max(0, lo - pad), hi + pad];
-      }}};
+    : { y: { range: _linearRange } };
 
-  if (secondary) {
-    scales.y2 = {
-      range: (_u, lo, hi) => {
-        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
-        const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
-        return [Math.max(0, lo - pad), hi + pad];
-      },
-    };
-  }
+  if (secondary) scales.y2 = { range: _linearRange };
 
-  // Build axes.
   const axes = [
     { stroke: '#7a7062', ticks: g, grid: g, values: (_u, vs) => vs.map(xFmtFn) },
     { scale: 'y', stroke: '#7a7062', ticks: g, grid: g, size: _Y_AXIS_SIZE[yUnit] ?? 50, values: (_u, vs) => vs.map(fmt) },
@@ -248,7 +233,6 @@ export function drawChart(container, rawOpts) {
     });
   }
 
-  const allSeries = ySeries.length + (secondary ? 1 : 0);
   const u = new uPlot({
     width:   container.offsetWidth || 600,
     height,
