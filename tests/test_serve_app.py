@@ -1325,3 +1325,48 @@ async def test_tool_detail_includes_scorecards_and_breakdowns(tmp_path: Path) ->
     bm = data["by_model"]
     assert len(bm) >= 1
     assert all({"name", "cost_usd", "invocations"} <= set(m) for m in bm)
+
+
+@pytest.mark.asyncio
+async def test_project_detail_includes_by_tool(tmp_path: Path) -> None:
+    import base64
+    dst = tmp_path / "projects" / "sess-pt.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "per_tool_basic.jsonl").read_bytes())
+
+    cwd_b64 = base64.urlsafe_b64encode(b"/home/u/per-tool-fixture").decode().rstrip("=")
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(f"/api/project/{cwd_b64}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    bt = data["by_tool"]
+    assert len(bt) >= 1
+    assert all({"name", "cost_usd", "invocations", "last_active"} <= set(r) for r in bt)
+    assert bt == sorted(bt, key=lambda r: -r["cost_usd"])
+
+
+@pytest.mark.asyncio
+async def test_model_detail_includes_by_tool(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-pt.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "per_tool_basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/model/claude-opus-4-7")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    bt = data["by_tool"]
+    assert len(bt) >= 1
+    assert all({"name", "cost_usd", "invocations"} <= set(r) for r in bt)
+    assert bt == sorted(bt, key=lambda r: -r["cost_usd"])

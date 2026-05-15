@@ -1637,6 +1637,27 @@ def build_project_detail(
         u = t.usage
         return cache_hit_rate(u.cache_read_input_tokens, u.cache_creation_input_tokens, u.input_tokens)
 
+    tool_cost: defaultdict[str, float] = defaultdict(float)
+    tool_invs: defaultdict[str, int] = defaultdict(int)
+    tool_last: dict[str, datetime] = {}
+    for t in project_turns:
+        for tname, tc in t.tool_costs.items():
+            tool_cost[tname] += tc.cost_usd
+        for tname, count in t.tool_names.items():
+            tool_invs[tname] += count
+            if tname not in tool_last or t.timestamp > tool_last[tname]:
+                tool_last[tname] = t.timestamp
+
+    by_tool = sorted(
+        [{
+            "name": tname,
+            "cost_usd": tool_cost[tname],
+            "invocations": tool_invs[tname],
+            "last_active": tool_last[tname].isoformat(),
+        } for tname in tool_invs],
+        key=lambda r: -r["cost_usd"],
+    )
+
     return {
         "cwd": cwd,
         "cwd_b64": cwd_b64,
@@ -1665,6 +1686,7 @@ def build_project_detail(
             }
             for t in top_turns
         ],
+        "by_tool": by_tool,
     }
 
 
