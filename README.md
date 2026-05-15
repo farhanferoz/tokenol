@@ -17,7 +17,7 @@ Claude Code bills you for everything the model reads — input, output, **and** 
 
 ![Main dashboard](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/main.jpg)
 
-Breakdowns tab — daily work / cache trends, project · model · tool mix with click-through:
+Breakdowns tab — daily work / cache trends, project · model · tool mix with click-through. Daily Billable Tokens, Tokens by Project, and Model Mix each have a small `TOKENS / $` toggle that swaps token counts for actual cost without a roundtrip:
 
 ![Breakdowns, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_top.jpg)
 ![Breakdowns, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_bottom.jpg)
@@ -150,8 +150,8 @@ Main page layout (top to bottom):
 |---|---|
 | **Topbar** | Today's cost · sessions · output · last-active time; global period selector (Today / 7D / 30D / All) |
 | **Efficiency tiles** | Hit% · $/kW · Ctx · Cache reuse — each with a delta chip vs 7-day median and colour-coded threshold |
-| **Hour By Hour** | Hourly metric timeline with day-picker, metric pills, project/model filters, and click-to-drilldown |
-| **Daily History** | 30-day metric history with 7-day moving average overlay; range pills (7D / 30D / 90D / All) |
+| **Hour By Hour** | Hourly metric timeline with day-picker, metric pills, project/model filters, click-to-drilldown, and an optional **compare** overlay to put a second metric on the right y-axis |
+| **Daily History** | 30-day metric history with 7-day moving average overlay; range pills (7D / 30D / 90D / All); same dual-metric compare as above |
 | **Models** | Per-model cost, turns, output, and efficiency metrics; local range override; click row → `/model/<name>` |
 | **Recent Activity** | Active projects in the last 60 min with Ctx used, $/kW, hit%, verdict; sortable; click row → `/project/<cwd>` |
 

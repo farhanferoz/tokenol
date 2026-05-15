@@ -4,46 +4,64 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased — cost-visibility overhaul
+## 0.5.0 — 2026-05-15
 
 ### Features
 
-- **Overview: dual-metric overlay on Hour-By-Hour and Daily History.** The
-  metric pill row is now a cyclic 2-of-N selector — click a pill to set the
-  primary metric, click again to demote to secondary (overlaid on a right
-  y-axis), click a third time to deselect. Max two metrics. Secondary series
-  renders in slate-blue (`--series-secondary`) at 1.5 px, with a small inline
-  legend below the pill row. LIN/LOG applies to the primary axis only;
-  secondary axis is always linear. Selection persists per chart in
-  `localStorage` (`tokenol.hourly.metric`, `tokenol.daily.metric`). First-time
-  users land on `HIT%` single-series exactly as before.
+- **Overview: dual-metric compare overlay on Hour-By-Hour and Daily History.**
+  Each chart gains a small `compare` toggle pill. Toggle on → pick a second
+  metric from the existing pill row and it renders on a right y-axis,
+  overlaid on the primary series. The secondary line is slate-blue
+  (`--series-secondary`) at 1.5 px for visual restraint; an inline legend
+  below the pill row names both. LIN/LOG applies to the primary axis only;
+  secondary axis is always linear. Toggle off drops the secondary and
+  restores single-series view. Selection and compare state persist per chart
+  in `localStorage`. First-time users land on `HIT%` single-series exactly
+  as before.
 - **Breakdown: per-chart `TOKENS / $` toggle on three cards.** Daily Billable
   Tokens, Tokens by Project, and Model Mix gain a small pill pair next to
-  their titles. `$` mode shows actual cost: a single per-day bar for Daily
-  Billable Tokens, input + output cost bars for Tokens by Project, and slice
-  sizing by cost for Model Mix (which surfaces how heavily Opus dominates
-  cost despite being a small token share). Cache-hit dots, "top N of M"
-  captions, and the existing $-annotated summary cards are unchanged. Each
-  chart's mode is independent and persists in `localStorage`.
+  their titles. `$` mode shows actual cost stacked by component
+  (input / output / cache created / cache read) so the bar height equals the
+  per-bucket cost; Model Mix slice sizing switches to cost share, which
+  surfaces how heavily Opus dominates cost despite being a small token
+  share. Cache-hit dots, "top N of M" captions, and the existing
+  $-annotated summary cards are unchanged. Each chart's mode is independent
+  and persists in `localStorage`.
 - **Backend payloads enriched with cost.** `/api/breakdown/by-project` returns
-  `input_cost` and `output_cost` per project; `/api/breakdown/by-model`
-  returns `cost_usd` and `cost_share` per model. No new endpoints, no schema
+  per-component cost (`input_cost`, `output_cost`, `cache_creation_cost`,
+  `cache_read_cost`); `/api/breakdown/by-model` returns `cost_usd` and
+  `cost_share` per model; `/api/breakdown/daily-tokens` returns the same
+  four per-component cost fields per day. No new endpoints, no schema
   changes. The Tools chart and the Daily Cache Re-use chart keep their
   current shapes — per-tool cost attribution would need a parser change,
   deliberately deferred (same constraint that omitted the error-rate column
   from Tool drill-down).
 
+### Fixes
+
+- **Chart y-axis lower bound is clamped to 0.** Non-negative tokenol metrics
+  (Hit%, Output, Cost, …) no longer extend into a phantom negative-padding
+  zone when the data is close to zero.
+- **Right-axis labels no longer read as negatives.** Hidden the inward tick
+  marks on the secondary axis — they were touching the dollar signs and
+  visually reading as minus signs.
+- **Secondary-metric switch rebuilds the chart instance.** uPlot fast-path
+  now compares the secondary y-unit too, so switching the overlaid metric
+  (e.g. Output → Cost) replaces the value formatter instead of leaving the
+  old one in place.
+
 ### Internal
 
 - `chart.js` `drawChart` (uPlot) accepts an optional `secondary` series with
-  its own right y-axis (`y2`). Backward-compat shim wraps the legacy flat
-  opts shape as `{ primary: opts }`, so all existing callers (Overview line
-  charts, Session-detail spark lines) render identically. Single-series
-  output is byte-equivalent to before this change.
-- `_bucket_turns` in `serve/app.py` now accumulates per-component cost
-  (`input_cost`, `output_cost`, `cache_read_cost`, `cache_creation_cost`)
-  alongside the existing token totals, so both by-project and by-model
-  endpoints reuse the same aggregation pass.
+  its own right y-axis (`y2`). Single-series callers pass the flat opts shape
+  unchanged; dual-axis callers wrap it as `{ primary, secondary }`.
+- `_bucket_turns` in `serve/app.py` accumulates per-component cost
+  (`input_cost`, `output_cost`, `cache_read_cost`, `cache_creation_cost`,
+  `total_cost`) alongside the existing token totals, so by-project and
+  by-model endpoints reuse the same aggregation pass.
+- CSS-var lookups in the breakdown palette and Overview legend are now
+  memoized — design tokens are static for the page lifetime and were being
+  hit several times per chart × every SSE tick.
 
 ## 0.4.1 — 2026-05-03
 
