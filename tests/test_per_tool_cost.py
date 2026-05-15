@@ -334,3 +334,21 @@ def test_builder_propagates_tool_costs():
     assert "Read" in t1.tool_costs
     assert t1.tool_costs["Read"].output_tokens > 0
     assert t1.unattributed_cost_usd >= 0
+
+
+def test_build_tool_cost_rollups_across_turns():
+    from tokenol.ingest.builder import build_sessions, build_turns
+    from tokenol.metrics.rollups import build_tool_cost_rollups
+
+    fixture = FIXTURES / "per_tool_basic.jsonl"
+    turns = build_turns([fixture])
+    sessions = build_sessions(turns, [fixture])
+    all_turns = [t for s in sessions for t in s.turns]
+    rollups = build_tool_cost_rollups(all_turns)
+
+    by_name = {r.tool_name: r for r in rollups}
+    assert "Read" in by_name and "Bash" in by_name
+    assert by_name["Read"].cost_usd > 0
+    assert by_name["Read"].invocations == 1
+    assert by_name["Read"].last_active is not None
+    assert rollups == sorted(rollups, key=lambda r: r.cost_usd, reverse=True)

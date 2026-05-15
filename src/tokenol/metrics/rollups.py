@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from tokenol.enums import BlowUpVerdict
 from tokenol.metrics.context import (
@@ -105,6 +105,65 @@ class ModelRollup:
     cache_reuse_n_to_1: float | None = None
     cost_per_kw_val: float | None = None
     cost_share: float | None = None
+
+
+@dataclass
+class ToolCostRollup:
+    tool_name: str
+    invocations: int
+    input_tokens: float
+    output_tokens: float
+    cost_usd: float
+    last_active: datetime | None
+
+
+def build_tool_cost_rollups(turns: list[Turn]) -> list[ToolCostRollup]:
+    """Aggregate per-tool cost across *turns*. Skips interrupted turns."""
+    buckets: dict[str, ToolCostRollup] = {}
+    for turn in turns:
+        if turn.is_interrupted:
+            continue
+        for name, tc in turn.tool_costs.items():
+            if name not in buckets:
+                buckets[name] = ToolCostRollup(
+                    tool_name=name, invocations=0,
+                    input_tokens=0.0, output_tokens=0.0, cost_usd=0.0,
+                    last_active=None,
+                )
+            r = buckets[name]
+            r.input_tokens += tc.input_tokens
+            r.output_tokens += tc.output_tokens
+            r.cost_usd += tc.cost_usd
+            if name in turn.tool_names:
+                r.invocations += turn.tool_names[name]
+                if r.last_active is None or turn.timestamp > r.last_active:
+                    r.last_active = turn.timestamp
+    return sorted(buckets.values(), key=lambda r: r.cost_usd, reverse=True)
+
+
+@dataclass
+class DailyToolCost:
+    date: date
+    cost_usd: float
+
+
+def build_tool_cost_daily(
+    turns: list[Turn], *, tool_name: str, days: int = 30, today: date | None = None
+) -> list[DailyToolCost]:
+    """Per-day cost_usd for *tool_name* over the last *days* days, zero-filled."""
+    today = today or date.today()
+    start = today - timedelta(days=days - 1)
+    buckets: dict[date, float] = {start + timedelta(days=i): 0.0 for i in range(days)}
+    for turn in turns:
+        if turn.is_interrupted:
+            continue
+        tc = turn.tool_costs.get(tool_name)
+        if not tc:
+            continue
+        d = turn.timestamp.date()
+        if d in buckets:
+            buckets[d] += tc.cost_usd
+    return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
 
 
 def build_session_rollup(session: Session) -> SessionRollup:
