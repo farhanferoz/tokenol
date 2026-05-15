@@ -1256,3 +1256,31 @@ def test_lifespan_starts_and_stops_flusher(tmp_path, monkeypatch) -> None:
         assert not pidfile_path().exists()
 
     asyncio.run(go())
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_includes_cost_and_unattributed(tmp_path: Path) -> None:
+    """Tool Mix endpoint surfaces cost_usd per tool plus a sentinel
+    __unattributed__ row so the frontend can render the dim reconciliation row."""
+    dst = tmp_path / "projects" / "sess-pt.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "per_tool_basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["range"] == "all"
+    assert "tools" in data
+    rows = data["tools"]
+    for row in rows:
+        assert "cost_usd" in row
+        assert "name" in row
+    sentinels = [r for r in rows if r["name"] == "__unattributed__"]
+    assert len(sentinels) == 1
+    assert sentinels[0]["cost_usd"] >= 0

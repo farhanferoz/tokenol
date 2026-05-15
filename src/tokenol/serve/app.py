@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
-from tokenol.metrics.rollups import _rank_counter_with_others
+from tokenol.metrics.rollups import _rank_dict_with_others
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
 
@@ -691,15 +691,33 @@ def create_app(
         result = _current_snapshot_result(request)
         since = range_since(range, date.today()) if range != "all" else None
 
-        total: Counter[str] = Counter()
+        cost_by_tool: dict[str, float] = {}
+        tokens_by_tool: Counter[str] = Counter()
+        unattr_cost = 0.0
+        last_active: dict[str, datetime] = {}
+
         for t in result.turns:
             if since is not None and t.timestamp.date() < since:
                 continue
             if t.is_interrupted:
                 continue
-            total.update(t.tool_names)
+            tokens_by_tool.update(t.tool_names)
+            for name, tc in t.tool_costs.items():
+                cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
+                if name in t.tool_names and (name not in last_active or t.timestamp > last_active[name]):
+                    last_active[name] = t.timestamp
+            unattr_cost += t.unattributed_cost_usd
 
-        tools = _rank_counter_with_others(total, top_n=10)
-        return JSONResponse({"range": range, "tools": tools})
+        ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
+        for row in ranked:
+            name = row["name"]
+            if name in tokens_by_tool:
+                row["count"] = tokens_by_tool[name]
+            if name in last_active:
+                row["last_active"] = last_active[name].isoformat()
+            row["cost_usd"] = row.pop("value")
+        ranked.append({"name": "__unattributed__", "cost_usd": unattr_cost})
+
+        return JSONResponse({"range": range, "tools": ranked})
 
     return app
