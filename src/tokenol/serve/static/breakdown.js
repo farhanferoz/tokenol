@@ -8,6 +8,7 @@
 //  - SSE-driven refresh
 
 import { readCssVar } from './chart.js';
+import { renderRankedBars } from './components.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -25,10 +26,12 @@ function setPeriod(p) { sessionStorage.setItem(SS_PERIOD, p); }
 const _LS_BD_TIME_UNIT    = 'tokenol.breakdown.timeUnit';
 const _LS_BD_PROJECT_UNIT = 'tokenol.breakdown.projectUnit';
 const _LS_BD_MODEL_UNIT   = 'tokenol.breakdown.modelUnit';
+const _LS_BD_TOOL_UNIT    = 'tokenol.breakdown.toolUnit';
 
 let _bdTimeUnit    = localStorage.getItem(_LS_BD_TIME_UNIT)    || 'tokens';
 let _bdProjectUnit = localStorage.getItem(_LS_BD_PROJECT_UNIT) || 'tokens';
 let _bdModelUnit   = localStorage.getItem(_LS_BD_MODEL_UNIT)   || 'tokens';
+let _bdToolUnit    = localStorage.getItem(_LS_BD_TOOL_UNIT)    || 'cost';
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -412,68 +415,54 @@ async function loadThresholdsFromPrefs() {
   }
 }
 
-let _chartTools = null;
+let _chartTools = null; // dead after this task; safe to remove in a follow-up
+let _toolsData = null;
 
 function renderToolMix(data) {
-  const pal = tokenolPalette();
-  const tools = data.tools || [];
-  const labels = tools.map(t => t.tool);
-  const counts = tools.map(t => t.count);
+  if (data) _toolsData = data;
+  const d = _toolsData;
+  if (!d) return;
+  const tools = d.tools || [];
+  const useCost = _bdToolUnit === 'cost';
 
+  // Filter the unattributed sentinel out of the count for the subheading, and
+  // show "N tools · $X total" in cost mode, "N tools · Y calls" in tokens mode.
+  const realTools = tools.filter(t => t.name !== '__unattributed__');
+  const totalCalls = realTools.reduce((s, t) => s + (t.count || 0), 0);
+  const totalCost = realTools.reduce((s, t) => s + (t.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-tools-sub');
-  const totalCalls = counts.reduce((s, n) => s + n, 0);
-  subEl.textContent = tools.length === 0
-    ? 'no tool calls'
-    : `${tools.length} tool${tools.length === 1 ? '' : 's'} · ${fmtInt(totalCalls)} calls`;
-
-  const names = tools.map(t => t.tool === 'others' ? null : t.tool);
-
-  const canvas = document.getElementById('chart-tools');
-  if (_chartTools) {
-    _chartTools.$tokenol = { names };
-    _chartTools.data.labels = labels;
-    _chartTools.data.datasets[0].data = counts;
-    _chartTools.update('none');
-    return;
+  if (realTools.length === 0) {
+    subEl.textContent = 'no tool calls';
+  } else {
+    subEl.textContent = useCost
+      ? `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ${fmtUSD(totalCost)} attributed`
+      : `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ${fmtInt(totalCalls)} calls`;
   }
-  _chartTools = new window.Chart(canvas, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{
-        label: 'calls',
-        data: counts,
-        backgroundColor: pal[0],
-        borderWidth: 0,
-      }],
-    },
-    options: {
-      indexAxis: 'y',
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        x: { beginAtZero: true, ticks: { callback: v => fmtInt(v) } },
-        y: { ticks: { autoSkip: false } },
-      },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label(ctx) {
-              return `${ctx.label}: ${fmtInt(ctx.parsed.x)} calls`;
-            },
-          },
-        },
-      },
-      onClick: (_evt, elements) => {
-        if (!elements.length) return;
-        const idx = elements[0].index;
-        const name = _chartTools.$tokenol.names[idx];
-        if (name) window.location.href = `/tool/${encodeURIComponent(name)}`;
-      },
-    },
+
+  const rows = tools.map(t => {
+    let kind;
+    if (t.name === 'other') kind = 'other';
+    if (t.name === '__unattributed__') kind = 'unattributed';
+    const displayName = t.name === '__unattributed__'
+      ? 'unattributed'
+      : (t.name === 'other' ? `other (${t.count || 0})` : t.name);
+    const lastActiveDate = t.last_active ? t.last_active.slice(0, 10) : null;
+    const callCount = t.count || 0;
+    const sublabel = kind === 'unattributed'
+      ? undefined
+      : (lastActiveDate
+        ? `${callCount} call${callCount === 1 ? '' : 's'} · ${lastActiveDate}`
+        : `${callCount} call${callCount === 1 ? '' : 's'}`);
+    return {
+      label: displayName,
+      sublabel,
+      value: useCost ? (t.cost_usd || 0) : callCount,
+      href: kind ? undefined : `/tool/${encodeURIComponent(t.name)}`,
+      kind,
+    };
   });
-  _chartTools.$tokenol = { names };
+  const fmt = useCost ? fmtUSD : (n) => fmtInt(n) + ' calls';
+  renderRankedBars(document.getElementById('bp-tools-bars'), rows, { valueFormat: fmt });
 }
 
 let _chartDefaultsApplied = false;
@@ -740,5 +729,10 @@ _wireUnitPills('bd-model-unit-pills', _LS_BD_MODEL_UNIT,
   () => _bdModelUnit,
   v  => { _bdModelUnit = v; },
   () => renderByModel(null),
+);
+_wireUnitPills('bd-tools-unit-pills', _LS_BD_TOOL_UNIT,
+  () => _bdToolUnit,
+  v  => { _bdToolUnit = v; },
+  () => renderToolMix(null),
 );
 loadThresholdsFromPrefs().then(() => refreshAll());

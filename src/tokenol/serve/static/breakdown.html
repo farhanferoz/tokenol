@@ -129,9 +129,13 @@
     <section class="breakdown-panel" aria-labelledby="bp-tools-title">
       <div class="breakdown-panel-heading">
         <h3 id="bp-tools-title">Tool Mix</h3>
+        <span class="pill-row" id="bd-tools-unit-pills" role="group" aria-label="Unit">
+          <span data-bdunit="tokens">Tokens</span>
+          <span data-bdunit="cost" class="on">$</span>
+        </span>
         <span class="chart-subheading" id="bp-tools-sub"></span>
       </div>
-      <div class="breakdown-chart breakdown-chart--tall"><canvas id="chart-tools" height="320"></canvas></div>
+      <div class="breakdown-chart breakdown-chart--tall" id="bp-tools-bars"></div>
     </section>
   </div>
 
