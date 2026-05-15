@@ -184,6 +184,8 @@ export function drawChart(container, rawOpts) {
   ];
 
   if (secondary) {
+    // Match primary's step / smooth treatment so the two lines read as siblings.
+    const secondaryStepped = steppedArr.some(Boolean);
     series.push({
       label:    secondary.label ?? 'secondary',
       scale:    'y2',
@@ -192,6 +194,7 @@ export function drawChart(container, rawOpts) {
       spanGaps: false,
       points:   { size: 4, fill: secondaryColor },
       value:    (_u, v) => secondaryFmt(v),
+      ...(secondaryStepped ? { paths: _steppedGapAware } : {}),
     });
   }
 
@@ -247,7 +250,9 @@ export function drawChart(container, rawOpts) {
     height,
     padding: [8, 4, 0, 0],
     select:  { show: false },
-    legend:  { show: allSeries > 1 },
+    // Suppress uPlot's built-in legend when an overlay is active — the inline
+    // legend rendered by app.js above the chart already names both series.
+    legend:  { show: !secondary && ySeries.length > 1 },
     cursor:  { drag: { x: false, y: false } },
     scales,
     axes,

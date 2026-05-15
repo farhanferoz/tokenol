@@ -421,8 +421,11 @@ const _METRIC_LABEL = {
 function _renderLegend(elId, state) {
   const el = document.getElementById(elId);
   if (!el) return;
-  if (!state.secondary) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
+  if (!state.secondary) {
+    el.innerHTML = '<em class="tl-legend-hint">click two pills to compare</em>';
+    return;
+  }
   const primaryColor   = readCssVar('--amber') || '#a66408';
   const secondaryColor = readCssVar('--series-secondary') || '#2a6389';
   el.innerHTML =
