@@ -1316,6 +1316,23 @@ def build_model_detail(
         key=lambda x: -x["cost"],
     )
 
+    tool_cost: defaultdict[str, float] = defaultdict(float)
+    tool_invs: defaultdict[str, int] = defaultdict(int)
+    for t in model_turns:
+        for tname, tc in t.tool_costs.items():
+            tool_cost[tname] += tc.cost_usd
+        for tname, count in t.tool_names.items():
+            tool_invs[tname] += count
+
+    by_tool = sorted(
+        [{
+            "name": tname,
+            "cost_usd": tool_cost[tname],
+            "invocations": tool_invs[tname],
+        } for tname in tool_invs],
+        key=lambda r: -r["cost_usd"],
+    )
+
     return {
         "name": name,
         "total_cost": sum(t.cost_usd for t in model_turns),
@@ -1327,6 +1344,7 @@ def build_model_detail(
             "cache_creation_usd": mr.cache_creation_usd,
         } if mr else None,
         "projects_using_model": projects,
+        "by_tool": by_tool,
     }
 
 
