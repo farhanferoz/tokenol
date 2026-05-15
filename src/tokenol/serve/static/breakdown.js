@@ -20,6 +20,14 @@ function getPeriod() {
 }
 function setPeriod(p) { sessionStorage.setItem(SS_PERIOD, p); }
 
+const _LS_BD_TIME_UNIT    = 'tokenol.breakdown.timeUnit';
+const _LS_BD_PROJECT_UNIT = 'tokenol.breakdown.projectUnit';
+const _LS_BD_MODEL_UNIT   = 'tokenol.breakdown.modelUnit';
+
+let _bdTimeUnit    = localStorage.getItem(_LS_BD_TIME_UNIT)    || 'tokens';
+let _bdProjectUnit = localStorage.getItem(_LS_BD_PROJECT_UNIT) || 'tokens';
+let _bdModelUnit   = localStorage.getItem(_LS_BD_MODEL_UNIT)   || 'tokens';
+
 // ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
@@ -474,29 +482,46 @@ async function fetchDailyTokens(range) {
 }
 
 let _chartDailyWork = null;
+let _dailyWorkData = null; // cached payload for unit-toggle re-renders
 
 function renderDailyWork(data) {
-  const pal = tokenolPalette();
-  const labels = data.days.map(d => d.date);
-  const datasets = [
-    { label: 'input',          data: data.days.map(d => d.input),          backgroundColor: pal[0] },
-    { label: 'output',         data: data.days.map(d => d.output),         backgroundColor: pal[1] },
-    { label: 'cache created',  data: data.days.map(d => d.cache_creation), backgroundColor: pal[2] },
-  ];
+  if (data) _dailyWorkData = data;
+  const d = _dailyWorkData;
+  if (!d) return;
 
-  const totalCost = data.days.reduce((s, d) => s + d.cost_usd, 0);
-  const days = Math.max(1, data.days.length);
+  const pal = tokenolPalette();
+  const labels = d.days.map(day => day.date);
+
+  const useCost = _bdTimeUnit === 'cost';
+  const datasets = useCost
+    ? [{
+        label: 'cost',
+        data: d.days.map(day => day.cost_usd),
+        backgroundColor: pal[0],
+        stack: 'cost',
+      }]
+    : [
+        { label: 'input',         data: d.days.map(day => day.input),          backgroundColor: pal[0], stack: 'tokens' },
+        { label: 'output',        data: d.days.map(day => day.output),         backgroundColor: pal[1], stack: 'tokens' },
+        { label: 'cache created', data: d.days.map(day => day.cache_creation), backgroundColor: pal[2], stack: 'tokens' },
+      ];
+
+  const tickFmt = useCost ? (v => '$' + v.toFixed(0)) : fmtTok;
+
+  const totalCost = d.days.reduce((s, day) => s + day.cost_usd, 0);
+  const days = Math.max(1, d.days.length);
   document.getElementById('bp-daily-work-sub').textContent =
     `total ${fmtUSD(totalCost)} · avg ${fmtUSD(totalCost / days)}/d`;
 
   const canvas = document.getElementById('chart-daily-work');
   if (_chartDailyWork) {
-    // In-place update: avoids canvas destroy/recreate flicker on SSE tick.
+    // In-place update: replace datasets wholesale to handle count changes
+    // (3 datasets in tokens mode, 1 in cost mode).
     _chartDailyWork.data.labels = labels;
-    for (let i = 0; i < datasets.length; i++) {
-      _chartDailyWork.data.datasets[i].data = datasets[i].data;
-      _chartDailyWork.data.datasets[i].backgroundColor = datasets[i].backgroundColor;
-    }
+    _chartDailyWork.data.datasets = datasets;
+    _chartDailyWork.options.scales.x.stacked = !useCost;
+    _chartDailyWork.options.scales.y.stacked = !useCost;
+    _chartDailyWork.options.scales.y.ticks.callback = tickFmt;
     _chartDailyWork.update('none');
     return;
   }
@@ -508,8 +533,8 @@ function renderDailyWork(data) {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { stacked: true, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
-        y: { stacked: true, beginAtZero: true, ticks: { callback: v => fmtTok(v) } },
+        x: { stacked: !useCost, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+        y: { stacked: !useCost, beginAtZero: true, ticks: { callback: tickFmt } },
       },
       plugins: { legend: { position: 'top', align: 'end' } },
     },
@@ -564,6 +589,27 @@ function renderDailyCache(data) {
 // ---------------------------------------------------------------------------
 // Pill wiring
 // ---------------------------------------------------------------------------
+
+function _wireUnitPills(groupId, lsKey, getCurrent, setCurrent, onChange) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  // Sync initial DOM state to persisted value.
+  group.querySelectorAll('[data-bdunit]').forEach(b => {
+    b.classList.toggle('on', b.dataset.bdunit === getCurrent());
+  });
+  group.querySelectorAll('[data-bdunit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.bdunit;
+      if (next === getCurrent()) return;
+      setCurrent(next);
+      localStorage.setItem(lsKey, next);
+      group.querySelectorAll('[data-bdunit]').forEach(b =>
+        b.classList.toggle('on', b.dataset.bdunit === next),
+      );
+      onChange(next);
+    });
+  });
+}
 
 function wirePeriodPills() {
   const group = document.getElementById('breakdown-period-pills');
@@ -644,4 +690,9 @@ function connectSSE() {
 connectSSE();
 
 wirePeriodPills();
+_wireUnitPills('bd-time-unit-pills', _LS_BD_TIME_UNIT,
+  () => _bdTimeUnit,
+  v  => { _bdTimeUnit = v; },
+  () => renderDailyWork(null),
+);
 loadThresholdsFromPrefs().then(() => refreshAll());
