@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenol.enums import AssumptionTag
-from tokenol.model.events import RawEvent, Usage
+from tokenol.metrics.cost import cost_for_turn
+from tokenol.model.events import RawEvent, ToolCost, Usage
 
 
 def _parse_timestamp(ts: str) -> datetime:
@@ -95,6 +96,52 @@ def _output_byte_shares(content: list) -> tuple[dict[str, float], float]:
         return {}, 1.0
     shares = {name: b / total for name, b in tool_bytes.items()}
     return shares, unattributed_bytes / total
+
+
+def _attribute_cost(
+    model: str | None,
+    usage: Usage,
+    output_shares: dict[str, float],
+    input_shares: dict[str, float],
+) -> tuple[dict[str, ToolCost], float, float, float]:
+    """Split a turn's four cost components by the given byte shares.
+
+    Returns (tool_costs, unattributed_input_tokens, unattributed_output_tokens, unattributed_cost_usd).
+    """
+    turn_cost = cost_for_turn(model, usage)
+
+    input_token_pool = (
+        usage.input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens
+    )
+    input_cost_pool = (
+        turn_cost.input_usd + turn_cost.cache_read_usd + turn_cost.cache_creation_usd
+    )
+
+    names = set(output_shares.keys()) | set(input_shares.keys())
+    tool_costs: dict[str, ToolCost] = {}
+    for name in names:
+        out_share = output_shares.get(name, 0.0)
+        in_share = input_shares.get(name, 0.0)
+        tool_costs[name] = ToolCost(
+            tool_name=name,
+            input_tokens=input_token_pool * in_share,
+            output_tokens=usage.output_tokens * out_share,
+            cost_usd=turn_cost.output_usd * out_share + input_cost_pool * in_share,
+        )
+
+    out_attributed = sum(output_shares.values())
+    in_attributed = sum(input_shares.values())
+    unattr_out_share = max(0.0, 1.0 - out_attributed)
+    unattr_in_share = max(0.0, 1.0 - in_attributed)
+
+    return (
+        tool_costs,
+        input_token_pool * unattr_in_share,
+        usage.output_tokens * unattr_out_share,
+        turn_cost.output_usd * unattr_out_share + input_cost_pool * unattr_in_share,
+    )
 
 
 def parse_file(path: Path) -> Iterator[RawEvent]:

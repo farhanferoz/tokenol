@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from tokenol.ingest.parser import _output_byte_shares
+from tokenol.ingest.parser import _attribute_cost, _output_byte_shares
 from tokenol.model.events import RawEvent, ToolCost, Turn, Usage
 
 
@@ -90,3 +90,46 @@ def test_output_share_empty_content():
     shares, unattributed = _output_byte_shares([])
     assert shares == {}
     assert unattributed == 1.0
+
+
+def test_attribute_cost_uses_all_four_components():
+    """Cache-read and cache-creation must also be distributed by the input share,
+    not lumped into 'unattributed'. On Opus a cache_read at $0.50/M is 10× cheaper
+    than fresh input at $5/M — but it's still real cost the user wants attributed."""
+    usage = Usage(
+        input_tokens=1000,
+        output_tokens=200,
+        cache_read_input_tokens=10_000,
+        cache_creation_input_tokens=2_000,
+    )
+    output_shares = {"Read": 0.6}
+    input_shares = {"Read": 0.4}
+    tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(
+        "claude-opus-4-7", usage, output_shares, input_shares
+    )
+
+    assert "Read" in tool_costs
+    tc = tool_costs["Read"]
+    assert tc.output_tokens == 200 * 0.6
+    assert tc.input_tokens == 1000 * 0.4 + 10_000 * 0.4 + 2_000 * 0.4
+    # Opus rates: input 5, output 25, cache_read 0.5, cache_write 6.25 per 1M
+    expected_cost = (
+        200 * 25 / 1_000_000 * 0.6
+        + 1000 * 5 / 1_000_000 * 0.4
+        + 10_000 * 0.5 / 1_000_000 * 0.4
+        + 2_000 * 6.25 / 1_000_000 * 0.4
+    )
+    assert abs(tc.cost_usd - expected_cost) < 1e-9
+    assert abs(unattr_out - 200 * 0.4) < 1e-9
+    assert abs(unattr_in - (1000 + 10_000 + 2_000) * 0.6) < 1e-9
+
+
+def test_attribute_cost_unknown_model_zero():
+    usage = Usage(input_tokens=1000, output_tokens=200)
+    tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(
+        None, usage, {"Read": 1.0}, {"Read": 1.0}
+    )
+    assert tool_costs["Read"].cost_usd == 0.0
+    assert tool_costs["Read"].input_tokens == 1000.0
+    assert tool_costs["Read"].output_tokens == 200.0
+    assert unattr_cost == 0.0
