@@ -977,3 +977,61 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
   .breakdown-grid--2 { grid-template-columns: 1fr; }
   .breakdown-grid--2-1 { grid-template-columns: 1fr; }
 }
+
+/* Ranked bar list — used on Breakdown Tool Mix, tool detail, project detail, model detail */
+.ranked-bars {
+  display: grid;
+  grid-template-columns: 160px 1fr 80px;
+  column-gap: 10px;
+  row-gap: 8px;
+  align-items: center;
+}
+.ranked-bars .rb-label {
+  text-align: right;
+  color: var(--fg);
+}
+.ranked-bars .rb-sublabel {
+  opacity: 0.45;
+  font-size: 10px;
+  margin-top: 2px;
+}
+.ranked-bars .rb-track {
+  height: 18px;
+  background: var(--bar-track, #1a1a1a);
+  border-radius: 3px;
+  position: relative;
+}
+.ranked-bars .rb-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent, #a66408);
+  border-radius: 3px;
+  opacity: 0.85;
+}
+.ranked-bars .rb-value {
+  text-align: right;
+  color: var(--accent, #a66408);
+}
+.ranked-bars .rb-row.is-other .rb-fill {
+  background: #5a5a5a;
+  opacity: 0.75;
+}
+.ranked-bars .rb-row.is-other .rb-value {
+  color: #bbb;
+}
+.ranked-bars .rb-row.is-unattributed .rb-label,
+.ranked-bars .rb-row.is-unattributed .rb-value {
+  opacity: 0.45;
+  font-style: italic;
+}
+.ranked-bars .rb-row.is-unattributed .rb-fill {
+  background: #3a3a3a;
+  opacity: 0.55;
+}
+.ranked-bars a.rb-row {
+  text-decoration: none;
+  display: contents;
+}
+.ranked-bars a.rb-row:hover .rb-label {
+  text-decoration: underline;
+}

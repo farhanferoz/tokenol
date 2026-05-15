@@ -157,3 +157,55 @@ export function sessionRows(sessions) {
     </tr>`;
   }).join('');
 }
+
+/**
+ * Render a ranked horizontal bar list into `container`.
+ *
+ * rows: [{label, sublabel?, value, href?, kind?}]
+ *   - kind: undefined | "other" | "unattributed"
+ *   - href: optional drill-in URL; clickable rows render as <a>
+ * opts: {valueFormat?: (n) => string}
+ */
+export function renderRankedBars(container, rows, opts = {}) {
+  const fmt = opts.valueFormat || ((n) => "$" + n.toFixed(2));
+  const max = rows.reduce((m, r) => Math.max(m, Math.abs(r.value) || 0), 0) || 1;
+
+  container.classList.add("ranked-bars");
+  container.innerHTML = "";
+  for (const r of rows) {
+    const rowEl = r.href
+      ? document.createElement("a")
+      : document.createElement("div");
+    rowEl.classList.add("rb-row");
+    if (r.kind === "other") rowEl.classList.add("is-other");
+    if (r.kind === "unattributed") rowEl.classList.add("is-unattributed");
+    if (r.href) rowEl.setAttribute("href", r.href);
+
+    const label = document.createElement("div");
+    label.classList.add("rb-label");
+    label.textContent = r.label;
+    if (r.sublabel) {
+      const sub = document.createElement("div");
+      sub.classList.add("rb-sublabel");
+      sub.textContent = r.sublabel;
+      label.appendChild(sub);
+    }
+
+    const track = document.createElement("div");
+    track.classList.add("rb-track");
+    const fill = document.createElement("div");
+    fill.classList.add("rb-fill");
+    const pct = max > 0 ? Math.max(0, (r.value / max) * 100) : 0;
+    fill.style.width = pct + "%";
+    track.appendChild(fill);
+
+    const value = document.createElement("div");
+    value.classList.add("rb-value");
+    value.textContent = fmt(r.value);
+
+    rowEl.appendChild(label);
+    rowEl.appendChild(track);
+    rowEl.appendChild(value);
+    container.appendChild(rowEl);
+  }
+}
