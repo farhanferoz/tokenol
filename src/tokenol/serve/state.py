@@ -183,6 +183,10 @@ def _build_turns_and_sessions(
             tool_use_count=ev.tool_use_count,
             tool_error_count=ev.tool_error_count,
             tool_names=ev.tool_names,
+            tool_costs=ev.tool_costs,
+            unattributed_input_tokens=ev.unattributed_input_tokens,
+            unattributed_output_tokens=ev.unattributed_output_tokens,
+            unattributed_cost_usd=ev.unattributed_cost_usd,
         ))
 
     session_turns: dict[str, list[Turn]] = defaultdict(list)
@@ -284,6 +288,10 @@ def derive_delta_turns(
             tool_use_count=ev.tool_use_count,
             tool_error_count=ev.tool_error_count,
             tool_names=ev.tool_names,
+            tool_costs=ev.tool_costs,
+            unattributed_input_tokens=ev.unattributed_input_tokens,
+            unattributed_output_tokens=ev.unattributed_output_tokens,
+            unattributed_cost_usd=ev.unattributed_cost_usd,
         ))
 
     # Build *delta* Session records for any session_id we touched (one Session per

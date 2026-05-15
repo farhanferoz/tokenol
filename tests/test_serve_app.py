@@ -999,11 +999,20 @@ async def test_breakdown_tools_returns_ranked_list(tmp_path: Path) -> None:
     assert data["range"] == "all"
     assert "tools" in data
 
-    # multi.jsonl has 4 distinct tools — no "others" row at default top_n=10.
-    names = [row["tool"] for row in data["tools"]]
-    assert names == ["Read", "Edit", "Bash", "Grep"]
-    counts = [row["count"] for row in data["tools"]]
-    assert counts == [4, 3, 1, 1]
+    rows = data["tools"]
+    # Last row is the unattributed sentinel; preceding rows are real tools.
+    assert rows[-1]["name"] == "__unattributed__"
+    tool_rows = rows[:-1]
+    # multi.jsonl tool aggregate cost_usd: Edit > Read > Bash > Grep
+    names = [row["name"] for row in tool_rows]
+    assert names == ["Edit", "Read", "Bash", "Grep"]
+    # Invocation counts come through on `count`
+    counts_by_name = {row["name"]: row["count"] for row in tool_rows}
+    assert counts_by_name == {"Read": 4, "Edit": 3, "Bash": 1, "Grep": 1}
+    # Costs are positive and sorted desc
+    costs = [row["cost_usd"] for row in tool_rows]
+    assert costs == sorted(costs, reverse=True)
+    assert all(c > 0 for c in costs)
 
 
 @pytest.mark.asyncio
@@ -1038,7 +1047,9 @@ async def test_breakdown_tools_excludes_interrupted(tmp_path: Path) -> None:
             resp = await client.get("/api/breakdown/tools?range=all")
 
     assert resp.status_code == 200
-    assert resp.json()["tools"] == []
+    rows = resp.json()["tools"]
+    # Only the __unattributed__ sentinel; no real tools attributed from an interrupted turn.
+    assert rows == [{"name": "__unattributed__", "cost_usd": 0.0}]
 
 
 @pytest.mark.asyncio
