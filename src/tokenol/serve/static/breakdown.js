@@ -218,16 +218,20 @@ function renderByProject(data) {
   const hitRate = projects.map(p => p.cache_hit_rate);
 
   const useCost = _bdProjectUnit === 'cost';
-  const inputData  = projects.map(p => useCost ? p.input_cost          : p.input);
-  const outputData = projects.map(p => useCost ? p.output_cost         : p.output);
-  const cacheData  = projects.map(p => useCost ? p.cache_creation_cost : p.cache_creation);
-  const tickFmt    = useCost ? fmtUSD : fmtTok;
-
-  const datasets = [
-    { label: 'input',         data: inputData,  backgroundColor: pal[0], stack: 'all' },
-    { label: 'output',        data: outputData, backgroundColor: pal[1], stack: 'all' },
-    { label: 'cache created', data: cacheData,  backgroundColor: pal[2], stack: 'all' },
-  ];
+  const tickFmt = useCost ? fmtUSD : fmtTok;
+  // $ mode adds cache_read so stacked bars sum to per-project cost.
+  const datasets = useCost
+    ? [
+        { label: 'input',         data: projects.map(p => p.input_cost),          backgroundColor: pal[0], stack: 'all' },
+        { label: 'output',        data: projects.map(p => p.output_cost),         backgroundColor: pal[1], stack: 'all' },
+        { label: 'cache created', data: projects.map(p => p.cache_creation_cost), backgroundColor: pal[2], stack: 'all' },
+        { label: 'cache read',    data: projects.map(p => p.cache_read_cost),     backgroundColor: pal[5], stack: 'all' },
+      ]
+    : [
+        { label: 'input',         data: projects.map(p => p.input),               backgroundColor: pal[0], stack: 'all' },
+        { label: 'output',        data: projects.map(p => p.output),              backgroundColor: pal[1], stack: 'all' },
+        { label: 'cache created', data: projects.map(p => p.cache_creation),      backgroundColor: pal[2], stack: 'all' },
+      ];
 
   // Caption always uses token counts regardless of mode (share metric).
   const shownTotal = projects.reduce((s, p) => s + p.input + p.output, 0);
@@ -524,14 +528,22 @@ function renderDailyWork(data) {
   const labels = d.days.map(day => day.date);
 
   const useCost = _bdTimeUnit === 'cost';
-  const fields = useCost
-    ? ['input_cost', 'output_cost', 'cache_creation_cost']
-    : ['input',      'output',      'cache_creation'];
-  const datasets = [
-    { label: 'input',         data: d.days.map(day => day[fields[0]]), backgroundColor: pal[0], stack: 'all' },
-    { label: 'output',        data: d.days.map(day => day[fields[1]]), backgroundColor: pal[1], stack: 'all' },
-    { label: 'cache created', data: d.days.map(day => day[fields[2]]), backgroundColor: pal[2], stack: 'all' },
-  ];
+  // $ mode adds cache_read as a 4th component so the stacked bars sum to
+  // cost_usd. Tokens mode keeps the existing 3-component shape — cache_read
+  // tokens are a separate concept (Daily Cache Re-use chart) at a different
+  // scale and would dominate this chart if included.
+  const datasets = useCost
+    ? [
+        { label: 'input',         data: d.days.map(day => day.input_cost),          backgroundColor: pal[0], stack: 'all' },
+        { label: 'output',        data: d.days.map(day => day.output_cost),         backgroundColor: pal[1], stack: 'all' },
+        { label: 'cache created', data: d.days.map(day => day.cache_creation_cost), backgroundColor: pal[2], stack: 'all' },
+        { label: 'cache read',    data: d.days.map(day => day.cache_read_cost),     backgroundColor: pal[5], stack: 'all' },
+      ]
+    : [
+        { label: 'input',         data: d.days.map(day => day.input),               backgroundColor: pal[0], stack: 'all' },
+        { label: 'output',        data: d.days.map(day => day.output),              backgroundColor: pal[1], stack: 'all' },
+        { label: 'cache created', data: d.days.map(day => day.cache_creation),      backgroundColor: pal[2], stack: 'all' },
+      ];
 
   const tickFmt = useCost ? fmtUSD : fmtTok;
 

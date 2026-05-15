@@ -586,20 +586,25 @@ def create_app(
             turns = [t for t in result.turns if t.timestamp.date() >= since]
             rollups = rollup_by_date(turns, since=since)
 
-        # Per-component cost per day, computed once and joined in below.
+        # Per-component cost per day. Includes cache_read so the visible stack
+        # in $ mode sums to cost_usd (cache_read is the largest cost component
+        # on heavy-cache days and would otherwise be silently missing).
         from tokenol.metrics.cost import cost_for_turn
         cost_by_date: dict = {}
         for t in turns:
             if t.is_interrupted:
                 continue
             d = t.timestamp.date()
-            slot = cost_by_date.setdefault(d, {"input": 0.0, "output": 0.0, "cache_creation": 0.0})
+            slot = cost_by_date.setdefault(
+                d, {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0},
+            )
             tc = cost_for_turn(t.model, t.usage)
             slot["input"] += tc.input_usd
             slot["output"] += tc.output_usd
             slot["cache_creation"] += tc.cache_creation_usd
+            slot["cache_read"] += tc.cache_read_usd
 
-        _empty_cost = {"input": 0.0, "output": 0.0, "cache_creation": 0.0}
+        _empty_cost = {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0}
         return JSONResponse({
             "range": range,
             "days": [
@@ -610,9 +615,10 @@ def create_app(
                     "cache_creation": r.cache_creation_tokens,
                     "cache_read": r.cache_read_tokens,
                     "cost_usd": r.cost_usd,
-                    "input_cost": cost_by_date.get(r.date, _empty_cost)["input"],
-                    "output_cost": cost_by_date.get(r.date, _empty_cost)["output"],
+                    "input_cost":          cost_by_date.get(r.date, _empty_cost)["input"],
+                    "output_cost":         cost_by_date.get(r.date, _empty_cost)["output"],
                     "cache_creation_cost": cost_by_date.get(r.date, _empty_cost)["cache_creation"],
+                    "cache_read_cost":     cost_by_date.get(r.date, _empty_cost)["cache_read"],
                 }
                 for r in rollups
             ],
@@ -645,6 +651,7 @@ def create_app(
                 "input_cost": b["input_cost"],
                 "output_cost": b["output_cost"],
                 "cache_creation_cost": b["cache_creation_cost"],
+                "cache_read_cost": b["cache_read_cost"],
                 "cache_hit_rate": hit_rate,
             })
         projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
