@@ -59,6 +59,41 @@ def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
     return tool_names, tool_use_total, tool_error
 
 
+def _block_bytes(block: dict) -> int:
+    """Byte-size of a content block as it'd appear in the request (JSON-serialized)."""
+    try:
+        return len(json.dumps(block, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _output_byte_shares(content: list) -> tuple[dict[str, float], float]:
+    """Split an assistant message's content into per-tool byte shares + unattributed.
+
+    Returns (shares_by_tool_name, unattributed_share). Sum = 1.0.
+
+    `tool_use` blocks attribute to their `name`. `text` and `thinking` blocks
+    (and anything else) go to unattributed.
+    """
+    tool_bytes: dict[str, int] = {}
+    unattributed_bytes = 0
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        b = _block_bytes(block)
+        if block.get("type") == "tool_use":
+            name = block.get("name")
+            if isinstance(name, str) and name:
+                tool_bytes[name] = tool_bytes.get(name, 0) + b
+                continue
+        unattributed_bytes += b
+    total = sum(tool_bytes.values()) + unattributed_bytes
+    if total <= 0:
+        return {}, 1.0
+    shares = {name: b / total for name, b in tool_bytes.items()}
+    return shares, unattributed_bytes / total
+
+
 def parse_file(path: Path) -> Iterator[RawEvent]:
     """Yield one RawEvent per non-blank, parseable line of *path*."""
     session_id = path.stem  # filename without .jsonl == sessionId

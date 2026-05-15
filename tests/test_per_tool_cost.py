@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+from tokenol.ingest.parser import _output_byte_shares
 from tokenol.model.events import RawEvent, ToolCost, Turn, Usage
 
 
@@ -48,3 +49,44 @@ def test_turn_has_tool_costs_default_empty():
     assert t.unattributed_input_tokens == 0.0
     assert t.unattributed_output_tokens == 0.0
     assert t.unattributed_cost_usd == 0.0
+
+
+def test_output_share_single_tool():
+    content = [
+        {"type": "text", "text": "I'll search for it."},
+        {"type": "tool_use", "id": "a", "name": "Grep",
+         "input": {"pattern": "foo"}},
+    ]
+    shares, unattributed = _output_byte_shares(content)
+    assert set(shares.keys()) == {"Grep"}
+    assert 0 < shares["Grep"] < 1
+    assert 0 < unattributed < 1
+    assert abs(shares["Grep"] + unattributed - 1.0) < 1e-9
+
+
+def test_output_share_multiple_tools_same_name_sum():
+    content = [
+        {"type": "tool_use", "id": "a", "name": "Read", "input": {"file_path": "/x"}},
+        {"type": "tool_use", "id": "b", "name": "Read", "input": {"file_path": "/y"}},
+        {"type": "tool_use", "id": "c", "name": "Grep", "input": {"pattern": "z"}},
+    ]
+    shares, unattributed = _output_byte_shares(content)
+    assert set(shares.keys()) == {"Read", "Grep"}
+    assert shares["Read"] > shares["Grep"]
+    assert abs(unattributed) < 1e-9
+
+
+def test_output_share_thinking_block_unattributed():
+    content = [
+        {"type": "thinking", "thinking": "x" * 500},
+        {"type": "tool_use", "id": "a", "name": "Read", "input": {"file_path": "/x"}},
+    ]
+    shares, unattributed = _output_byte_shares(content)
+    assert "Read" in shares
+    assert unattributed > shares["Read"]
+
+
+def test_output_share_empty_content():
+    shares, unattributed = _output_byte_shares([])
+    assert shares == {}
+    assert unattributed == 1.0
