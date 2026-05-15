@@ -1,6 +1,7 @@
 import {
   fmtUSD, fmtTok, fmtPct, fmtRatio, fmtAbsTime, shortModel, esc,
   cwdBasename, verdictPill, renderVerdictDist, GLOSSARY,
+  renderRankedBars,
 } from '/assets/components.js';
 
 const $ = id => document.getElementById(id);
@@ -60,8 +61,7 @@ function loadData() {
 
 function renderEmpty() {
   $('proj-grid').style.display = 'none';
-  const sec = document.querySelector('.proj-section');
-  if (sec) sec.style.display = 'none';
+  document.querySelectorAll('.proj-section').forEach((sec) => { sec.style.display = 'none'; });
   const el = $('proj-error');
   el.style.display = '';
   el.style.color = 'var(--mute)';
@@ -72,8 +72,7 @@ function renderEmpty() {
 
 function renderAll(d) {
   $('proj-grid').style.display = '';
-  const sec = document.querySelector('.proj-section');
-  if (sec) sec.style.display = '';
+  document.querySelectorAll('.proj-section').forEach((sec) => { sec.style.display = ''; });
   $('proj-error').style.display = 'none';
 
   const name = cwdBasename(d.cwd) || 'project';
@@ -96,6 +95,29 @@ function renderAll(d) {
   renderVerdictDist('verdict-dist', d.verdict_distribution);
   renderTopTurns(d.top_turns_by_cost);
   renderProjectSessions(d.sessions);
+
+  const byTool = d.by_tool || [];
+  const btContainer = $('proj-by-tool');
+  const btEmpty = $('proj-by-tool-empty');
+  if (!byTool.length) {
+    btContainer.innerHTML = '';
+    btEmpty.classList.remove('hidden');
+  } else {
+    btEmpty.classList.add('hidden');
+    renderRankedBars(
+      btContainer,
+      byTool.map((r) => ({
+        label: r.name,
+        sublabel: r.last_active
+          ? `${r.invocations} call${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
+          : `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
+        value: r.cost_usd,
+        href: '/tool/' + encodeURIComponent(r.name),
+      })),
+      { valueFormat: fmtUSD },
+    );
+  }
+
   _initGlossary();
 }
 
