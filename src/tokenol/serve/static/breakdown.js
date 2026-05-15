@@ -200,31 +200,42 @@ async function fetchByProject(range) {
 const BY_PROJECT_TOP_N = 10;
 
 let _chartByProject = null;
+let _byProjectData = null; // cached payload for unit-toggle re-renders
 
 function renderByProject(data) {
+  if (data) _byProjectData = data;
+  const d = _byProjectData;
+  if (!d) return;
+
   renderByProjectCaption();
   const pal = tokenolPalette();
   // Cap to a readable number of bars; tail is dropped (not collapsed) so the
   // chart stays legible. Subheading notes how many were shown vs. total.
-  const projects = data.projects.slice(0, BY_PROJECT_TOP_N);
+  const projects = d.projects.slice(0, BY_PROJECT_TOP_N);
   const labels = projects.map(p => p.project);
   const dotColors = projects.map(p => healthColorForHitRate(p.cache_hit_rate));
   const cwdB64 = projects.map(p => p.cwd_b64);
   const hitRate = projects.map(p => p.cache_hit_rate);
 
+  const useCost = _bdProjectUnit === 'cost';
+  const inputData  = projects.map(p => useCost ? p.input_cost  : p.input);
+  const outputData = projects.map(p => useCost ? p.output_cost : p.output);
+  const tickFmt    = useCost ? (v => '$' + v.toFixed(2)) : fmtTok;
+
   const datasets = [
-    { label: 'input',  data: projects.map(p => p.input),  backgroundColor: pal[0] },
-    { label: 'output', data: projects.map(p => p.output), backgroundColor: pal[1] },
+    { label: 'input',  data: inputData,  backgroundColor: pal[0] },
+    { label: 'output', data: outputData, backgroundColor: pal[1] },
   ];
 
+  // Caption always uses token counts regardless of mode (share metric).
   const shownTotal = projects.reduce((s, p) => s + p.input + p.output, 0);
-  const allTotal = data.projects.reduce((s, p) => s + p.input + p.output, 0);
+  const allTotal = d.projects.reduce((s, p) => s + p.input + p.output, 0);
   const subEl = document.getElementById('bp-by-project-sub');
-  if (data.projects.length > BY_PROJECT_TOP_N) {
+  if (d.projects.length > BY_PROJECT_TOP_N) {
     const pct = Math.round((shownTotal / Math.max(allTotal, 1)) * 100);
-    subEl.textContent = `top ${BY_PROJECT_TOP_N} of ${data.projects.length} · ${pct}% of billable`;
+    subEl.textContent = `top ${BY_PROJECT_TOP_N} of ${d.projects.length} · ${pct}% of billable`;
   } else {
-    subEl.textContent = `${data.projects.length} project${data.projects.length === 1 ? '' : 's'}`;
+    subEl.textContent = `${d.projects.length} project${d.projects.length === 1 ? '' : 's'}`;
   }
 
   const canvas = document.getElementById('chart-by-project');
@@ -237,6 +248,7 @@ function renderByProject(data) {
       _chartByProject.data.datasets[i].backgroundColor = datasets[i].backgroundColor;
     }
     _chartByProject.options.plugins.cacheHealthDots.colors = dotColors;
+    _chartByProject.options.scales.y.ticks.callback = tickFmt;
     _chartByProject.update('none');
     return;
   }
@@ -253,7 +265,7 @@ function renderByProject(data) {
         x: {
           ticks: { maxRotation: 45, minRotation: 45, autoSkip: false, padding: 4 },
         },
-        y: { beginAtZero: true, ticks: { callback: v => fmtTok(v) } },
+        y: { beginAtZero: true, ticks: { callback: tickFmt } },
       },
       plugins: {
         legend: { position: 'top', align: 'end' },
@@ -694,5 +706,10 @@ _wireUnitPills('bd-time-unit-pills', _LS_BD_TIME_UNIT,
   () => _bdTimeUnit,
   v  => { _bdTimeUnit = v; },
   () => renderDailyWork(null),
+);
+_wireUnitPills('bd-project-unit-pills', _LS_BD_PROJECT_UNIT,
+  () => _bdProjectUnit,
+  v  => { _bdProjectUnit = v; },
+  () => renderByProject(null),
 );
 loadThresholdsFromPrefs().then(() => refreshAll());
