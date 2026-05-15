@@ -1,63 +1,124 @@
-import { fmtRelTime, cwdBasename, esc } from '/assets/components.js';
+import { renderRankedBars } from '/assets/components.js';
 
-const $ = id => document.getElementById(id);
-const name = decodeURIComponent(location.pathname.split('/').pop());
+const $ = (id) => document.getElementById(id);
+const fmtUSD = (n) => '$' + (n || 0).toFixed(2);
+const fmtCompact = (n) => {
+  n = n || 0;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(Math.round(n));
+};
 
-fetch(`/api/tool/${encodeURIComponent(name)}`)
-  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-  .then(render)
-  .catch(err => {
-    const el = $('tool-error');
-    if (el) { el.classList.remove('hidden'); el.textContent = `Failed to load: ${esc(String(err))}`; }
+const name = decodeURIComponent(location.pathname.split('/').pop() || '');
+
+function renderScorecards(sc) {
+  const cards = [
+    {
+      label: 'Est. Cost',
+      primary: fmtUSD(sc.cost_usd),
+      sub: `~${(sc.share_of_total * 100).toFixed(1)}% of total spend`,
+    },
+    {
+      label: 'Output tokens',
+      primary: fmtCompact(sc.output_tokens),
+      sub: sc.invocations ? `avg ${fmtCompact(sc.output_tokens / sc.invocations)} / call` : '',
+    },
+    {
+      label: 'Invocations',
+      primary: sc.invocations.toLocaleString('en-US'),
+      sub: sc.invocations_7d != null ? `7-day: ${sc.invocations_7d.toLocaleString('en-US')}` : '',
+    },
+    {
+      label: 'Top project',
+      primary: sc.top_project.name || '—',
+      sub: sc.top_project.cost_usd > 0
+        ? `${fmtUSD(sc.top_project.cost_usd)} (${(sc.top_project.share * 100).toFixed(0)}%)`
+        : '',
+    },
+  ];
+  $('tool-scorecards').innerHTML = cards.map((c) => `
+    <article class="scorecard-card">
+      <div class="sc-label">${c.label}</div>
+      <div class="sc-primary">${c.primary}</div>
+      <div class="sc-sub">${c.sub}</div>
+    </article>
+  `).join('');
+}
+
+function renderDailyChart(daily, totalCost) {
+  $('tool-daily-total').textContent = 'total ' + fmtUSD(totalCost);
+  let peak = { date: null, cost: 0 };
+  for (const d of daily) {
+    if (d.cost_usd > peak.cost) peak = { date: d.date, cost: d.cost_usd };
+  }
+  $('tool-daily-peak').textContent = peak.date
+    ? `peak ${peak.date.slice(5)} · ${fmtUSD(peak.cost)}`
+    : '';
+
+  if (typeof window.Chart === 'undefined') return;
+  const series = daily.map((d) => ({ date: d.date, value: d.cost_usd }));
+  new window.Chart($('chart-tool-daily'), {
+    type: 'line',
+    data: {
+      labels: series.map((p) => p.date.slice(5)),
+      datasets: [{
+        data: series.map((p) => p.value),
+        borderColor: '#a66408',
+        backgroundColor: 'rgba(166, 100, 8, 0.18)',
+        fill: true,
+        tension: 0.2,
+        pointRadius: 0,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { callback: (v) => '$' + Number(v).toFixed(2) } },
+        x: { ticks: { maxTicksLimit: 6 } },
+      },
+    },
   });
+}
 
-function render(d) {
-  document.title = `tokenol — ${d.name}`;
-  $('tool-name').textContent = d.name;
+function renderBars(containerId, rows, hrefMaker) {
+  renderRankedBars(
+    $(containerId),
+    rows.map((r) => ({
+      label: r.project_label || r.name,
+      sublabel: r.last_active
+        ? `${r.invocations} call${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
+        : `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
+      value: r.cost_usd,
+      href: hrefMaker(r),
+    })),
+    { valueFormat: fmtUSD },
+  );
+}
 
-  const sumEl = $('tool-summary');
-  if (sumEl) {
-    sumEl.innerHTML = [
-      `<span class="k">invocations</span> <span class="v">${d.total_invocations.toLocaleString('en-US')}</span>`,
-      `<span class="k">projects</span> <span class="v">${d.projects_using_tool.length}</span>`,
-      `<span class="k">models</span> <span class="v">${d.models_using_tool.length}</span>`,
-    ].join('<span class="sep">·</span>');
-  }
-
-  const projTbody = $('tool-projects-tbody');
-  const projEmpty = $('tool-no-projects');
-  const projects = d.projects_using_tool ?? [];
-  if (!projects.length) {
-    projEmpty?.classList.remove('hidden');
-  } else {
-    projEmpty?.classList.add('hidden');
-    projTbody.innerHTML = projects.map(p =>
-      `<tr ${p.cwd_b64 ? `style="cursor:pointer" data-href="/project/${esc(p.cwd_b64)}"` : ''}>
-        <td title="${esc(p.cwd ?? '')}">${cwdBasename(p.cwd)}</td>
-        <td class="num">${p.count.toLocaleString('en-US')}</td>
-        <td>${p.last_active ? fmtRelTime(p.last_active) : '–'}</td>
-      </tr>`
-    ).join('');
-    projTbody.querySelectorAll('tr[data-href]').forEach(row =>
-      row.addEventListener('click', () => { location.href = row.dataset.href; })
-    );
-  }
-
-  const modelTbody = $('tool-models-tbody');
-  const modelEmpty = $('tool-no-models');
-  const models = d.models_using_tool ?? [];
-  if (!models.length) {
-    modelEmpty?.classList.remove('hidden');
-  } else {
-    modelEmpty?.classList.add('hidden');
-    modelTbody.innerHTML = models.map(m =>
-      `<tr style="cursor:pointer" data-href="/model/${encodeURIComponent(m.model)}">
-        <td>${esc(m.model)}</td>
-        <td class="num">${m.count.toLocaleString('en-US')}</td>
-      </tr>`
-    ).join('');
-    modelTbody.querySelectorAll('tr[data-href]').forEach(row =>
-      row.addEventListener('click', () => { location.href = row.dataset.href; })
-    );
+async function load() {
+  $('tool-name').textContent = name;
+  document.title = `tokenol — ${name}`;
+  try {
+    const resp = await fetch('/api/tool/' + encodeURIComponent(name));
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    renderScorecards(data.scorecards);
+    renderDailyChart(data.daily_cost, data.scorecards.cost_usd);
+    if (!data.by_project.length) {
+      $('tool-no-projects').classList.remove('hidden');
+    } else {
+      renderBars('tool-by-project', data.by_project, (r) => r.cwd_b64 ? '/project/' + r.cwd_b64 : undefined);
+    }
+    if (!data.by_model.length) {
+      $('tool-no-models').classList.remove('hidden');
+    } else {
+      renderBars('tool-by-model', data.by_model, (r) => '/model/' + encodeURIComponent(r.name));
+    }
+  } catch (err) {
+    const el = $('tool-error');
+    if (el) { el.textContent = 'Failed to load: ' + err.message; el.classList.remove('hidden'); }
   }
 }
+
+load();
