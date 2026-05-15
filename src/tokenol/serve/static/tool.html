@@ -9,6 +9,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/assets/styles.css">
+
+  <!-- Chart.js 4.4.7 — UMD build, pinned with SRI. -->
+  <script defer
+          src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.js"
+          integrity="sha384-zYPBGXwO4633CABX/5Spf6emCKUJCfoOkhOMYyxMsatqQZPnDblmmOewfjsIVWCM"
+          crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="app">
@@ -23,35 +29,32 @@
   <div class="section-heading" style="margin-top:24px">
     <h2 id="tool-name" style="font-family:var(--font-serif);font-size:24px">—</h2>
   </div>
-  <div class="ra-summary" id="tool-summary"></div>
 
-  <div class="section-heading">
-    <h2>Projects using this tool</h2>
-  </div>
-  <table class="ra-tbl" id="tool-projects-tbl">
-    <thead>
-      <tr>
-        <th>Project</th>
-        <th class="num">Invocations</th>
-        <th>Last active</th>
-      </tr>
-    </thead>
-    <tbody id="tool-projects-tbody"></tbody>
-  </table>
+  <!-- Daily cost chart -->
+  <section style="margin: 14px 32px; background: var(--bg-raised); border: 1px solid var(--rule); border-radius: 3px; padding: 16px;">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+      <div>
+        <span style="font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--mute-2)">Daily cost · last 30d</span>
+        <span id="tool-daily-total" style="color:var(--accent);margin-left:10px;font-family:var(--font-mono);font-size:12px"></span>
+      </div>
+      <div class="dim" id="tool-daily-peak" style="font-family:var(--font-mono);font-size:12px"></div>
+    </div>
+    <div style="height:160px;position:relative">
+      <canvas id="chart-tool-daily"></canvas>
+    </div>
+  </section>
+
+  <!-- Scorecards -->
+  <section class="scorecard" id="tool-scorecards" aria-label="Tool totals"></section>
+
+  <!-- Cost by project -->
+  <div class="section-heading"><h2>Cost by project</h2></div>
+  <div id="tool-by-project" style="padding: 0 32px"></div>
   <div id="tool-no-projects" class="ra-empty hidden">No project data.</div>
 
-  <div class="section-heading">
-    <h2>Models using this tool</h2>
-  </div>
-  <table class="ra-tbl" id="tool-models-tbl">
-    <thead>
-      <tr>
-        <th>Model</th>
-        <th class="num">Invocations</th>
-      </tr>
-    </thead>
-    <tbody id="tool-models-tbody"></tbody>
-  </table>
+  <!-- Cost by model -->
+  <div class="section-heading"><h2>Cost by model</h2></div>
+  <div id="tool-by-model" style="padding: 0 32px"></div>
   <div id="tool-no-models" class="ra-empty hidden">No model data.</div>
 </div>
 <script type="module" src="/assets/tool.js"></script>
