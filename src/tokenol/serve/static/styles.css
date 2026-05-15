@@ -17,6 +17,7 @@
   --alarm:      #b8301b;
   --alarm-bg:   rgba(184,48,27,0.08);
   --cool:       #2a6389;
+  --series-secondary: var(--cool);
 
   --font-serif: 'Instrument Serif', Georgia, serif;
   --font-mono:  'JetBrains Mono', 'SF Mono', 'Courier New', monospace;
@@ -276,6 +277,7 @@ header.topbar {
 }
 .pill-group span:hover, .pill-row span:hover { color: var(--fg); }
 .pill-group span.on, .pill-row span.on { background: var(--fg); color: var(--bg-raised); }
+.pill-row span.secondary { color: var(--series-secondary); border: 1px solid var(--series-secondary); background: transparent; }
 .pill-group span.off, .pill-row span.off { opacity: 0.32; cursor: not-allowed; pointer-events: none; }
 .pill-group span.disabled, .pill-row span.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
 .pill-group-label {
