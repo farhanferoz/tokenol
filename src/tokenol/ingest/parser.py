@@ -156,11 +156,25 @@ def _attribute_cost(
 
 
 def parse_file(path: Path) -> Iterator[RawEvent]:
-    """Yield one RawEvent per non-blank, parseable line of *path*."""
+    """Yield one RawEvent per non-blank, parseable line of *path*.
+
+    Per-session state is maintained for per-tool cost attribution:
+    - `tool_use_id_to_name` maps assistant-side tool_use IDs to tool names.
+    - `bytes_in_context_by_tool` / `non_tool_bytes_in_context` are running byte tallies
+      of content still in the conversation window.
+    - Compaction is detected heuristically (input drop ≥80% from running peak) and
+      resets both tallies.
+    """
     session_id = path.stem  # filename without .jsonl == sessionId
 
     # Sidechain detection: lives under a subagents/ subdir anywhere in the path
     is_sidechain = "subagents" in path.parts
+
+    tool_use_id_to_name: dict[str, str] = {}
+    bytes_in_context_by_tool: dict[str, int] = {}
+    non_tool_bytes_in_context = 0
+    peak_input_tokens = 0
+    COMPACTION_DROP_RATIO = 0.2
 
     with path.open(encoding="utf-8", errors="replace") as fh:
         for lineno, raw_line in enumerate(fh, start=1):
@@ -187,6 +201,9 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 content = []
             tool_names, tool_use_count, tool_error_count = _extract_tool_blocks(content)
 
+            usage = _parse_usage(msg)
+            model = ev.get("model") or msg.get("model")
+
             cwd: str | None = ev.get("cwd") or None
             if cwd and (
                 (len(cwd) >= 2 and cwd[1] == ":" and cwd[0].isalpha())  # Windows drive letter
@@ -197,6 +214,60 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 # treat every cwd as POSIX.
                 cwd = cwd.replace("\\", "/")
 
+            tool_costs: dict[str, ToolCost] = {}
+            unattr_in = unattr_out = unattr_cost = 0.0
+
+            if event_type == "assistant" and usage is not None:
+                input_pool = (
+                    usage.input_tokens
+                    + usage.cache_read_input_tokens
+                    + usage.cache_creation_input_tokens
+                )
+                if peak_input_tokens > 0 and input_pool < COMPACTION_DROP_RATIO * peak_input_tokens:
+                    tool_use_id_to_name.clear()
+                    bytes_in_context_by_tool.clear()
+                    non_tool_bytes_in_context = 0
+                peak_input_tokens = max(peak_input_tokens, input_pool)
+
+                output_shares, _out_unattr_share = _output_byte_shares(content)
+                total_ctx_bytes = sum(bytes_in_context_by_tool.values()) + non_tool_bytes_in_context
+                if total_ctx_bytes > 0:
+                    input_shares = {
+                        name: b / total_ctx_bytes
+                        for name, b in bytes_in_context_by_tool.items()
+                    }
+                else:
+                    input_shares = {}
+                tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(
+                    model, usage, output_shares, input_shares
+                )
+
+            # Fold this line's content into the running tallies so the next
+            # assistant turn can attribute its input side against them.
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                b = _block_bytes(block)
+                btype = block.get("type")
+                if btype == "tool_use":
+                    name = block.get("name")
+                    bid = block.get("id")
+                    if isinstance(name, str) and name and isinstance(bid, str) and bid:
+                        tool_use_id_to_name[bid] = name
+                        bytes_in_context_by_tool[name] = (
+                            bytes_in_context_by_tool.get(name, 0) + b
+                        )
+                    else:
+                        non_tool_bytes_in_context += b
+                elif btype == "tool_result":
+                    bid = block.get("tool_use_id")
+                    name = tool_use_id_to_name.get(bid, "__unknown__") if bid else "__unknown__"
+                    bytes_in_context_by_tool[name] = (
+                        bytes_in_context_by_tool.get(name, 0) + b
+                    )
+                else:
+                    non_tool_bytes_in_context += b
+
             yield RawEvent(
                 source_file=str(path),
                 line_number=lineno,
@@ -206,14 +277,18 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 message_id=msg.get("id"),
                 uuid=ev.get("uuid"),
                 timestamp=_parse_timestamp(ev.get("timestamp", "")),
-                usage=_parse_usage(msg),
-                model=ev.get("model") or msg.get("model"),
+                usage=usage,
+                model=model,
                 is_sidechain=ev.get("isSidechain", is_sidechain),
                 stop_reason=msg.get("stop_reason"),
                 tool_use_count=tool_use_count,
                 tool_error_count=tool_error_count,
                 tool_names=tool_names,
                 cwd=cwd,
+                tool_costs=tool_costs,
+                unattributed_input_tokens=unattr_in,
+                unattributed_output_tokens=unattr_out,
+                unattributed_cost_usd=unattr_cost,
             )
 
 

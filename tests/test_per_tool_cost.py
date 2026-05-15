@@ -1,9 +1,86 @@
 """Per-tool cost attribution: parser, rollups, and API."""
 
+import json
 from datetime import datetime, timezone
 
-from tokenol.ingest.parser import _attribute_cost, _output_byte_shares
+from tokenol.ingest.parser import _attribute_cost, _output_byte_shares, parse_file
 from tokenol.model.events import RawEvent, ToolCost, Turn, Usage
+
+
+def _write_jsonl(tmp_path, name, lines):
+    p = tmp_path / name
+    with p.open("w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    return p
+
+
+def test_lingering_input_attribution_across_turns(tmp_path):
+    """Read returns 50 KB on turn 1; turns 2-3 have no tool calls. Read's
+    input attribution should grow on turns 2+3 as its result lingers in context."""
+    big_result = "x" * 50_000
+    lines = [
+        {
+            "type": "assistant", "timestamp": "2026-05-15T10:00:00Z",
+            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+                "usage": {"input_tokens": 100, "output_tokens": 20,
+                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Read",
+                             "input": {"file_path": "/x"}}],
+            },
+        },
+        {
+            "type": "user", "timestamp": "2026-05-15T10:01:00Z",
+            "sessionId": "s1", "uuid": "u2", "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": big_result}
+            ]},
+        },
+        {
+            "type": "assistant", "timestamp": "2026-05-15T10:02:00Z",
+            "sessionId": "s1", "requestId": "r2", "uuid": "u3", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m2", "role": "assistant", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 200, "output_tokens": 30,
+                          "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0},
+                "content": [{"type": "text", "text": "Got it."}],
+            },
+        },
+        {
+            "type": "assistant", "timestamp": "2026-05-15T10:03:00Z",
+            "sessionId": "s1", "requestId": "r3", "uuid": "u4", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m3", "role": "assistant", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 30,
+                          "cache_read_input_tokens": 50_500, "cache_creation_input_tokens": 0},
+                "content": [{"type": "text", "text": "Anything else?"}],
+            },
+        },
+    ]
+    p = _write_jsonl(tmp_path, "s1.jsonl", lines)
+    events = list(parse_file(p))
+    assistants = [e for e in events if e.event_type == "assistant"]
+    assert len(assistants) == 3
+
+    t1 = assistants[0]
+    assert "Read" in t1.tool_costs
+    assert t1.tool_costs["Read"].output_tokens > 0
+    assert t1.tool_costs["Read"].input_tokens == 0
+
+    t2 = assistants[1]
+    assert "Read" in t2.tool_costs
+    assert t2.tool_costs["Read"].input_tokens > 0
+    assert t2.tool_costs["Read"].cost_usd > 0
+    assert t2.unattributed_input_tokens < t2.tool_costs["Read"].input_tokens
+
+    t3 = assistants[2]
+    assert "Read" in t3.tool_costs
+    assert t3.tool_costs["Read"].input_tokens > 0
 
 
 def test_toolcost_dataclass_shape():
