@@ -300,38 +300,62 @@ async function fetchByModel(range) {
 const BY_MODEL_TOP_N = 6;
 
 let _chartByModel = null;
+let _byModelData = null; // cached payload for unit-toggle re-renders
 
-function collapseModels(models) {
+function collapseModels(models, useCost) {
   // Keep top N−1, collapse the tail into 'others' only if it would exceed N.
+  // Colour assignment is based on position in the sorted-by-tokens list so it
+  // stays consistent across TOKENS and $ modes.
+  const valueOf = m => useCost ? m.cost_usd : (m.input + m.output);
   if (models.length <= BY_MODEL_TOP_N) {
-    return models.map(m => ({ name: m.model, value: m.input + m.output, isOthers: false }));
+    return models.map(m => ({ name: m.model, value: valueOf(m), isOthers: false }));
   }
   const head = models.slice(0, BY_MODEL_TOP_N - 1).map(m => ({
-    name: m.model, value: m.input + m.output, isOthers: false,
+    name: m.model, value: valueOf(m), isOthers: false,
   }));
-  const tailValue = models.slice(BY_MODEL_TOP_N - 1).reduce((s, m) => s + m.input + m.output, 0);
+  const tailValue = models.slice(BY_MODEL_TOP_N - 1).reduce((s, m) => s + valueOf(m), 0);
   head.push({ name: 'others', value: tailValue, isOthers: true });
   return head;
 }
 
 function renderByModel(data) {
+  if (data) _byModelData = data;
+  const d = _byModelData;
+  if (!d) return;
+
+  const useCost = _bdModelUnit === 'cost';
   const pal = tokenolPalette();
-  const collapsed = collapseModels(data.models);
+  const collapsed = collapseModels(d.models, useCost);
   const labels = collapsed.map(c => c.name);
   const values = collapsed.map(c => c.value);
+  // Colours are assigned by position in the original (tokens-sorted) order so
+  // that the same model always gets the same colour regardless of active unit.
   const colors = collapsed.map((_, i) => pal[i % pal.length]);
   const names = collapsed.map(c => (c.isOthers ? null : c.name));
 
   document.getElementById('bp-by-model-sub').textContent =
-    `${data.models.length} model${data.models.length === 1 ? '' : 's'}`;
+    `${d.models.length} model${d.models.length === 1 ? '' : 's'}`;
 
   const canvas = document.getElementById('chart-by-model');
+
+  const tooltipLabel = useCost
+    ? function(ctx) {
+        const total = ctx.dataset.data.reduce((s, v) => s + v, 0) || 1;
+        const v = ctx.parsed;
+        return `${ctx.label}: ${fmtUSD(v)} (${fmtPct((v / total) * 100)})`;
+      }
+    : function(ctx) {
+        const total = ctx.dataset.data.reduce((s, v) => s + v, 0) || 1;
+        const v = ctx.parsed;
+        return `${ctx.label}: ${fmtTok(v)} billable (${fmtPct((v / total) * 100)})`;
+      };
 
   if (_chartByModel) {
     _chartByModel.$tokenol = { names };
     _chartByModel.data.labels = labels;
     _chartByModel.data.datasets[0].data = values;
     _chartByModel.data.datasets[0].backgroundColor = colors;
+    _chartByModel.options.plugins.tooltip.callbacks.label = tooltipLabel;
     _chartByModel.update('none');
     return;
   }
@@ -350,11 +374,7 @@ function renderByModel(data) {
         legend: { position: 'bottom' },
         tooltip: {
           callbacks: {
-            label(ctx) {
-              const total = ctx.dataset.data.reduce((s, v) => s + v, 0) || 1;
-              const v = ctx.parsed;
-              return `${ctx.label}: ${fmtTok(v)} billable (${fmtPct((v / total) * 100)})`;
-            },
+            label: tooltipLabel,
           },
         },
       },
@@ -711,5 +731,10 @@ _wireUnitPills('bd-project-unit-pills', _LS_BD_PROJECT_UNIT,
   () => _bdProjectUnit,
   v  => { _bdProjectUnit = v; },
   () => renderByProject(null),
+);
+_wireUnitPills('bd-model-unit-pills', _LS_BD_MODEL_UNIT,
+  () => _bdModelUnit,
+  v  => { _bdModelUnit = v; },
+  () => renderByModel(null),
 );
 loadThresholdsFromPrefs().then(() => refreshAll());
