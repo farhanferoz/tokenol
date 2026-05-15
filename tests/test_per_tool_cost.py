@@ -352,3 +352,21 @@ def test_build_tool_cost_rollups_across_turns():
     assert by_name["Read"].invocations == 1
     assert by_name["Read"].last_active is not None
     assert rollups == sorted(rollups, key=lambda r: r.cost_usd, reverse=True)
+
+
+def test_build_tool_cost_daily_zero_fills():
+    from datetime import date
+
+    from tokenol.ingest.builder import build_sessions, build_turns
+    from tokenol.metrics.rollups import build_tool_cost_daily
+
+    fixture = FIXTURES / "per_tool_basic.jsonl"
+    turns = build_turns([fixture])
+    sessions = build_sessions(turns, [fixture])
+    all_turns = [t for s in sessions for t in s.turns]
+    today = date(2026, 5, 15)
+    series = build_tool_cost_daily(all_turns, tool_name="Read", days=30, today=today)
+    assert len(series) == 30
+    nonzero = [p for p in series if p.cost_usd > 0]
+    assert len(nonzero) == 1
+    assert nonzero[0].date == today
