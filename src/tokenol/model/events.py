@@ -69,7 +69,7 @@ class RawEvent:
     # Working directory (from system events)
     cwd: str | None = None
 
-    # Per-tool cost attribution
+    # Per-tool cost attribution. Token counts are float (fractional after share split).
     tool_costs: dict[str, ToolCost] = field(default_factory=dict)
     unattributed_input_tokens: float = 0.0
     unattributed_output_tokens: float = 0.0
@@ -94,7 +94,7 @@ class Turn:
     tool_error_count: int = 0
     tool_names: Counter[str] = field(default_factory=Counter)
 
-    # Per-tool cost attribution
+    # Per-tool cost attribution. Token counts are float (fractional after share split).
     tool_costs: dict[str, ToolCost] = field(default_factory=dict)
     unattributed_input_tokens: float = 0.0
     unattributed_output_tokens: float = 0.0

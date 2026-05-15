@@ -227,6 +227,10 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                     tool_use_id_to_name.clear()
                     bytes_in_context_by_tool.clear()
                     non_tool_bytes_in_context = 0
+                # Peak intentionally not reset after a compaction event. Sessions that
+                # stabilise below 20% of their historical peak will keep firing the
+                # compaction branch on every turn (attribution lands in 'unattributed').
+                # This is a known coarseness of the heuristic, acknowledged in the spec.
                 peak_input_tokens = max(peak_input_tokens, input_pool)
 
                 output_shares, _out_unattr_share = _output_byte_shares(content)
