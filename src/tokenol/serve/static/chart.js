@@ -212,16 +212,18 @@ export function drawChart(container, rawOpts) {
     : { y: { range: (_u, lo, hi) => {
         if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
         const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
-        return [lo - pad, hi + pad];
+        // Tokenol metrics are non-negative — clamp lower bound so the chart
+        // never extends below 0 and low-value points don't sit in a phantom
+        // negative-padding zone.
+        return [Math.max(0, lo - pad), hi + pad];
       }}};
 
   if (secondary) {
-    // Secondary axis is always linear; auto-fit with 5% padding.
     scales.y2 = {
       range: (_u, lo, hi) => {
         if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
         const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.05 || 1;
-        return [lo - pad, hi + pad];
+        return [Math.max(0, lo - pad), hi + pad];
       },
     };
   }
