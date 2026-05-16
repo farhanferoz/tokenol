@@ -1448,6 +1448,10 @@ def build_breakdown_tools(
 
     ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
     head_names = {row["name"] for row in ranked if row["name"] != "other"}
+    # The "other" row collapses tail tools — its `count` (used as the bar
+    # value in tokens mode) must be the sum of those tools' invocations,
+    # not the *number* of collapsed tools. `tool_count` (set inside
+    # `_rank_dict_with_others`) preserves the latter for the UI label.
     tail_call_sum = sum(c for n, c in tokens_by_tool.items() if n not in head_names)
     for row in ranked:
         name = row["name"]
