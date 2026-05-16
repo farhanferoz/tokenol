@@ -697,8 +697,13 @@ def create_app(
         return JSONResponse({"range": range, "models": models})
 
     @app.get("/api/breakdown/tools")
-    async def api_breakdown_tools(request: Request, range: str = "30d"):
+    async def api_breakdown_tools(
+        request: Request, range: str = "30d", mode: str = "prorata",
+    ):
         _validate_breakdown_range(range)
+        # Silent fallback for unknown mode — mirrors the range fallback convention.
+        if mode not in ("prorata", "excl_cache_read"):
+            mode = "prorata"
         result = _current_snapshot_result(request)
         since = (
             range_since(range, datetime.now(tz=timezone.utc).date())
@@ -709,7 +714,7 @@ def create_app(
             t for t in result.turns
             if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
         ]
-        tools = build_breakdown_tools(filtered, mode="prorata")
-        return JSONResponse({"range": range, "tools": tools})
+        tools = build_breakdown_tools(filtered, mode=mode)
+        return JSONResponse({"range": range, "mode": mode, "tools": tools})
 
     return app

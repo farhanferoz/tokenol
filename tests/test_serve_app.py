@@ -1370,3 +1370,93 @@ async def test_model_detail_includes_by_tool(tmp_path: Path) -> None:
     assert len(bt) >= 1
     assert all({"name", "cost_usd", "invocations"} <= set(r) for r in bt)
     assert bt == sorted(bt, key=lambda r: -r["cost_usd"])
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_mode_excl_cache_read(tmp_path: Path) -> None:
+    """GET /api/breakdown/tools?mode=excl_cache_read returns 200, echoes mode,
+    and produces a total (sum of tools + unattributed) matching the summary."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all&mode=excl_cache_read")
+            summary = await client.get("/api/breakdown/summary?range=all")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "excl_cache_read"
+    total_attributed = sum(t["cost_usd"] for t in body["tools"])
+    assert total_attributed == pytest.approx(summary.json()["cost_usd"], rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_default_mode_is_prorata(tmp_path: Path) -> None:
+    """No mode param == mode=prorata; both produce equal cost_usd per tool
+    and echo 'prorata' in the response envelope."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            no_mode = await client.get("/api/breakdown/tools?range=all")
+            with_mode = await client.get("/api/breakdown/tools?range=all&mode=prorata")
+
+    a, b = no_mode.json(), with_mode.json()
+    assert a["mode"] == "prorata" and b["mode"] == "prorata"
+    assert [t["name"] for t in a["tools"]] == [t["name"] for t in b["tools"]]
+    for ta, tb in zip(a["tools"], b["tools"], strict=True):
+        assert ta["cost_usd"] == tb["cost_usd"]
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_invalid_mode_falls_back_to_prorata(tmp_path: Path) -> None:
+    """Unknown mode value silently falls back to 'prorata' (matches the existing
+    range-fallback pattern); response echoes the effective mode."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all&mode=bogus")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "prorata"
+
+
+@pytest.mark.asyncio
+async def test_breakdown_tools_empty_window(tmp_path: Path) -> None:
+    """A range covering no turns returns an empty tools list (or just an
+    __unattributed__ row with cost 0); both modes handle it without errors."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r_pro = await client.get("/api/breakdown/tools?range=7d")
+            r_exc = await client.get("/api/breakdown/tools?range=7d&mode=excl_cache_read")
+
+    assert r_pro.status_code == 200 and r_exc.status_code == 200
+    for body in (r_pro.json(), r_exc.json()):
+        non_unattr = [t for t in body["tools"] if t["name"] != "__unattributed__"]
+        assert non_unattr == []
+        unattr = [t for t in body["tools"] if t["name"] == "__unattributed__"]
+        assert unattr == [] or unattr[0]["cost_usd"] == 0.0
