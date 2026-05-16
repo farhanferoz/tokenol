@@ -33,6 +33,8 @@ let _bdTimeUnit    = localStorage.getItem(_LS_BD_TIME_UNIT)    || 'tokens';
 let _bdProjectUnit = localStorage.getItem(_LS_BD_PROJECT_UNIT) || 'tokens';
 let _bdModelUnit   = localStorage.getItem(_LS_BD_MODEL_UNIT)   || 'tokens';
 let _bdToolUnit    = localStorage.getItem(_LS_BD_TOOL_UNIT)    || 'cost';
+const _LS_BD_TOOL_MODE = 'tokenol.breakdown.toolMode';
+let _bdToolMode    = localStorage.getItem(_LS_BD_TOOL_MODE)    || 'prorata';
 
 // Per-panel period overrides. The page-level period (sessionStorage) drives
 // the scorecards + daily charts; the three breakdown panels each persist
@@ -408,8 +410,9 @@ function renderByModel(data) {
   _chartByModel.$tokenol = { names };
 }
 
-async function fetchTools(range) {
-  const resp = await fetch(`/api/breakdown/tools?range=${encodeURIComponent(range)}`);
+async function fetchTools(range, mode) {
+  const url = `/api/breakdown/tools?range=${encodeURIComponent(range)}&mode=${encodeURIComponent(mode)}`;
+  const resp = await fetch(url);
   if (!resp.ok) throw new Error(`tools ${resp.status}`);
   return resp.json();
 }
@@ -635,21 +638,23 @@ function renderDailyCache(data) {
 // Pill wiring
 // ---------------------------------------------------------------------------
 
-function _wireUnitPills(groupId, lsKey, getCurrent, setCurrent, onChange) {
+function _wireUnitPills(groupId, lsKey, getCurrent, setCurrent, onChange, dataAttr = 'bdunit') {
   const group = document.getElementById(groupId);
   if (!group) return;
+  const selector = `[data-${dataAttr}]`;
+  const readVal = (el) => el.dataset[dataAttr];
   // Sync initial DOM state to persisted value.
-  group.querySelectorAll('[data-bdunit]').forEach(b => {
-    b.classList.toggle('on', b.dataset.bdunit === getCurrent());
+  group.querySelectorAll(selector).forEach(b => {
+    b.classList.toggle('on', readVal(b) === getCurrent());
   });
-  group.querySelectorAll('[data-bdunit]').forEach(btn => {
+  group.querySelectorAll(selector).forEach(btn => {
     btn.addEventListener('click', () => {
-      const next = btn.dataset.bdunit;
+      const next = readVal(btn);
       if (next === getCurrent()) return;
       setCurrent(next);
       localStorage.setItem(lsKey, next);
-      group.querySelectorAll('[data-bdunit]').forEach(b =>
-        b.classList.toggle('on', b.dataset.bdunit === next),
+      group.querySelectorAll(selector).forEach(b =>
+        b.classList.toggle('on', readVal(b) === next),
       );
       onChange(next);
     });
@@ -712,7 +717,7 @@ async function refreshAll() {
       fetchDailyTokens(globalRange),
       fetchByProject(_bdProjectPeriod),
       fetchByModel(_bdModelPeriod),
-      fetchTools(_bdToolPeriod),
+      fetchTools(_bdToolPeriod, _bdToolMode),
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
@@ -737,7 +742,7 @@ async function refreshByModel() {
 }
 async function refreshTools() {
   try {
-    renderToolMix(await fetchTools(_bdToolPeriod));
+    renderToolMix(await fetchTools(_bdToolPeriod, _bdToolMode));
   } catch (err) { console.error('[breakdown] tools refresh', err); }
 }
 
@@ -789,11 +794,27 @@ _wireUnitPills('bd-model-unit-pills', _LS_BD_MODEL_UNIT,
   v  => { _bdModelUnit = v; },
   () => renderByModel(null),
 );
+function _syncToolModePillsVisibility() {
+  const el = document.getElementById('bd-tools-mode-pills');
+  if (!el) return;
+  el.style.display = _bdToolUnit === 'cost' ? '' : 'none';
+}
+
 _wireUnitPills('bd-tools-unit-pills', _LS_BD_TOOL_UNIT,
   () => _bdToolUnit,
   v  => { _bdToolUnit = v; },
-  () => renderToolMix(null),
+  () => { _syncToolModePillsVisibility(); renderToolMix(null); },
 );
+
+_wireUnitPills('bd-tools-mode-pills', _LS_BD_TOOL_MODE,
+  () => _bdToolMode,
+  v  => { _bdToolMode = v; },
+  () => { refreshTools(); },
+  'bdmode',
+);
+
+// Apply initial visibility on page load (after both pill groups are wired).
+_syncToolModePillsVisibility();
 
 // Per-panel period pills — each panel refreshes only its own data so the
 // other panels keep their independent windows.
