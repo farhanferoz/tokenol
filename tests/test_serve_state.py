@@ -19,6 +19,7 @@ from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     _recompute_excl_cache_read,
+    build_breakdown_tools,
     build_project_detail,
     build_snapshot_full,
     build_tool_detail,
@@ -990,3 +991,105 @@ def test_recompute_excl_cache_read_linger_only_tool():
     expected = 0.3 * (turn_cost.input_usd + turn_cost.cache_creation_usd)
     assert result["Read"] == pytest.approx(expected, rel=1e-9)
     assert result["Read"] > 0.0   # non-zero — the whole point of this case
+
+
+# ---- build_breakdown_tools tests --------------------------------------
+
+
+def _btt_turns_fixture() -> list[Turn]:
+    """Three synthetic turns: two assistant turns invoking real tools,
+    one with an UNKNOWN_TOOL cost slice (folds into unattributed).
+    Spans a small window so build_breakdown_tools can rank + collapse."""
+    t0 = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+
+    def _u(inp, out, cr, cc):
+        return Usage(input_tokens=inp, output_tokens=out,
+                     cache_read_input_tokens=cr, cache_creation_input_tokens=cc)
+
+    return [
+        Turn(
+            dedup_key="k0", timestamp=t0, session_id="s1",
+            model="claude-opus-4-7", usage=_u(100, 200, 800, 0),
+            is_sidechain=False, stop_reason="tool_use",
+            tool_use_count=2, tool_names=Counter({"Read": 1, "Bash": 1}),
+            tool_costs={
+                "Read": ToolCost(tool_name="Read", input_tokens=500.0,
+                                 output_tokens=80.0, cost_usd=2.50),
+                "Bash": ToolCost(tool_name="Bash", input_tokens=300.0,
+                                 output_tokens=40.0, cost_usd=1.25),
+            },
+            unattributed_input_tokens=100.0, unattributed_output_tokens=80.0,
+            unattributed_cost_usd=0.75,
+        ),
+        Turn(
+            dedup_key="k1", timestamp=t1, session_id="s1",
+            model="claude-opus-4-7", usage=_u(50, 300, 1000, 500),
+            is_sidechain=False, stop_reason="end_turn",
+            tool_use_count=1, tool_names=Counter({"Read": 1}),
+            tool_costs={
+                "Read": ToolCost(tool_name="Read", input_tokens=900.0,
+                                 output_tokens=180.0, cost_usd=3.10),
+            },
+            unattributed_input_tokens=650.0, unattributed_output_tokens=120.0,
+            unattributed_cost_usd=1.05,
+        ),
+        Turn(
+            dedup_key="k2", timestamp=t2, session_id="s2",
+            model="claude-sonnet-4-6", usage=_u(20, 80, 200, 0),
+            is_sidechain=False, stop_reason="end_turn",
+            tool_use_count=0, tool_names=Counter(),
+            tool_costs={
+                # __unknown__: unmatched tool_result bytes; folds into unattributed.
+                "__unknown__": ToolCost(tool_name="__unknown__",
+                                        input_tokens=100.0, output_tokens=0.0,
+                                        cost_usd=0.40),
+            },
+            unattributed_input_tokens=120.0, unattributed_output_tokens=80.0,
+            unattributed_cost_usd=0.55,
+        ),
+    ]
+
+
+def test_build_breakdown_tools_prorata_matches_legacy_inline_loop():
+    """Regression guard: build_breakdown_tools(turns, mode='prorata') must
+    produce the same tools list (per-tool cost_usd, count, last_active, ordering,
+    __unattributed__ residual) as the inline loop in api_breakdown_tools today."""
+    turns = _btt_turns_fixture()
+
+    # Reproduce the inline loop's behaviour to lock in the expected output.
+    from collections import Counter as _C
+
+    from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
+    from tokenol.metrics.rollups import _rank_dict_with_others
+    cost_by_tool: dict[str, float] = {}
+    tokens_by_tool: _C[str] = _C()
+    unattr_cost = 0.0
+    last_active: dict[str, datetime] = {}
+    for t in turns:
+        tokens_by_tool.update(t.tool_names)
+        for name, tc in t.tool_costs.items():
+            if name == UNKNOWN_TOOL:
+                unattr_cost += tc.cost_usd
+                continue
+            cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
+            if name in t.tool_names and (name not in last_active or t.timestamp > last_active[name]):
+                last_active[name] = t.timestamp
+        unattr_cost += t.unattributed_cost_usd
+    expected = _rank_dict_with_others(cost_by_tool, top_n=10)
+    head = {r["name"] for r in expected if r["name"] != "other"}
+    tail_calls = sum(c for n, c in tokens_by_tool.items() if n not in head)
+    for row in expected:
+        name = row["name"]
+        if name == "other":
+            row["count"] = tail_calls
+        elif name in tokens_by_tool:
+            row["count"] = tokens_by_tool[name]
+        if name in last_active:
+            row["last_active"] = last_active[name].isoformat()
+        row["cost_usd"] = row.pop("value")
+    expected.append({"name": UNATTRIBUTED_TOOL, "cost_usd": unattr_cost})
+
+    got = build_breakdown_tools(turns, mode="prorata")
+    assert got == expected

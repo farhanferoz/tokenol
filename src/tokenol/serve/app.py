@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -16,9 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
-from tokenol.metrics.rollups import _rank_dict_with_others
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
 
@@ -31,6 +28,7 @@ from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     _grouped_cwd_by_sid,
+    build_breakdown_tools,
     build_daily_panel,
     build_day_detail,
     build_hourly_panel,
@@ -707,48 +705,11 @@ def create_app(
             if range != "all"
             else None
         )
-
-        cost_by_tool: dict[str, float] = {}
-        tokens_by_tool: Counter[str] = Counter()
-        unattr_cost = 0.0
-        last_active: dict[str, datetime] = {}
-
-        for t in result.turns:
-            if since is not None and t.timestamp.date() < since:
-                continue
-            if t.is_interrupted:
-                continue
-            tokens_by_tool.update(t.tool_names)
-            for name, tc in t.tool_costs.items():
-                # __unknown__ (unmatched tool_result bytes) folds into unattributed.
-                if name == UNKNOWN_TOOL:
-                    unattr_cost += tc.cost_usd
-                    continue
-                cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
-                if name in t.tool_names and (name not in last_active or t.timestamp > last_active[name]):
-                    last_active[name] = t.timestamp
-            unattr_cost += t.unattributed_cost_usd
-
-        ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
-        head_names = {row["name"] for row in ranked if row["name"] != "other"}
-        # The "other" row collapses tail tools — its `count` (used as the bar
-        # value in tokens mode) must be the sum of those tools' invocations,
-        # not the *number* of collapsed tools. `tool_count` (set inside
-        # `_rank_dict_with_others`) preserves the latter for the UI label.
-        tail_call_sum = sum(
-            c for n, c in tokens_by_tool.items() if n not in head_names
-        )
-        for row in ranked:
-            name = row["name"]
-            if name == "other":
-                row["count"] = tail_call_sum
-            elif name in tokens_by_tool:
-                row["count"] = tokens_by_tool[name]
-            if name in last_active:
-                row["last_active"] = last_active[name].isoformat()
-            row["cost_usd"] = row.pop("value")
-        ranked.append({"name": UNATTRIBUTED_TOOL, "cost_usd": unattr_cost})
-
-        return JSONResponse({"range": range, "tools": ranked})
+        filtered = [
+            t for t in result.turns
+            if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
+        ]
+        tools = build_breakdown_tools(filtered, mode="prorata")
+        return JSONResponse({"range": range, "tools": tools})
 
     return app

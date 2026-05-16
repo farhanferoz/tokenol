@@ -38,6 +38,7 @@ from tokenol.metrics.cost import cost_for_turn, rollup_by_date, rollup_by_hour
 from tokenol.metrics.history import baseline_median, trailing_median
 from tokenol.metrics.rollups import (
     SessionRollup,
+    _rank_dict_with_others,
     build_model_rollups,
     build_project_rollups,
     build_session_rollup,
@@ -1387,6 +1388,79 @@ def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
         out_share = (tc.output_tokens / output_token_count) if output_token_count else 0.0
         out[name] = in_share * input_pool_excl + out_share * turn_cost.output_usd
     return out
+
+
+def build_breakdown_tools(
+    turns: list[Turn], *, mode: str = "prorata",
+) -> list[dict]:
+    """Build the ranked tool list for GET /api/breakdown/tools.
+
+    Walks *turns* once, accumulating per-tool cost, invocation counts, and
+    last-active timestamps. The `mode` parameter selects which attribution
+    formula computes the per-tool cost contribution:
+
+    - ``"prorata"`` (default) — sums the stored ``tc.cost_usd`` field; the
+      unattributed residual is the sum of stored ``t.unattributed_cost_usd``.
+    - ``"excl_cache_read"`` — recomputes per-tool cost via
+      ``_recompute_excl_cache_read``; the unattributed residual is
+      ``turn_total_usd - sum(per_tool_cost_for_real_tools)``.
+
+    Returns the ranked tools list (top-10 + 'other' tail + ``__unattributed__``
+    row). The caller wraps it in the response envelope.
+
+    See docs/superpowers/specs/2026-05-16-attribution-mode-toggle-design.md.
+    """
+    cost_by_tool: dict[str, float] = {}
+    tokens_by_tool: Counter[str] = Counter()
+    unattr_cost = 0.0
+    last_active: dict[str, datetime] = {}
+
+    for t in turns:
+        if t.is_interrupted:
+            continue
+        tokens_by_tool.update(t.tool_names)
+
+        if mode == "excl_cache_read":
+            recomputed = _recompute_excl_cache_read(t)
+            turn_total = cost_for_turn(t.model, t.usage).total_usd
+            real_sum = 0.0
+            for name, cost in recomputed.items():
+                if name == UNKNOWN_TOOL:
+                    continue
+                cost_by_tool[name] = cost_by_tool.get(name, 0.0) + cost
+                real_sum += cost
+                if name in t.tool_names and (
+                    name not in last_active or t.timestamp > last_active[name]
+                ):
+                    last_active[name] = t.timestamp
+            unattr_cost += turn_total - real_sum
+        else:  # "prorata" (default; also the fallback for unknown values)
+            for name, tc in t.tool_costs.items():
+                if name == UNKNOWN_TOOL:
+                    unattr_cost += tc.cost_usd
+                    continue
+                cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
+                if name in t.tool_names and (
+                    name not in last_active or t.timestamp > last_active[name]
+                ):
+                    last_active[name] = t.timestamp
+            unattr_cost += t.unattributed_cost_usd
+
+    ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
+    head_names = {row["name"] for row in ranked if row["name"] != "other"}
+    tail_call_sum = sum(c for n, c in tokens_by_tool.items() if n not in head_names)
+    for row in ranked:
+        name = row["name"]
+        if name == "other":
+            row["count"] = tail_call_sum
+        elif name in tokens_by_tool:
+            row["count"] = tokens_by_tool[name]
+        if name in last_active:
+            row["last_active"] = last_active[name].isoformat()
+        row["cost_usd"] = row.pop("value")
+    ranked.append({"name": UNATTRIBUTED_TOOL, "cost_usd": unattr_cost})
+
+    return ranked
 
 
 def _accumulate_tool_costs(
