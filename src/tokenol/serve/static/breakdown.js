@@ -8,7 +8,7 @@
 //  - SSE-driven refresh
 
 import { readCssVar } from './chart.js';
-import { renderRankedBars } from './components.js';
+import { fmtUSD, renderRankedBars } from './components.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -49,12 +49,6 @@ function fmtTok(n) {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
   return String(n);
-}
-
-function fmtUSD(n) {
-  if (!Number.isFinite(n)) return '—';
-  if (Math.abs(n) >= 1000) return `$${(n).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
-  return `$${n.toFixed(2)}`;
 }
 
 function fmtPct(n, decimals = 1) {

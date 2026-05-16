@@ -1,6 +1,13 @@
 // Shared UI component helpers for drill-down pages and main app.
 
-export const fmtUSD   = v => `$${(+v || 0).toFixed(2)}`;
+export const fmtUSD   = v => {
+  const n = +v;
+  if (!Number.isFinite(n)) return '—';
+  // Whole-dollar formatting across the dashboard — cent-precision adds noise
+  // at the scale these tables show ($10–$10,000) and made adjacent rows hard
+  // to compare (some with two decimals, some without).
+  return '$' + Math.round(n).toLocaleString('en-US');
+};
 export const fmtPct   = v => `${(100 * (+v || 0)).toFixed(1)}%`;
 export const fmtDate  = s => s ? s.slice(5, 10) : '–';
 export const fmtTok   = v => +v >= 1e6 ? `${(+v/1e6).toFixed(1)}M` : +v >= 1e3 ? `${(+v/1e3).toFixed(0)}k` : String(+v || 0);
