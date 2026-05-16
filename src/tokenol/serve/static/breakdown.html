@@ -147,6 +147,12 @@
           <span data-range="90d">90D</span>
           <span data-range="all">All</span>
         </span>
+        <span class="pill-row" id="bd-tools-mode-pills" role="group" aria-label="Attribution mode">
+          <span data-bdmode="prorata" class="on"
+                title="Pro-rata: every dollar of input + cache + output is split by visible-byte share across tools.">Pro-rata</span>
+          <span data-bdmode="excl_cache_read"
+                title="Cache-read excluded: cost of carrying tool output across turns goes to non-tool, not the tool.">Excl cache-read</span>
+        </span>
         <span class="pill-row" id="bd-tools-unit-pills" role="group" aria-label="Unit">
           <span data-bdunit="tokens">Tokens</span>
           <span data-bdunit="cost" class="on">$</span>
