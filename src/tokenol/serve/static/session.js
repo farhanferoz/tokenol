@@ -1,6 +1,7 @@
 // ---- helpers ----
 
 import { drawChart } from '/assets/chart.js';
+import { fmtUSD } from '/assets/components.js';
 
 const $ = id => document.getElementById(id);
 
@@ -15,7 +16,6 @@ const CV = {};
 const AMBER_RGB = '255,182,71';
 const COOL_RGB  = '111,174,216';
 
-const fmtUSD = v => `$${(+v || 0).toFixed(2)}`;
 const fmtTok = v => +v >= 1e6 ? `${(+v/1e6).toFixed(1)}M` : +v >= 1e3 ? `${(+v/1e3).toFixed(0)}k` : String(+v || 0);
 
 function shortModel(m) {

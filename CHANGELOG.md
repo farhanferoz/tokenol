@@ -19,6 +19,9 @@ All notable changes to tokenol are documented here. The format follows
 ### Fixed
 
 - **`$/kW` scorecard read `$0`** on the Overview page. `fmtUSD` (introduced in 0.6.0's "standardise dollar formatting on whole dollars" pass) was applying `Math.round` to every value, stamping out the entire sub-dollar signal — `$/kW` is inherently $0.01–$1 territory, so the scorecard, its `<$X GOOD · >$Y RED` threshold labels, and the `last hour: $…` sub-line all read `$0`. Now `fmtUSD` keeps two decimals for values in `[$0.01, $1)`, five decimals for `(0, $0.01)`, and whole dollars for `≥ $1` (the original rationale held for the $10+ table values). No call-site changes required.
+- **Sub-dollar bypasses around the dashboard.** Sweep across every static JS file found four more places that bypassed the shared `fmtUSD` and would have shown `$0` for sub-dollar values: `session.js` had a local `fmtUSD = v => $${v.toFixed(2)}` (which would render a $0.003 turn cost as `$0.00`); `project.js` rendered `cost_per_kw` for both Top Turns and Project Sessions tables via inline `$${...toFixed(2)}`; `tool.js` daily-cost chart used `(v) => '$' + v.toFixed(2)` as its Y-axis tick callback; `chart.js` `Y_FMTRS.usd` (used by uPlot cost charts on Overview / Breakdown) was `$${v.toFixed(2)}`. All routed through the shared `fmtUSD` now.
+- **`renderRankedBars` default formatter footgun.** The default `valueFormat` when omitted was `(n) => "$" + n.toFixed(2)`; now `fmtUSD`. No current caller relied on the default, but a future omission would have silently swallowed cents.
+- **`↓0% vs 7d median` ghost arrow** on Overview tiles. When the rounded delta is exactly 0%, the tile would still render an arrow + "0%" (reading as a tiny decrease but actually flat). `_setTileDelta` now mirrors `deltaBadge`'s 0% suppression and falls through to the plain `vs <baseline> median` text.
 
 ### Notes
 

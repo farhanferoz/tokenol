@@ -190,7 +190,7 @@ function renderTopTurns(turns) {
   if (!tbody) return;
   tbody.innerHTML = (turns || []).slice(0, 15).map(t => {
     const hitPct  = t.hit_rate   != null ? fmtPct(t.hit_rate)   : '–';
-    const cpkw    = t.cost_per_kw != null ? `$${(+t.cost_per_kw).toFixed(2)}` : '–';
+    const cpkw    = t.cost_per_kw != null ? fmtUSD(t.cost_per_kw) : '–';
     const ctx     = t.ctx_ratio  != null ? fmtRatio(t.ctx_ratio) : '–';
     return `<tr style="cursor:pointer" data-sess="${t.session_id}">
       <td class="mute">${fmtAbsTime(t.ts)}</td>
@@ -212,7 +212,7 @@ function renderProjectSessions(sessions) {
   if (!tbody) return;
   tbody.innerHTML = (sessions || []).map(s => {
     const hitPct  = s.cache_hit_rate != null ? fmtPct(s.cache_hit_rate) : '–';
-    const cpkw    = s.cost_per_kw   != null ? `$${(+s.cost_per_kw).toFixed(2)}` : '–';
+    const cpkw    = s.cost_per_kw   != null ? fmtUSD(s.cost_per_kw) : '–';
     const ctx     = s.ctx_ratio     != null ? fmtRatio(s.ctx_ratio)     : '–';
     const toolErr = s.tool_error_rate > 0   ? fmtPct(s.tool_error_rate)  : '–';
     const dur     = _fmtDuration(s.first_ts, s.last_ts);

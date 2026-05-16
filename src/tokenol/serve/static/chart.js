@@ -1,8 +1,10 @@
 /* global uPlot */
 
+import { fmtUSD } from '/assets/components.js';
+
 export const Y_FMTRS = {
   percent: v => Number.isFinite(v) ? `${v.toFixed(1)}%`                                     : '',
-  usd:     v => Number.isFinite(v) ? `$${v.toFixed(2)}`                                     : '',
+  usd:     v => Number.isFinite(v) ? fmtUSD(v)                                              : '',
   ratio:   v => Number.isFinite(v) ? `${v >= 100 ? Math.round(v) : v.toFixed(1)}:1`         : '',
   tokens:  v => Number.isFinite(v) ? (v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : `${(v/1e3).toFixed(0)}k`) : '',
 };

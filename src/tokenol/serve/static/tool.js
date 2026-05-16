@@ -70,7 +70,7 @@ function renderDailyChart(daily, totalCost) {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
-        y: { beginAtZero: true, ticks: { callback: (v) => '$' + Number(v).toFixed(2) } },
+        y: { beginAtZero: true, ticks: { callback: fmtUSD } },
         x: { ticks: { maxTicksLimit: 6 } },
       },
     },

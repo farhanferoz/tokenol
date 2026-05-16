@@ -178,7 +178,7 @@ export function sessionRows(sessions) {
  * opts: {valueFormat?: (n) => string}
  */
 export function renderRankedBars(container, rows, opts = {}) {
-  const fmt = opts.valueFormat || ((n) => "$" + n.toFixed(2));
+  const fmt = opts.valueFormat || fmtUSD;
   const max = rows.reduce((m, r) => Math.max(m, Math.abs(r.value) || 0), 0) || 1;
 
   container.classList.add("ranked-bars");

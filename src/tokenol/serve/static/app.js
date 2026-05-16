@@ -264,6 +264,7 @@ function _setTileDelta(el, tile, higherGood) {
   if (dr == null) { el.textContent = lbl ? `vs ${lbl} median` : ''; return; }
   const pct = Math.round((dr - 1) * 100);
   const abs = Math.abs(pct);
+  if (abs === 0) { el.textContent = lbl ? `vs ${lbl} median` : ''; return; }
   el.textContent = `${pct >= 0 ? '↑' : '↓'}${abs}% vs ${lbl} median`;
   if (abs >= 20) el.className = `delta ${(higherGood ? pct > 0 : pct < 0) ? 'good' : 'alarm'}`;
 }
