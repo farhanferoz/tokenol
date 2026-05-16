@@ -1032,9 +1032,16 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
   background: var(--rule-2, #c4b89e);
   opacity: 0.85;
 }
+.ranked-bars .rb-row {
+  /* display:contents so each row's label/track/value flow as grid items.
+     Without this, non-clickable rows (div.rb-row — used for `other` and
+     `unattributed`) collapse into a single grid cell and stack their
+     contents vertically in the label column, while the next row's
+     contents land in the wrong column. */
+  display: contents;
+}
 .ranked-bars a.rb-row {
   text-decoration: none;
-  display: contents;
 }
 .ranked-bars a.rb-row:hover .rb-label {
   text-decoration: underline;
