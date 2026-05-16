@@ -48,13 +48,15 @@ def _parse_usage(msg: dict) -> Usage | None:
 
 def _is_real_tool_name(name: object) -> bool:
     """A tool_use block's name is real only if it's a non-empty string that
-    doesn't collide with the cost-attribution sentinels — a hostile log could
-    otherwise hide its share of cost under `__unattributed__` / `__unknown__`.
+    doesn't collide with the cost-attribution sentinels or the synthetic
+    "other" row used by ranked-bar collapsing — a hostile log could otherwise
+    hide its share of cost under `__unattributed__` / `__unknown__` or
+    masquerade as the collapsed tail.
     """
     return (
         isinstance(name, str)
         and bool(name)
-        and name not in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL)
+        and name not in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, "other")
     )
 
 

@@ -1420,8 +1420,10 @@ async def test_breakdown_tools_default_mode_is_prorata(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_breakdown_tools_invalid_mode_falls_back_to_prorata(tmp_path: Path) -> None:
-    """Unknown mode value silently falls back to 'prorata' (matches the existing
-    range-fallback pattern); response echoes the effective mode."""
+    """Unknown mode value silently falls back to 'prorata' (intentional divergence
+    from `range`, which 400s on bad values — keeps older servers forward-compatible
+    with future mode tokens stored in client localStorage). Response echoes the
+    effective mode."""
     dst = tmp_path / "projects" / "sess-001.jsonl"
     dst.parent.mkdir(parents=True)
     dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())

@@ -399,19 +399,21 @@ def test_rank_dict_with_others_skips_other_when_short():
 
 
 def test_sentinel_tool_name_rejected_by_extract_tool_blocks():
-    """A hostile log emitting a tool_use with name `__unattributed__` or
-    `__unknown__` must not land in tool_names — otherwise the attacker can
-    hide cost under the cost-attribution sentinels."""
+    """A hostile log emitting a tool_use with name `__unattributed__`,
+    `__unknown__`, or the synthetic `other` collapse-row name must not land in
+    tool_names — otherwise the attacker can hide cost under the cost-attribution
+    sentinels or masquerade as the collapsed tail in the ranked-bar UI."""
     from tokenol.ingest.parser import _extract_tool_blocks
     content = [
         {"type": "tool_use", "id": "a", "name": "__unattributed__"},
         {"type": "tool_use", "id": "b", "name": "__unknown__"},
-        {"type": "tool_use", "id": "c", "name": "Read"},
+        {"type": "tool_use", "id": "c", "name": "other"},
+        {"type": "tool_use", "id": "d", "name": "Read"},
     ]
     tool_names, tool_use_total, _ = _extract_tool_blocks(content)
     assert dict(tool_names) == {"Read": 1}
     # tool_use_total still counts every block — preserves legacy semantics.
-    assert tool_use_total == 3
+    assert tool_use_total == 4
 
 
 def test_plain_string_content_is_wrapped(tmp_path):

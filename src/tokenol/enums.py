@@ -24,3 +24,8 @@ class AssumptionTag(str, Enum):
     DEDUP_PASSTHROUGH = "DEDUP_PASSTHROUGH"
     INTERRUPTED_TURN_SKIPPED = "INTERRUPTED_TURN_SKIPPED"
     GEMINI_UNPRICED = "GEMINI_UNPRICED"
+
+
+class AttributionMode(str, Enum):
+    PRORATA = "prorata"
+    EXCL_CACHE_READ = "excl_cache_read"

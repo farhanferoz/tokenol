@@ -192,9 +192,9 @@ function renderTopTurns(turns) {
     const hitPct  = t.hit_rate   != null ? fmtPct(t.hit_rate)   : '–';
     const cpkw    = t.cost_per_kw != null ? fmtUSD(t.cost_per_kw) : '–';
     const ctx     = t.ctx_ratio  != null ? fmtRatio(t.ctx_ratio) : '–';
-    return `<tr style="cursor:pointer" data-sess="${t.session_id}">
+    return `<tr style="cursor:pointer" data-sess="${esc(t.session_id)}">
       <td class="mute">${fmtAbsTime(t.ts)}</td>
-      <td class="mute">${t.session_id.slice(0,8)}</td>
+      <td class="mute">${esc(t.session_id.slice(0,8))}</td>
       <td>${fmtUSD(t.cost_usd)}</td>
       <td>${hitPct}</td>
       <td>${cpkw}</td>
@@ -217,7 +217,7 @@ function renderProjectSessions(sessions) {
     const toolErr = s.tool_error_rate > 0   ? fmtPct(s.tool_error_rate)  : '–';
     const dur     = _fmtDuration(s.first_ts, s.last_ts);
     const rowCls  = s.verdict !== 'OK' ? 'row-flagged-red' : '';
-    return `<tr data-id="${s.id}" class="${rowCls}" style="cursor:pointer">
+    return `<tr data-id="${esc(s.id)}" class="${rowCls}" style="cursor:pointer">
       <td>${fmtAbsTime(s.first_ts)}</td>
       <td class="mute">${dur}</td>
       <td>${shortModel(s.model)}</td>
@@ -228,7 +228,7 @@ function renderProjectSessions(sessions) {
       <td>${ctx}</td>
       <td>${toolErr}</td>
       <td>${verdictPill(s.verdict)}</td>
-      <td class="mute">${s.id.slice(0,8)}</td>
+      <td class="mute">${esc(s.id.slice(0,8))}</td>
     </tr>`;
   }).join('');
   tbody.querySelectorAll('tr[data-id]').forEach(row => {

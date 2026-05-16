@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
+from tokenol.enums import AttributionMode
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.serve.prefs import Preferences, default_path
@@ -48,6 +49,7 @@ from tokenol.serve.streaming import SnapshotBroadcaster
 _WINDOW_MINUTES: dict[str, int] = {"15m": 15, "60m": 60, "4h": 240, "24h": 1440}
 _KNOWN_PREFS_KEYS: frozenset[str] = frozenset({"tick_seconds", "reference_usd", "hot_window_days", "thresholds"})
 _BREAKDOWN_RANGES: frozenset[str] = frozenset({"7d", "30d", "90d", "all"})
+_ATTRIBUTION_MODES: frozenset[str] = frozenset(m.value for m in AttributionMode)
 
 
 def _validate_breakdown_range(range_: str) -> None:
@@ -698,12 +700,16 @@ def create_app(
 
     @app.get("/api/breakdown/tools")
     async def api_breakdown_tools(
-        request: Request, range: str = "30d", mode: str = "prorata",
+        request: Request,
+        range: str = "30d",
+        mode: str = AttributionMode.PRORATA.value,
     ):
         _validate_breakdown_range(range)
-        # Silent fallback for unknown mode — mirrors the range fallback convention.
-        if mode not in ("prorata", "excl_cache_read"):
-            mode = "prorata"
+        # Unknown `mode` values fall back to prorata silently (in contrast to
+        # `range`, which 400s). Forward-compatible: a client that stores a
+        # future mode in localStorage degrades gracefully on an older server.
+        if mode not in _ATTRIBUTION_MODES:
+            mode = AttributionMode.PRORATA.value
         result = _current_snapshot_result(request)
         since = (
             range_since(range, datetime.now(tz=timezone.utc).date())

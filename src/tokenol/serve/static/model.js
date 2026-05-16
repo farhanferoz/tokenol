@@ -47,7 +47,7 @@ function render(d) {
     noProj?.classList.add('hidden');
     tbody.innerHTML = projects.map(p =>
       `<tr ${p.cwd_b64 ? `style="cursor:pointer" data-href="/project/${esc(p.cwd_b64)}"` : ''}>
-        <td title="${esc(p.cwd ?? '')}">${cwdBasename(p.cwd)}</td>
+        <td title="${esc(p.cwd ?? '')}">${esc(cwdBasename(p.cwd))}</td>
         <td class="num">${fmtUSD(p.cost)}</td>
         <td class="num">${p.turns}</td>
         <td>${p.last_active ? fmtRelTime(p.last_active) : '–'}</td>

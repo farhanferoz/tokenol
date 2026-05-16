@@ -28,13 +28,25 @@ const _LS_BD_TIME_UNIT    = 'tokenol.breakdown.timeUnit';
 const _LS_BD_PROJECT_UNIT = 'tokenol.breakdown.projectUnit';
 const _LS_BD_MODEL_UNIT   = 'tokenol.breakdown.modelUnit';
 const _LS_BD_TOOL_UNIT    = 'tokenol.breakdown.toolUnit';
+const _LS_BD_TOOL_MODE    = 'tokenol.breakdown.toolMode';
 
-let _bdTimeUnit    = localStorage.getItem(_LS_BD_TIME_UNIT)    || 'tokens';
-let _bdProjectUnit = localStorage.getItem(_LS_BD_PROJECT_UNIT) || 'tokens';
-let _bdModelUnit   = localStorage.getItem(_LS_BD_MODEL_UNIT)   || 'tokens';
-let _bdToolUnit    = localStorage.getItem(_LS_BD_TOOL_UNIT)    || 'cost';
-const _LS_BD_TOOL_MODE = 'tokenol.breakdown.toolMode';
-let _bdToolMode    = localStorage.getItem(_LS_BD_TOOL_MODE)    || 'prorata';
+// Whitelisted reads — a truthy-but-unknown localStorage value (left over from a
+// prior build, manually edited, or future-spec) bypassed plain `|| 'tokens'`
+// fallbacks and left the pills in a no-selection state.
+const _VALID_UNITS = new Set(['tokens', 'cost']);
+const _VALID_TOOL_MODES = new Set(['prorata', 'excl_cache_read']);
+function _readUnit(key, fallback) {
+  const v = localStorage.getItem(key);
+  return _VALID_UNITS.has(v) ? v : fallback;
+}
+let _bdTimeUnit    = _readUnit(_LS_BD_TIME_UNIT,    'tokens');
+let _bdProjectUnit = _readUnit(_LS_BD_PROJECT_UNIT, 'tokens');
+let _bdModelUnit   = _readUnit(_LS_BD_MODEL_UNIT,   'tokens');
+let _bdToolUnit    = _readUnit(_LS_BD_TOOL_UNIT,    'cost');
+let _bdToolMode    = (() => {
+  const v = localStorage.getItem(_LS_BD_TOOL_MODE);
+  return _VALID_TOOL_MODES.has(v) ? v : 'prorata';
+})();
 
 // Per-panel period overrides. The page-level period (sessionStorage) drives
 // the scorecards + daily charts; the three breakdown panels each persist
@@ -638,7 +650,7 @@ function renderDailyCache(data) {
 // Pill wiring
 // ---------------------------------------------------------------------------
 
-function _wireUnitPills(groupId, lsKey, getCurrent, setCurrent, onChange, dataAttr = 'bdunit') {
+function _wirePillGroup(groupId, lsKey, getCurrent, setCurrent, onChange, dataAttr) {
   const group = document.getElementById(groupId);
   if (!group) return;
   const selector = `[data-${dataAttr}]`;
@@ -778,42 +790,43 @@ function connectSSE() {
 
 connectSSE();
 
-wirePeriodPills();
-_wireUnitPills('bd-time-unit-pills', _LS_BD_TIME_UNIT,
-  () => _bdTimeUnit,
-  v  => { _bdTimeUnit = v; },
-  () => renderDailyWork(null),
-);
-_wireUnitPills('bd-project-unit-pills', _LS_BD_PROJECT_UNIT,
-  () => _bdProjectUnit,
-  v  => { _bdProjectUnit = v; },
-  () => renderByProject(null),
-);
-_wireUnitPills('bd-model-unit-pills', _LS_BD_MODEL_UNIT,
-  () => _bdModelUnit,
-  v  => { _bdModelUnit = v; },
-  () => renderByModel(null),
-);
 function _syncToolModePillsVisibility() {
   const el = document.getElementById('bd-tools-mode-pills');
   if (!el) return;
   el.style.display = _bdToolUnit === 'cost' ? '' : 'none';
 }
 
-_wireUnitPills('bd-tools-unit-pills', _LS_BD_TOOL_UNIT,
+wirePeriodPills();
+_wirePillGroup('bd-time-unit-pills', _LS_BD_TIME_UNIT,
+  () => _bdTimeUnit,
+  v  => { _bdTimeUnit = v; },
+  () => renderDailyWork(null),
+  'bdunit',
+);
+_wirePillGroup('bd-project-unit-pills', _LS_BD_PROJECT_UNIT,
+  () => _bdProjectUnit,
+  v  => { _bdProjectUnit = v; },
+  () => renderByProject(null),
+  'bdunit',
+);
+_wirePillGroup('bd-model-unit-pills', _LS_BD_MODEL_UNIT,
+  () => _bdModelUnit,
+  v  => { _bdModelUnit = v; },
+  () => renderByModel(null),
+  'bdunit',
+);
+_wirePillGroup('bd-tools-unit-pills', _LS_BD_TOOL_UNIT,
   () => _bdToolUnit,
   v  => { _bdToolUnit = v; },
   () => { _syncToolModePillsVisibility(); renderToolMix(null); },
+  'bdunit',
 );
-
-_wireUnitPills('bd-tools-mode-pills', _LS_BD_TOOL_MODE,
+_wirePillGroup('bd-tools-mode-pills', _LS_BD_TOOL_MODE,
   () => _bdToolMode,
   v  => { _bdToolMode = v; },
   () => { refreshTools(); },
   'bdmode',
 );
-
-// Apply initial visibility on page load (after both pill groups are wired).
 _syncToolModePillsVisibility();
 
 // Per-panel period pills — each panel refreshes only its own data so the

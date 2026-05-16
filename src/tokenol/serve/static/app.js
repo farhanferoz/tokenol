@@ -1247,10 +1247,10 @@ function _drawRecentTable() {
     const ctxPct = r.ctx_used != null ? Math.round(r.ctx_used * 100) : null;
     const ctxCls = ctxPct != null ? (ctxPct >= 85 ? 'alarm' : ctxPct >= 70 ? 'amber' : '') : '';
     const sessLink = r.latest_session_id
-      ? `<td><a href="/session/${r.latest_session_id}" class="ext-link" title="Latest session" tabindex="-1">↗</a></td>`
+      ? `<td><a href="/session/${esc(r.latest_session_id)}" class="ext-link" title="Latest session" tabindex="-1">↗</a></td>`
       : '<td></td>';
-    return `<tr data-href="/project/${r.cwd_b64}" tabindex="0" title="${esc(r.cwd ?? '')}">
-      <td>${cwdBasename(r.cwd)}</td>
+    return `<tr data-href="/project/${esc(r.cwd_b64)}" tabindex="0" title="${esc(r.cwd ?? '')}">
+      <td>${esc(cwdBasename(r.cwd))}</td>
       <td>${esc(r.model_primary)}</td>
       <td>${fmtRelTime(r.last_turn_at)}</td>
       <td class="num">${r.turns}</td>

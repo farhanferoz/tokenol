@@ -11,13 +11,13 @@ Audit [Claude Code](https://claude.com/claude-code) JSONL session logs for cost,
 
 Claude Code bills you for everything the model reads — input, output, **and** cache creation/reads. When the prompt cache is working, 95%+ of your context tokens cost a tenth of full input price. When it isn't — idle gaps past the 5-minute TTL, context compaction, two sessions in the same repo thrashing each other — the same conversation can cost 10× more without looking any different.
 
-`tokenol` tells you which sessions, projects, and hours did that, and usually why. You run it locally over the JSONL logs Claude Code already writes; nothing is uploaded anywhere.
+`tokenol` tells you which sessions, projects, and hours did that, and usually why. It also splits each turn's cost across the tools that drove it — so you can see which tools (Read, Bash, MCP servers, …) eat spend, in which projects, on which models. You run it locally over the JSONL logs Claude Code already writes; nothing is uploaded anywhere.
 
 ## Dashboard
 
 ![Main dashboard](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/main.jpg)
 
-Breakdowns tab — daily work / cache trends, project · model · tool mix with click-through. Daily Billable Tokens, Tokens by Project, and Model Mix each have a small `TOKENS / $` toggle that swaps token counts for actual cost without a roundtrip:
+Breakdowns tab — daily work / cache trends, project · model · tool mix with click-through. Daily Billable Tokens, Tokens by Project, Model Mix, **and Tool Mix** each have a small `TOKENS / $` toggle that swaps token counts for actual cost without a roundtrip. Tool Mix in `$` mode also exposes a **PRO-RATA / EXCL CACHE-READ** attribution toggle that controls whether `cache_read_usd` is split across visible tools by byte share or routed entirely to a non-tool residual:
 
 ![Breakdowns, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_top.jpg)
 ![Breakdowns, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_bottom.jpg)
@@ -27,7 +27,7 @@ Session drill-down — pattern detection + cost-per-turn small multiples:
 ![Session drill-down, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_top.jpg)
 ![Session drill-down, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_bottom.jpg)
 
-Project page — cache efficiency trend, verdict distribution, top turns:
+Project page — cache efficiency trend, verdict distribution, top turns, **and cost-by-tool**:
 
 ![Project page](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/project.jpg)
 
@@ -218,6 +218,25 @@ Click any session to open the drill-down page (`/session/<id>`). It shows:
 - **Cost per turn** — stacked bar chart (input / output / cache_read / cache_creation). Toggle "All" or "Top 30" to focus on the most expensive turns. Click any bar to open the per-turn detail modal.
 
 - **Per-turn modal** — cost component breakdown, token counts, tool call results (✓/✗), first 500 chars of the user prompt and assistant preview. Navigate with ← / → or close with Esc.
+
+### Per-tool cost attribution
+
+Every assistant turn's cost is split across the tools it invoked, surfacing across the dashboard:
+
+- **Tool Mix panel** (Breakdowns) — top-10 tools ranked by spend (or invocation count, via the `TOKENS / $` toggle), an `other` tail row, and a dim italic `__unattributed__` row that surfaces residual cost so panel totals reconcile to overall spend. In `$` mode the panel also exposes a **PRO-RATA / EXCL CACHE-READ** attribution toggle:
+  - **Pro-rata** (default) — distributes `cache_read_usd` across visible tools by the bytes those tools currently hold in the conversation window, alongside `input_usd` and `cache_creation_usd`.
+  - **Exclude cache-read** — routes `cache_read_usd` entirely into the non-tool residual instead. Answers "what do these tools cost if cache-read is treated as pure context overhead?" Selection persists in `localStorage`; the toggle is hidden in tokens mode (it's a cost-only concept).
+- **Tool detail page** (`/tool/<name>`) — 30-day daily cost line chart, scorecards (Est. Cost · Output tokens · Invocations · Top project), plus cost-by-project and cost-by-model ranked bars.
+- **Project and model detail pages** — each gains a "Cost by tool" ranked-bar list.
+
+**How the split works.** Each turn's four cost components are attributed by JSON byte share:
+
+- **Output side** (`output_usd`) — split across `tool_use` blocks emitted on the same turn by their JSON byte size.
+- **Input side** (`input_usd + cache_read_usd + cache_creation_usd`, combined into a single input cost pool) — split across `tool_use` / `tool_use_result` blocks still lingering in the conversation window from previous turns, by accumulated byte size.
+
+Tools whose byte shares sum below 1.0 (because non-tool content like user prompts and assistant text also lives in the window) leave the residual as `__unattributed__`. Compaction is detected heuristically when the assistant's input token pool drops below **20 %** of the session's running peak (`COMPACTION_DROP_RATIO = 0.2` in `src/tokenol/ingest/parser.py`); when it fires, the per-session byte tallies reset, the input side of the detection turn flows entirely into `__unattributed__` (no tool bytes remain in the window), and subsequent turns rebuild their per-tool tallies from scratch.
+
+The per-tool data is dashboard-only — there is no `tokenol tools` CLI command. See [`docs/METRICS.md`](docs/METRICS.md) for the full attribution formula and the API surface (`/api/breakdown/tools`, `/api/tool/<name>`, plus the `by_tool` blocks on project and model endpoints).
 
 ## What it detects
 

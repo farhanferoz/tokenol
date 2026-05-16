@@ -4,13 +4,15 @@ export const fmtUSD   = v => {
   const n = +v;
   if (!Number.isFinite(n)) return '—';
   const abs = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
   // Sub-dollar values ($/kW, threshold boundaries, per-hour micro-costs) must
   // keep cent precision — rounding $0.14 to $0 hides the entire signal.
   // Above $1, strip cents: at the $10–$10,000 scale most tables show, cent
-  // precision adds noise and made adjacent rows hard to compare.
-  if (abs > 0 && abs < 0.01) return '$' + n.toFixed(5);
-  if (abs > 0 && abs < 1)    return '$' + n.toFixed(2);
-  return '$' + Math.round(n).toLocaleString('en-US');
+  // precision adds noise and made adjacent rows hard to compare. Negatives
+  // get a leading minus *before* the dollar sign, never `$-0.50`.
+  if (abs > 0 && abs < 0.01) return sign + '$' + abs.toFixed(5);
+  if (abs > 0 && abs < 1)    return sign + '$' + abs.toFixed(2);
+  return sign + '$' + Math.round(abs).toLocaleString('en-US');
 };
 export const fmtPct   = v => `${(100 * (+v || 0)).toFixed(1)}%`;
 export const fmtDate  = s => s ? s.slice(5, 10) : '–';
@@ -156,8 +158,8 @@ export function sessionRows(sessions) {
   return sessions.map(s => {
     const isOk = s.verdict === 'OK';
     const rowCls = !isOk ? 'row-flagged-red' : '';
-    return `<tr data-id="${s.id}" class="${rowCls}" style="cursor:pointer" title="${s.cwd ?? ''}">
-      <td>${s.id.slice(0,8)}</td>
+    return `<tr data-id="${esc(s.id)}" class="${rowCls}" style="cursor:pointer" title="${esc(s.cwd ?? '')}">
+      <td>${esc(s.id.slice(0,8))}</td>
       <td>${shortModel(s.model)}</td>
       <td>${fmtUSD(s.cost_usd)}</td>
       <td>${s.turns}</td>

@@ -146,3 +146,136 @@ Aggregated by `cwd`. Sessions with no `cwd` are grouped under `(unknown)`.
 ### `ModelRollup`
 
 Aggregated by `model` string. Turns with no model are grouped under `(unknown)`.
+
+### `DailyToolCost` (0.6.0+)
+
+Per-day `cost_usd` for a single tool over a rolling window. Built by `build_tool_cost_daily(turns, *, tool_name, days=30, today=None)`. Buckets are zero-filled so the chart x-axis always has `days` points. `today` defaults to UTC; local-TZ callers risk a day's drift around midnight UTC.
+
+---
+
+## Tool Cost Attribution (`ingest/parser.py`, `serve/state.py`)
+
+The per-tool cost attribution model decomposes each billable turn's `cost_usd` across the tools it invoked. The split does **not** change the billable cost — it only assigns shares — and the per-tool / unattributed contributions sum to the turn total up to floating-point rounding.
+
+### `Turn.tool_costs`
+
+**Definition:** `dict[str, ToolCost]` mapping tool name → `ToolCost(input_tokens, output_tokens, cost_usd)`. One entry per tool that contributed to the turn under the default pro-rata model. Empty (`EMPTY_TOOL_COSTS` sentinel) for non-assistant turns and turns with no tool activity.
+
+`ToolCost.input_tokens` and `ToolCost.output_tokens` are fractional (`float`) — the result of `token_pool * byte_share` and `output_tokens * byte_share` respectively. They are stored, not recomputed, so downstream attribution modes can recover the original share.
+
+**Source:** Computed in `parser._attribute_cost` at parse time. Stored on `RawEvent.tool_costs` and propagated to `Turn.tool_costs` by `serve.state._build_turns_and_sessions`.
+
+### Pro-rata attribution (default) — `parser._attribute_cost`
+
+**Per-turn inputs:**
+
+- `usage` — the assistant `usage` payload (input / output / cache_read / cache_creation tokens).
+- `output_shares: dict[str, float]` — `tool_use` block bytes / total message bytes, computed once per turn from this turn's content.
+- `input_shares: dict[str, float]` — `bytes_in_context_by_tool[name] / total_context_bytes`, where the per-session byte tallies accumulate over all prior turns since the last compaction reset. `total_context_bytes` includes a `non_tool_bytes_in_context` bucket covering text / thinking / sentinel-named blocks so non-tool content reduces per-tool shares rather than inflating them.
+
+**Pre-computed cost / token pools:**
+
+```
+input_cost_pool   = input_usd + cache_read_usd + cache_creation_usd
+input_token_pool  = input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+```
+
+**Per-tool result:**
+
+```
+ToolCost[name].input_tokens  = input_token_pool * input_shares.get(name, 0)
+ToolCost[name].output_tokens = output_tokens    * output_shares.get(name, 0)
+ToolCost[name].cost_usd      = output_usd       * output_shares.get(name, 0)
+                             + input_cost_pool  * input_shares.get(name, 0)
+```
+
+**Unattributed leg** (stored on the same RawEvent / Turn as `unattributed_input_tokens`, `unattributed_output_tokens`, `unattributed_cost_usd`):
+
+```
+unattr_in_share  = max(0, 1 - sum(input_shares.values()))
+unattr_out_share = max(0, 1 - sum(output_shares.values()))
+unattributed_cost_usd = output_usd * unattr_out_share + input_cost_pool * unattr_in_share
+```
+
+The `max(0, ...)` guards protect the residual leg from going negative if a caller violates the precondition `sum(shares) <= 1.0`; they do **not** rescale per-tool amounts.
+
+**Invariant:** `sum(tc.cost_usd for tc in tool_costs.values()) + unattributed_cost_usd == cost_for_turn(model, usage).total_usd`, up to floating-point rounding (typically < 1e-9 USD per turn).
+
+### `excl_cache_read` attribution (Tool Mix panel, 0.6.1) — `serve.state._recompute_excl_cache_read`
+
+**Difference:** `cache_read_usd` is dropped from the per-tool input cost pool entirely; what would have been distributed by `input_shares` flows into the non-tool residual.
+
+**Formula** (per turn, applied at request time from the stored fractional tokens):
+
+```
+input_pool_excl = input_usd + cache_creation_usd                              # cache_read_usd omitted
+in_share  = tc.input_tokens  / input_token_pool      # recover original share from stored fractional tokens
+out_share = tc.output_tokens / output_token_count
+new_cost[name] = in_share * input_pool_excl + out_share * output_usd
+```
+
+`input_token_pool` keeps all three input token components — only the **cost** pool changes, so share recovery is exact.
+
+The aggregator (`state.build_breakdown_tools`) computes the residual as:
+
+```
+unattributed = cost_for_turn(model, usage).total_usd - sum(new_cost[name] for name in real_tool_names)
+```
+
+This is cheap — one cost-pricing call plus `len(tool_costs)` divisions per turn — and runs only when the Tool Mix panel toggle is set to `excl_cache_read`. All other surfaces (scorecards, project / model `by_tool`, tool detail page, daily charts) stay on pro-rata.
+
+### Compaction reset (`parser.parse_file`)
+
+**Condition:** `input_pool < COMPACTION_DROP_RATIO * peak_input_tokens` where `COMPACTION_DROP_RATIO = 0.2` and `peak_input_tokens` is the session's running maximum of `input + cache_read + cache_creation` tokens.
+
+**Effect:** Clears `tool_use_id_to_name`, `bytes_in_context_by_tool`, and `non_tool_bytes_in_context`. Resets `peak_input_tokens = input_pool` so the running peak follows the post-compaction baseline (a session that genuinely stabilises below 20 % of its prior peak doesn't re-trigger on every turn).
+
+**Consequence on attribution:** The turn where compaction is detected has `input_shares == {}` so its entire `input_cost_pool` attributes to `__unattributed__`. The output side still attributes via this turn's `output_shares` if `tool_use` blocks are present.
+
+---
+
+## Public API — Per-Tool Cost Fields (0.6.0+)
+
+### `GET /api/breakdown/tools`
+
+Query parameters:
+
+- `range` — `7d | 30d | 90d | all` (existing). Bad values return 400.
+- `mode` — `prorata` (default) or `excl_cache_read` (0.6.1). Unknown values fall back to `prorata` silently (forward-compatible: older servers degrade gracefully when clients persist a newer mode token).
+
+Response envelope:
+
+```json
+{
+  "range": "30d",
+  "mode": "prorata",
+  "tools": [
+    {"name": "Read",   "cost_usd": 12.34, "count": 412, "last_active": "2026-05-16T13:00:00Z"},
+    {"name": "Bash",   "cost_usd":  8.10, "count": 187, "last_active": "2026-05-16T12:55:00Z"},
+    ...
+    {"name": "other",  "cost_usd":  4.20, "count":  95, "tool_count": 14},
+    {"name": "__unattributed__", "cost_usd": 5.67}
+  ]
+}
+```
+
+The `tools` list is top-10 tools ranked by `cost_usd`, followed by an `other` tail row that collapses lower-ranked tools (its `count` is the sum of those tools' invocations; `tool_count` is the number of tools collapsed), followed by an `__unattributed__` sentinel row (which carries only `name` and `cost_usd`). Each top-10 row carries `last_active` as an ISO-8601 string; the frontend's tokens-mode toggle uses `count` for bar values (no separate `tokens` field).
+
+### `GET /api/tool/{name}`
+
+Returns:
+
+- `scorecards` — `{cost_usd, output_tokens, invocations, top_project: {cwd, label, cost_usd}}`. Values cover the requested range.
+- `daily_cost` — list of 30 zero-filled daily points: `[{date: "YYYY-MM-DD", cost_usd: float}, ...]`.
+- `by_project` — ranked-bar input: `[{cwd, project_label, cost_usd, count, last_active}, ...]`.
+- `by_model` — ranked-bar input: `[{model, cost_usd, count, last_active}, ...]`.
+
+Replaces the pre-0.6.0 `projects_using_tool` / `models_using_tool` arrays.
+
+### `GET /api/project/{cwd_b64}`
+
+Adds a `by_tool` block containing ranked per-tool cost for the project within the requested range.
+
+### `GET /api/model/{name}`
+
+Adds a `by_tool` block containing ranked per-tool cost for the model within the requested range.

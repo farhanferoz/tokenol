@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tokenol.enums import AssumptionTag, BlowUpVerdict
+from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL, dedup_key, parse_file
 
@@ -34,7 +34,7 @@ from tokenol.metrics.context import (
     cost_per_kw,
     ctx_ratio_n_to_1,
 )
-from tokenol.metrics.cost import cost_for_turn, rollup_by_date, rollup_by_hour
+from tokenol.metrics.cost import TurnCost, cost_for_turn, rollup_by_date, rollup_by_hour
 from tokenol.metrics.history import baseline_median, trailing_median
 from tokenol.metrics.rollups import (
     SessionRollup,
@@ -1110,11 +1110,12 @@ def _cwd_basename(cwd: str) -> str:
     return cwd.split("/")[-1] if cwd else "–"
 
 
-# Memoize _grouped_cwd_by_sid on the identity of the sessions list. Each new
-# snapshot allocates a fresh list (different id), so the cache naturally drops
-# stale results when the snapshot rebuilds. Bounded so a churning broadcaster
-# doesn't accumulate entries indefinitely.
-_GROUPED_CWD_CACHE: dict[int, dict[str, str]] = {}
+# Memoize _grouped_cwd_by_sid on a content fingerprint of the sessions list.
+# Why content, not `id(sessions)`: Python recycles ids for freed objects, so
+# successive derives (or successive test runs) can collide on `id()` and return
+# stale results. The fingerprint is cheap to compute (one tuple build) and
+# changes whenever a session is added, removed, or has its cwd rewritten.
+_GROUPED_CWD_CACHE: dict[tuple, dict[str, str]] = {}
 _GROUPED_CWD_CACHE_MAX = 8
 
 
@@ -1126,15 +1127,15 @@ def _grouped_cwd_by_sid(sessions: list[Session]) -> dict[str, str]:
     session in "/dev/proj/backend" is remapped to "/dev/proj". Sibling or
     unrelated cwds stay separate. The "(unknown)" sentinel is preserved as-is.
 
-    O(C²) in the number of distinct cwds; memoized per *sessions* identity so
+    O(C²) in the number of distinct cwds; memoized on a content fingerprint so
     a server with many projects doesn't re-do the work on every API request.
     """
-    key = id(sessions)
+    key = tuple((s.session_id, s.cwd or "(unknown)") for s in sessions)
     cached = _GROUPED_CWD_CACHE.get(key)
     if cached is not None:
         return cached
 
-    raw = {s.session_id: (s.cwd or "(unknown)") for s in sessions}
+    raw = dict(key)
     cwds = {cwd for cwd in raw.values() if cwd != "(unknown)"}
     remap: dict[str, str] = {}
     for cwd in cwds:
@@ -1365,12 +1366,16 @@ def build_model_detail(
     }
 
 
-def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
+def _recompute_excl_cache_read(
+    turn: Turn, turn_cost: TurnCost | None = None,
+) -> dict[str, float]:
     """Per-tool cost under the 'exclude cache_read' attribution mode.
 
-    cache_read_usd is dropped from the per-tool input pool entirely; its share
+    `cache_read_usd` is dropped from the per-tool input pool entirely; its share
     that would have gone to each tool flows into the non-tool residual computed
-    by the caller. See docs/superpowers/specs/2026-05-16-attribution-mode-toggle-design.md.
+    by the caller. `turn_cost` may be passed in by a caller that already priced
+    the turn (avoiding a second `cost_for_turn` call); otherwise it's computed
+    here.
     """
     usage = turn.usage
     input_token_pool = (
@@ -1379,7 +1384,8 @@ def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
         + usage.cache_creation_input_tokens
     )
     output_token_count = usage.output_tokens
-    turn_cost = cost_for_turn(turn.model, usage)
+    if turn_cost is None:
+        turn_cost = cost_for_turn(turn.model, usage)
     input_pool_excl = turn_cost.input_usd + turn_cost.cache_creation_usd
 
     out: dict[str, float] = {}
@@ -1391,7 +1397,7 @@ def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
 
 
 def build_breakdown_tools(
-    turns: list[Turn], *, mode: str = "prorata",
+    turns: list[Turn], *, mode: str = AttributionMode.PRORATA.value,
 ) -> list[dict]:
     """Build the ranked tool list for GET /api/breakdown/tools.
 
@@ -1399,52 +1405,45 @@ def build_breakdown_tools(
     last-active timestamps. The `mode` parameter selects which attribution
     formula computes the per-tool cost contribution:
 
-    - ``"prorata"`` (default) — sums the stored ``tc.cost_usd`` field; the
-      unattributed residual is the sum of stored ``t.unattributed_cost_usd``.
-    - ``"excl_cache_read"`` — recomputes per-tool cost via
-      ``_recompute_excl_cache_read``; the unattributed residual is
-      ``turn_total_usd - sum(per_tool_cost_for_real_tools)``.
+    - ``AttributionMode.PRORATA`` (default) — sums the stored ``tc.cost_usd``;
+      residual is ``t.unattributed_cost_usd`` plus any ``UNKNOWN_TOOL`` slice.
+    - ``AttributionMode.EXCL_CACHE_READ`` — recomputes per-tool cost via
+      ``_recompute_excl_cache_read``; residual is
+      ``turn_total_usd - sum(real_tool_cost)``.
 
     Returns the ranked tools list (top-10 + 'other' tail + ``__unattributed__``
     row). The caller wraps it in the response envelope.
-
-    See docs/superpowers/specs/2026-05-16-attribution-mode-toggle-design.md.
     """
     cost_by_tool: dict[str, float] = {}
     tokens_by_tool: Counter[str] = Counter()
     unattr_cost = 0.0
     last_active: dict[str, datetime] = {}
 
+    excl = mode == AttributionMode.EXCL_CACHE_READ.value
     for t in turns:
         if t.is_interrupted:
             continue
-        tokens_by_tool.update(t.tool_names)
+        if t.tool_names:
+            tokens_by_tool.update(t.tool_names)
 
-        if mode == "excl_cache_read":
-            recomputed = _recompute_excl_cache_read(t)
-            turn_total = cost_for_turn(t.model, t.usage).total_usd
-            real_sum = 0.0
-            for name, cost in recomputed.items():
-                if name == UNKNOWN_TOOL:
-                    continue
-                cost_by_tool[name] = cost_by_tool.get(name, 0.0) + cost
-                real_sum += cost
-                if name in t.tool_names and (
-                    name not in last_active or t.timestamp > last_active[name]
-                ):
-                    last_active[name] = t.timestamp
-            unattr_cost += turn_total - real_sum
-        else:  # "prorata" (default; also the fallback for unknown values)
-            for name, tc in t.tool_costs.items():
-                if name == UNKNOWN_TOOL:
-                    unattr_cost += tc.cost_usd
-                    continue
-                cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
-                if name in t.tool_names and (
-                    name not in last_active or t.timestamp > last_active[name]
-                ):
-                    last_active[name] = t.timestamp
-            unattr_cost += t.unattributed_cost_usd
+        if excl:
+            turn_cost = cost_for_turn(t.model, t.usage)
+            per_tool = _recompute_excl_cache_read(t, turn_cost)
+            per_tool.pop(UNKNOWN_TOOL, None)
+            # Clamp at 0 to swallow float drift (~1e-16 from total_usd
+            # subtraction) that would otherwise render as `-$0.00`.
+            residual = max(0.0, turn_cost.total_usd - sum(per_tool.values()))
+        else:
+            per_tool = {n: tc.cost_usd for n, tc in t.tool_costs.items()}
+            residual = t.unattributed_cost_usd + per_tool.pop(UNKNOWN_TOOL, 0.0)
+
+        for name, cost in per_tool.items():
+            cost_by_tool[name] = cost_by_tool.get(name, 0.0) + cost
+            if name in t.tool_names and (
+                name not in last_active or t.timestamp > last_active[name]
+            ):
+                last_active[name] = t.timestamp
+        unattr_cost += residual
 
     ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
     head_names = {row["name"] for row in ranked if row["name"] != "other"}

@@ -1194,3 +1194,80 @@ def test_build_breakdown_tools_excludes_interrupted_turns():
     by_name_exc = {r["name"]: r for r in got_exc}
     assert by_name_pro["Read"]["count"] == 1
     assert by_name_exc["Read"]["count"] == 1
+
+
+def test_build_breakdown_tools_unknown_mode_falls_back_to_prorata():
+    """Function-level fallback for unknown mode. The API endpoint also normalises
+    bad values, but this guards the function contract directly in case the API
+    layer is ever bypassed (e.g., by a future internal caller)."""
+    turns = _btt_turns_fixture()
+    prorata = build_breakdown_tools(turns, mode="prorata")
+    garbage = build_breakdown_tools(turns, mode="not_a_real_mode")
+    assert garbage == prorata
+
+
+# ---- _grouped_cwd_by_sid memoization tests ----------------------------
+
+
+def test_grouped_cwd_by_sid_cache_keys_on_content_not_id():
+    """Regression guard: `_GROUPED_CWD_CACHE` must use a content fingerprint as
+    its key, not `id(sessions)`. Python recycles ids for freed objects, so an
+    id-keyed cache could return a stale prior remap for a fresh sessions list
+    that happens to land at a recycled address (real production bug — surfaced
+    by a declared-order test run during the 0.6.1 release-gate review)."""
+    from tokenol.serve.state import _GROUPED_CWD_CACHE, _grouped_cwd_by_sid
+
+    _GROUPED_CWD_CACHE.clear()
+    try:
+        sessions_a = [Session(session_id="sX", source_file="a.jsonl", is_sidechain=False, cwd="/p/A")]
+        _grouped_cwd_by_sid(sessions_a)
+
+        # Verify the key is a tuple of (sid, cwd) pairs, NOT an int.
+        assert len(_GROUPED_CWD_CACHE) == 1
+        (key,) = _GROUPED_CWD_CACHE.keys()
+        assert isinstance(key, tuple)
+        assert key == (("sX", "/p/A"),)
+
+        # A fresh sessions list with different content must produce a different
+        # cache key and a different result (even if Python were to recycle the
+        # underlying list id).
+        sessions_b = [Session(session_id="sY", source_file="b.jsonl", is_sidechain=False, cwd="/p/B")]
+        result_b = _grouped_cwd_by_sid(sessions_b)
+        assert result_b == {"sY": "/p/B"}
+        assert len(_GROUPED_CWD_CACHE) == 2
+    finally:
+        # Leave the cache clean for subsequent tests; otherwise a later test
+        # that introspects cache state would see leftover entries from this
+        # white-box assertion.
+        _GROUPED_CWD_CACHE.clear()
+
+
+def test_recompute_excl_cache_read_uses_passed_turn_cost():
+    """Optional `turn_cost` pass-through: when the caller already priced the
+    turn, the helper must use that and not silently re-price it. Guards the
+    perf invariant exploited by build_breakdown_tools (one cost_for_turn call
+    per turn instead of two)."""
+    from tokenol.metrics.cost import TurnCost
+
+    usage = Usage(input_tokens=1_000, output_tokens=100,
+                  cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
+    tool_costs = {
+        "Read": ToolCost(tool_name="Read", input_tokens=5_000.0,
+                         output_tokens=50.0, cost_usd=0.0),
+    }
+    turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
+    # Rigged pricing that's clearly different from anything the real registry
+    # would yield. If the helper ignored the pass-through, the result would
+    # reflect the real pricing instead.
+    rigged = TurnCost(
+        input_usd=100.0, output_usd=10.0,
+        cache_read_usd=999.0,         # would dominate if not excluded
+        cache_creation_usd=5.0,
+        total_usd=1114.0, assumptions=[],
+    )
+    result = _recompute_excl_cache_read(turn, rigged)
+    # in_share  = 5000 / 10_000 = 0.5
+    # out_share = 50  / 100     = 0.5
+    # input_pool_excl = 100 + 5 = 105 (cache_read_usd=999 dropped)
+    # cost = 0.5 * 105 + 0.5 * 10 = 57.5
+    assert result["Read"] == pytest.approx(57.5, rel=1e-9)

@@ -77,8 +77,8 @@ function renderHourly(hourly) {
 function renderSessions(sessions) {
   const tbody = $('day-sessions-tbody');
   if (!tbody) return;
-  tbody.innerHTML = (sessions || []).slice(0, 15).map(s => `<tr style="cursor:pointer" data-id="${s.id}">
-    <td>${s.id.slice(0,8)}</td>
+  tbody.innerHTML = (sessions || []).slice(0, 15).map(s => `<tr style="cursor:pointer" data-id="${esc(s.id)}">
+    <td>${esc(s.id.slice(0,8))}</td>
     <td>${shortModel(s.model)}</td>
     <td>${fmtUSD(s.cost_usd)}</td>
     <td>${s.turns}</td>
@@ -95,8 +95,8 @@ function renderProjects(projects) {
   tbody.innerHTML = (projects || []).slice(0, 10).map(p => {
     const dir = cwdBasename(p.cwd);
     const hitPct = p.cache_hit_rate != null ? Math.round(p.cache_hit_rate * 100) + '%' : '–';
-    return `<tr ${p.cwd_b64 ? `style="cursor:pointer" data-href="/project/${p.cwd_b64}"` : ''}>
-      <td title="${p.cwd ?? ''}">${dir}</td>
+    return `<tr ${p.cwd_b64 ? `style="cursor:pointer" data-href="/project/${esc(p.cwd_b64)}"` : ''}>
+      <td title="${esc(p.cwd ?? '')}">${esc(dir)}</td>
       <td>${fmtUSD(p.cost_usd)}</td>
       <td>${p.sessions}</td>
       <td>${hitPct}</td>
