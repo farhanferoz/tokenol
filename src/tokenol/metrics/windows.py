@@ -13,7 +13,7 @@ from tokenol.model.events import Turn
 WINDOW_DURATION = timedelta(hours=5)
 
 
-@dataclass
+@dataclass(slots=True)
 class Window:
     """One 5-hour wall-clock rate-limit window."""
 

@@ -10,7 +10,7 @@ from tokenol.model.events import Turn
 from tokenol.model.pricing import context_window
 
 
-@dataclass
+@dataclass(slots=True)
 class PatternHit:
     kind:           str        # "idle_expiry" | "compaction_reinflation" | "context_ceiling_plateau" | "sidechain_explosion" | "tool_error_storm"
     severity:       str        # "red" | "amber" | "info"

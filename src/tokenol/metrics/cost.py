@@ -13,7 +13,7 @@ from tokenol.model.events import Turn, Usage
 _M = 1_000_000  # tokens per pricing unit
 
 
-@dataclass
+@dataclass(slots=True)
 class TurnCost:
     input_usd: float
     output_usd: float
@@ -67,7 +67,7 @@ def cache_saved_usd(turns: Iterable[Turn]) -> float:
     return total
 
 
-@dataclass
+@dataclass(slots=True)
 class DailyRollup:
     date: date
     turns: int
@@ -79,7 +79,7 @@ class DailyRollup:
     interrupted_turns: int
 
 
-@dataclass
+@dataclass(slots=True)
 class HourlyRollup:
     hour: datetime
     turns: int

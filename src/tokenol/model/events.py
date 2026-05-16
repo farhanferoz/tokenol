@@ -9,7 +9,7 @@ from datetime import datetime
 from tokenol.enums import AssumptionTag
 
 
-@dataclass
+@dataclass(slots=True)
 class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
@@ -17,7 +17,7 @@ class Usage:
     cache_creation_input_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class ToolCost:
     """Attributed slice of a turn's cost for one tool.
 
@@ -31,7 +31,7 @@ class ToolCost:
     cost_usd: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class RawEvent:
     """One parsed line from a JSONL file, after type filtering."""
 
@@ -76,7 +76,7 @@ class RawEvent:
     unattributed_cost_usd: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Turn:
     """One deduplicated assistant response."""
 
@@ -101,7 +101,7 @@ class Turn:
     unattributed_cost_usd: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Session:
     """All turns from one JSONL file (one sessionId)."""
 
@@ -133,7 +133,7 @@ class Session:
         return sum(t.usage.cache_creation_input_tokens for t in self.turns)
 
 
-@dataclass
+@dataclass(slots=True)
 class Project:
     """Aggregation of sessions under one config directory."""
 

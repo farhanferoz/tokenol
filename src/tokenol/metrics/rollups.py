@@ -28,7 +28,7 @@ from tokenol.model.events import Session, Turn
 from tokenol.model.pricing import context_window
 
 
-@dataclass
+@dataclass(slots=True)
 class SessionRollup:
     session_id: str
     source_file: str
@@ -57,7 +57,7 @@ class SessionRollup:
     ctx_used_latest_val: float | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ProjectRollup:
     cwd: str
     sessions: int
@@ -84,7 +84,7 @@ class ProjectRollup:
     dual_session_conflict: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelRollup:
     model: str
     turns: int
@@ -107,7 +107,7 @@ class ModelRollup:
     cost_share: float | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class DailyToolCost:
     date: date
     cost_usd: float

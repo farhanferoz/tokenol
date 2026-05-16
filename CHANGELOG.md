@@ -23,6 +23,10 @@ All notable changes to tokenol are documented here. The format follows
 - **`renderRankedBars` default formatter footgun.** The default `valueFormat` when omitted was `(n) => "$" + n.toFixed(2)`; now `fmtUSD`. No current caller relied on the default, but a future omission would have silently swallowed cents.
 - **`↓0% vs 7d median` ghost arrow** on Overview tiles. When the rounded delta is exactly 0%, the tile would still render an arrow + "0%" (reading as a tiny decrease but actually flat). `_setTileDelta` now mirrors `deltaBadge`'s 0% suppression and falls through to the plain `vs <baseline> median` text.
 
+### Performance
+
+- **`-82 MiB steady RSS`** for the no-persist server on a 92 K-turn / 375 K-event corpus. Added `slots=True` to every high-count dataclass: `RawEvent`, `Turn`, `Usage`, `ToolCost`, `Session`, `Project` (the model layer that's replicated 90 K-fold), plus the metrics-side rollup classes (`TurnCost`, `DailyRollup`, `HourlyRollup`, `SessionRollup`, `ProjectRollup`, `ModelRollup`, `DailyToolCost`), `PatternHit`, and `Window`. No behavioural change — `__slots__` drops the per-instance `__dict__` overhead (88 B saved per `Turn`, 88 B per `Usage`, ~60 B per `ToolCost`). Measured on the live corpus: after-derive RSS goes 685 MiB → 603 MiB (-12 %). Run with `uv run tokenol serve --port 8787` from this branch to pick up the change.
+
 ### Notes
 
 - No persistence changes — the mode toggle is purely a presentation-layer reinterpretation of already-stored per-turn `tool_costs` data.
