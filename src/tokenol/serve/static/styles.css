@@ -997,7 +997,11 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
 }
 .ranked-bars .rb-track {
   height: 18px;
-  background: var(--bar-track, #1a1a1a);
+  /* Subtle palette-aligned background so the unfilled portion reads as
+     "remaining range," not as a second filled bar. The old near-black
+     (#1a1a1a) contrasted too heavily with the cream page, making small
+     fills (e.g. <1% of leader) look identical to "no data." */
+  background: var(--bar-track, var(--rule, #d6cab0));
   border-radius: 3px;
   position: relative;
 }
@@ -1013,20 +1017,20 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
   color: var(--accent, #a66408);
 }
 .ranked-bars .rb-row.is-other .rb-fill {
-  background: #5a5a5a;
+  background: var(--mute, #7a7062);
   opacity: 0.75;
 }
 .ranked-bars .rb-row.is-other .rb-value {
-  color: #bbb;
+  color: var(--mute, #7a7062);
 }
 .ranked-bars .rb-row.is-unattributed .rb-label,
 .ranked-bars .rb-row.is-unattributed .rb-value {
-  opacity: 0.45;
+  opacity: 0.55;
   font-style: italic;
 }
 .ranked-bars .rb-row.is-unattributed .rb-fill {
-  background: #3a3a3a;
-  opacity: 0.55;
+  background: var(--rule-2, #c4b89e);
+  opacity: 0.85;
 }
 .ranked-bars a.rb-row {
   text-decoration: none;
