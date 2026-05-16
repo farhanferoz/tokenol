@@ -1151,6 +1151,17 @@ def test_build_breakdown_tools_excl_cache_read_shifts_cache_read_to_unattributed
     actual_growth = exc["__unattributed__"] - pro["__unattributed__"]
     assert actual_growth == pytest.approx(expected_unattr_growth, rel=1e-9)
 
+    # Multi-tool guard: on _btt_turns_fixture, every real tool's bucket must
+    # shrink (or stay equal) under excl_cache_read — the cache_read share that
+    # flowed to them in prorata moves entirely to the residual.
+    pro_mt = {r["name"]: r["cost_usd"]
+              for r in build_breakdown_tools(_btt_turns_fixture(), mode="prorata")}
+    exc_mt = {r["name"]: r["cost_usd"]
+              for r in build_breakdown_tools(_btt_turns_fixture(), mode="excl_cache_read")}
+    for name in ("Read", "Bash"):
+        if name in pro_mt and name in exc_mt:
+            assert exc_mt[name] <= pro_mt[name] + 1e-12, f"{name} grew under excl mode"
+
 
 def test_build_breakdown_tools_non_cost_fields_are_mode_invariant():
     """count, last_active, tool_count, and tool ordering must be identical
