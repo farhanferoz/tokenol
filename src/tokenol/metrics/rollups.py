@@ -108,40 +108,6 @@ class ModelRollup:
 
 
 @dataclass
-class ToolCostRollup:
-    tool_name: str
-    invocations: int
-    input_tokens: float
-    output_tokens: float
-    cost_usd: float
-    last_active: datetime | None
-
-
-def build_tool_cost_rollups(turns: list[Turn]) -> list[ToolCostRollup]:
-    """Aggregate per-tool cost across *turns*. Skips interrupted turns."""
-    buckets: dict[str, ToolCostRollup] = {}
-    for turn in turns:
-        if turn.is_interrupted:
-            continue
-        for name, tc in turn.tool_costs.items():
-            if name not in buckets:
-                buckets[name] = ToolCostRollup(
-                    tool_name=name, invocations=0,
-                    input_tokens=0.0, output_tokens=0.0, cost_usd=0.0,
-                    last_active=None,
-                )
-            r = buckets[name]
-            r.input_tokens += tc.input_tokens
-            r.output_tokens += tc.output_tokens
-            r.cost_usd += tc.cost_usd
-            if (count := turn.tool_names.get(name, 0)) > 0:
-                r.invocations += count
-                if r.last_active is None or turn.timestamp > r.last_active:
-                    r.last_active = turn.timestamp
-    return sorted(buckets.values(), key=lambda r: r.cost_usd, reverse=True)
-
-
-@dataclass
 class DailyToolCost:
     date: date
     cost_usd: float
@@ -432,14 +398,24 @@ def _rank_counter_with_others(total: Counter[str], top_n: int) -> list[dict]:
 
 
 def _rank_dict_with_others(values: dict[str, float], top_n: int) -> list[dict]:
-    """Top-N by value, sum the rest into one 'other' row. Returns list of
-    {name, value, [count]} dicts."""
-    ranked = sorted(values.items(), key=lambda kv: kv[1], reverse=True)
+    """Top-N by value, sum the rest into one 'other' row. Returns a list of
+    ``{name, value}`` dicts plus an optional ``other`` row with an extra
+    ``tool_count`` field (number of collapsed entries).
+
+    Sort is deterministic on float ties: descending by value, then ascending by
+    name. Without a tie-breaker the relative order of equal-cost tools depended
+    on dict insertion order and would shuffle "other" membership between runs.
+    """
+    ranked = sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))
     head = ranked[:top_n]
     tail = ranked[top_n:]
     out = [{"name": name, "value": v} for name, v in head]
     if tail:
-        out.append({"name": "other", "value": sum(v for _, v in tail), "count": len(tail)})
+        out.append({
+            "name": "other",
+            "value": sum(v for _, v in tail),
+            "tool_count": len(tail),
+        })
     return out
 
 

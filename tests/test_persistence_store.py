@@ -79,13 +79,14 @@ def test_open_existing_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_schema_version_recorded(tmp_path: Path) -> None:
+    from tokenol.persistence.store import SCHEMA_VERSION
     db_path = tmp_path / "history.duckdb"
     store = HistoryStore(db_path)
     try:
         rows = store._con.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchall()
-        assert rows == [("1",)]
+        assert rows == [(str(SCHEMA_VERSION),)]
     finally:
         store.close()
 
@@ -370,13 +371,14 @@ def test_forget_all_wipes_store(tmp_path: Path) -> None:
     try:
         store.flush([_turn("a", "s1")], [_session("s1")])
         dropped = store.forget(all=True)
+        from tokenol.persistence.store import SCHEMA_VERSION
         assert dropped == (1, 1)
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (0,)
         assert store._con.execute("SELECT COUNT(*) FROM sessions").fetchone() == (0,)
         # Schema/meta retained.
         assert store._con.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone() == ("1",)
+        ).fetchone() == (str(SCHEMA_VERSION),)
     finally:
         store.close()
 
@@ -432,5 +434,69 @@ def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
         # ON CONFLICT DO NOTHING keeps re-flush idempotent across chunk splits.
         store.flush(turns, sessions)
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (n,)
+    finally:
+        store.close()
+
+
+def test_tool_costs_round_trip(tmp_path: Path) -> None:
+    """Per-tool cost attribution must survive flush -> reload. Schema v2 added
+    `tool_costs` + three `unattributed_*` columns; without this round-trip the
+    /api/breakdown/tools reconciliation invariant breaks for any --persist user
+    on range=all (warm-tier turns return with empty tool_costs)."""
+    from tokenol.model.events import ToolCost
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        ts = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
+        original = Turn(
+            dedup_key="rt-1", timestamp=ts, session_id="s1",
+            model="claude-opus-4-7",
+            usage=Usage(input_tokens=100, output_tokens=50,
+                        cache_read_input_tokens=20, cache_creation_input_tokens=10),
+            is_sidechain=False, stop_reason="end_turn", cost_usd=0.123,
+            tool_use_count=1, tool_names=Counter({"Read": 1}),
+            tool_costs={
+                "Read": ToolCost(tool_name="Read", input_tokens=42.5,
+                                  output_tokens=12.75, cost_usd=0.078),
+            },
+            unattributed_input_tokens=7.5,
+            unattributed_output_tokens=1.25,
+            unattributed_cost_usd=0.045,
+        )
+        store.flush([original], [_session("s1")])
+
+        reloaded, _ = store.hydrate_hot(window_days=365)
+        assert len(reloaded) == 1
+        r = reloaded[0]
+        assert set(r.tool_costs) == {"Read"}
+        rt = r.tool_costs["Read"]
+        assert rt.tool_name == "Read"
+        assert abs(rt.input_tokens - 42.5) < 1e-9
+        assert abs(rt.output_tokens - 12.75) < 1e-9
+        assert abs(rt.cost_usd - 0.078) < 1e-9
+        assert abs(r.unattributed_input_tokens - 7.5) < 1e-9
+        assert abs(r.unattributed_output_tokens - 1.25) < 1e-9
+        assert abs(r.unattributed_cost_usd - 0.045) < 1e-9
+    finally:
+        store.close()
+
+
+def test_schema_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
+    """A pre-existing v1 database (no tool_costs columns) must upgrade in
+    place — the ALTER TABLE … ADD COLUMN IF NOT EXISTS migration runs on every
+    open, and reopening a v2 file is a no-op."""
+    db_path = tmp_path / "history.duckdb"
+    HistoryStore(db_path).close()
+    # Reopen — should not raise; schema_version remains current.
+    store = HistoryStore(db_path)
+    try:
+        from tokenol.persistence.store import SCHEMA_VERSION
+        rows = store._con.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchall()
+        assert rows == [(str(SCHEMA_VERSION),)]
+        # The new columns are present and queryable.
+        store._con.execute(
+            "SELECT tool_costs, unattributed_cost_usd FROM turns LIMIT 0"
+        ).fetchall()
     finally:
         store.close()

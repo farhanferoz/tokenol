@@ -39,13 +39,26 @@ def _parse_usage(msg: dict) -> Usage | None:
     )
 
 
+def _is_real_tool_name(name: object) -> bool:
+    """A tool_use block's name is real only if it's a non-empty string that
+    doesn't collide with the cost-attribution sentinels — a hostile log could
+    otherwise hide its share of cost under `__unattributed__` / `__unknown__`.
+    """
+    return (
+        isinstance(name, str)
+        and bool(name)
+        and name not in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL)
+    )
+
+
 def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
     """Return (tool_names, tool_use_total, tool_error_count) from a content list.
 
-    Named `tool_use` blocks are keyed by their `name` in the Counter. Unnamed
-    or empty-name blocks are skipped from `tool_names` but still bump
-    `tool_use_total` so the legacy `tool_use_count` field preserves its
-    "count every tool_use block" semantics.
+    Named `tool_use` blocks are keyed by their `name` in the Counter. Unnamed,
+    empty-name, or sentinel-collision (``__unattributed__`` / ``__unknown__``)
+    blocks are skipped from `tool_names` but still bump `tool_use_total` so the
+    legacy `tool_use_count` field preserves its "count every tool_use block"
+    semantics.
     """
     tool_names: Counter[str] = Counter()
     tool_use_total = 0
@@ -57,7 +70,7 @@ def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
         if btype == "tool_use":
             tool_use_total += 1
             name = block.get("name")
-            if isinstance(name, str) and name:
+            if _is_real_tool_name(name):
                 tool_names[name] += 1
         elif btype == "tool_result" and block.get("is_error") is True:
             tool_error += 1
@@ -68,30 +81,34 @@ def _block_bytes(block: dict) -> int:
     """Byte-size of a content block when JSON-serialized with compact separators.
 
     Used as a proxy for token count; exact wire size is not the goal.
+    Returns 0 for content that fails to serialize (non-JSON types, deeply
+    nested structures hitting Python's recursion limit, or circular refs).
     """
     try:
         return len(json.dumps(block, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return 0
 
 
-def _output_byte_shares(content: list) -> tuple[dict[str, float], float]:
-    """Split an assistant message's content into per-tool byte shares + unattributed.
+def _output_byte_shares(block_sizes: list[tuple[dict, int]]) -> tuple[dict[str, float], float]:
+    """Split an assistant message's pre-sized content blocks into per-tool byte
+    shares + unattributed. Returns (shares_by_tool_name, unattributed_share);
+    sum = 1.0.
 
-    Returns (shares_by_tool_name, unattributed_share). Sum = 1.0.
+    Accepts pre-computed ``(block, byte_size)`` pairs so callers can compute
+    block sizes once per turn and share them between this function and the
+    context-accumulation tally.
 
-    `tool_use` blocks attribute to their `name`. `text` and `thinking` blocks
-    (and anything else) go to unattributed.
+    `tool_use` blocks (with a real, non-sentinel name) attribute to that name.
+    `text`, `thinking`, sentinel-named blocks, and anything else go to
+    unattributed.
     """
     tool_bytes: dict[str, int] = {}
     unattributed_bytes = 0
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        b = _block_bytes(block)
+    for block, b in block_sizes:
         if block.get("type") == "tool_use":
             name = block.get("name")
-            if isinstance(name, str) and name:
+            if _is_real_tool_name(name):
                 tool_bytes[name] = tool_bytes.get(name, 0) + b
                 continue
         unattributed_bytes += b
@@ -198,9 +215,15 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
             msg = ev.get("message") or {}
 
-            # Count tool blocks in message content
+            # Count tool blocks in message content. Plain-string content (rare
+            # but spec-legal for short assistant replies) is wrapped as a single
+            # ``text`` block so its bytes still contribute to non-tool input
+            # share on subsequent turns; otherwise lingering tool bytes would
+            # absorb a disproportionate slice of the input pool.
             content = msg.get("content") or []
-            if not isinstance(content, list):
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            elif not isinstance(content, list):
                 content = []
             tool_names, tool_use_count, tool_error_count = _extract_tool_blocks(content)
 
@@ -220,6 +243,10 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
             tool_costs: dict[str, ToolCost] = {}
             unattr_in = unattr_out = unattr_cost = 0.0
 
+            # Block sizes are computed once per line and reused by both the
+            # output-share computation and the context-accumulation tally below.
+            block_sizes = [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
+
             if event_type == "assistant" and usage is not None:
                 input_pool = (
                     usage.input_tokens
@@ -230,13 +257,15 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                     tool_use_id_to_name.clear()
                     bytes_in_context_by_tool.clear()
                     non_tool_bytes_in_context = 0
-                # Peak intentionally not reset after a compaction event. Sessions that
-                # stabilise below 20% of their historical peak will keep firing the
-                # compaction branch on every turn (attribution lands in 'unattributed').
-                # This is a known coarseness of the heuristic, acknowledged in the spec.
-                peak_input_tokens = max(peak_input_tokens, input_pool)
+                    # Reset peak to the post-compaction input pool so a session
+                    # that stabilises below 20% of its historical peak doesn't
+                    # keep re-firing the compaction branch on every turn (which
+                    # would otherwise dump all attribution into 'unattributed').
+                    peak_input_tokens = input_pool
+                else:
+                    peak_input_tokens = max(peak_input_tokens, input_pool)
 
-                output_shares, _ = _output_byte_shares(content)
+                output_shares, _ = _output_byte_shares(block_sizes)
                 total_ctx_bytes = sum(bytes_in_context_by_tool.values()) + non_tool_bytes_in_context
                 if total_ctx_bytes > 0:
                     input_shares = {
@@ -251,14 +280,12 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
             # Fold this line's content into the running tallies so the next
             # assistant turn can attribute its input side against them.
-            # Pre-compute block sizes once to avoid redundant json.dumps calls.
-            block_sizes = [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
             for block, b in block_sizes:
                 btype = block.get("type")
                 if btype == "tool_use":
                     name = block.get("name")
                     bid = block.get("id")
-                    if isinstance(name, str) and name and isinstance(bid, str) and bid:
+                    if _is_real_tool_name(name) and isinstance(bid, str) and bid:
                         tool_use_id_to_name[bid] = name
                         bytes_in_context_by_tool[name] = (
                             bytes_in_context_by_tool.get(name, 0) + b

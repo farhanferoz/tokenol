@@ -197,18 +197,6 @@ def create_app(
         flush_queue = _FlushQueue(history_store)
         write_pidfile_fn = _write_pidfile
         clear_pidfile_fn = _clear_pidfile
-        # The per-tool cost attribution fields (tool_costs, unattributed_*) are
-        # not yet persisted to the on-disk history store. Warm-tier turns
-        # hydrate with empty tool_costs, so /api/breakdown/tools and the new
-        # tool detail pages will under-report attribution for turns older than
-        # the hot window. Tracked for 0.6.1.
-        import sys
-        print(
-            "[tokenol] --persist: per-tool cost attribution is not yet "
-            "persisted; tool breakdown for warm-tier turns may be incomplete "
-            "in this release. (Tracked for 0.6.1.)",
-            file=sys.stderr,
-        )
     else:
         _warn_if_orphan_store_exists()
 
@@ -485,16 +473,28 @@ def create_app(
             result.turns, result.sessions, now, _WINDOW_MINUTES[window]
         ))
 
-    @app.get("/api/model/{name}")
+    def _validate_tool_or_model_name(name: str) -> str:
+        # MCP tools have names like `mcp__server__tool`; future Claude Code
+        # releases may legitimately use `/` (e.g. `Bash/foo`). The `:path`
+        # converter passes those through. Reject only the obviously bogus
+        # cases — empty, path-traversal segments, or NULs — and let the
+        # detail builder return 404 if the name doesn't resolve.
+        if not name or ".." in name.split("/") or "\x00" in name:
+            raise HTTPException(status_code=400, detail="Invalid name")
+        return name
+
+    @app.get("/api/model/{name:path}")
     async def api_model_detail(name: str, request: Request):
+        name = _validate_tool_or_model_name(name)
         result = _current_snapshot_result(request)
         detail = build_model_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Model not found")
         return JSONResponse(detail)
 
-    @app.get("/api/tool/{name}")
+    @app.get("/api/tool/{name:path}")
     async def api_tool_detail(name: str, request: Request):
+        name = _validate_tool_or_model_name(name)
         result = _current_snapshot_result(request)
         detail = build_tool_detail(name, result.turns, result.sessions)
         if detail is None:
@@ -730,9 +730,19 @@ def create_app(
             unattr_cost += t.unattributed_cost_usd
 
         ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
+        head_names = {row["name"] for row in ranked if row["name"] != "other"}
+        # The "other" row collapses tail tools — its `count` (used as the bar
+        # value in tokens mode) must be the sum of those tools' invocations,
+        # not the *number* of collapsed tools. `tool_count` (set inside
+        # `_rank_dict_with_others`) preserves the latter for the UI label.
+        tail_call_sum = sum(
+            c for n, c in tokens_by_tool.items() if n not in head_names
+        )
         for row in ranked:
             name = row["name"]
-            if name in tokens_by_tool:
+            if name == "other":
+                row["count"] = tail_call_sum
+            elif name in tokens_by_tool:
                 row["count"] = tokens_by_tool[name]
             if name in last_active:
                 row["last_active"] = last_active[name].isoformat()

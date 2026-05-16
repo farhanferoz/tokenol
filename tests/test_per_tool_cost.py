@@ -4,8 +4,19 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tokenol.ingest.parser import _attribute_cost, _output_byte_shares, parse_file
+from tokenol.ingest.parser import (
+    _attribute_cost,
+    _block_bytes,
+    _output_byte_shares,
+    parse_file,
+)
 from tokenol.model.events import RawEvent, ToolCost, Turn, Usage
+
+
+def _sized(content):
+    """Test helper: pre-size content blocks for the new _output_byte_shares
+    signature. Mirrors the parser's per-line pre-pass."""
+    return [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -137,7 +148,7 @@ def test_output_share_single_tool():
         {"type": "tool_use", "id": "a", "name": "Grep",
          "input": {"pattern": "foo"}},
     ]
-    shares, unattributed = _output_byte_shares(content)
+    shares, unattributed = _output_byte_shares(_sized(content))
     assert set(shares.keys()) == {"Grep"}
     assert 0 < shares["Grep"] < 1
     assert 0 < unattributed < 1
@@ -150,7 +161,7 @@ def test_output_share_multiple_tools_same_name_sum():
         {"type": "tool_use", "id": "b", "name": "Read", "input": {"file_path": "/y"}},
         {"type": "tool_use", "id": "c", "name": "Grep", "input": {"pattern": "z"}},
     ]
-    shares, unattributed = _output_byte_shares(content)
+    shares, unattributed = _output_byte_shares(_sized(content))
     assert set(shares.keys()) == {"Read", "Grep"}
     assert shares["Read"] > shares["Grep"]
     assert abs(unattributed) < 1e-9
@@ -161,7 +172,7 @@ def test_output_share_thinking_block_unattributed():
         {"type": "thinking", "thinking": "x" * 500},
         {"type": "tool_use", "id": "a", "name": "Read", "input": {"file_path": "/x"}},
     ]
-    shares, unattributed = _output_byte_shares(content)
+    shares, unattributed = _output_byte_shares(_sized(content))
     assert "Read" in shares
     assert unattributed > shares["Read"]
 
@@ -336,24 +347,6 @@ def test_builder_propagates_tool_costs():
     assert t1.unattributed_cost_usd >= 0
 
 
-def test_build_tool_cost_rollups_across_turns():
-    from tokenol.ingest.builder import build_sessions, build_turns
-    from tokenol.metrics.rollups import build_tool_cost_rollups
-
-    fixture = FIXTURES / "per_tool_basic.jsonl"
-    turns = build_turns([fixture])
-    sessions = build_sessions(turns, [fixture])
-    all_turns = [t for s in sessions for t in s.turns]
-    rollups = build_tool_cost_rollups(all_turns)
-
-    by_name = {r.tool_name: r for r in rollups}
-    assert "Read" in by_name and "Bash" in by_name
-    assert by_name["Read"].cost_usd > 0
-    assert by_name["Read"].invocations == 1
-    assert by_name["Read"].last_active is not None
-    assert rollups == sorted(rollups, key=lambda r: r.cost_usd, reverse=True)
-
-
 def test_build_tool_cost_daily_zero_fills():
     from datetime import date
 
@@ -380,7 +373,21 @@ def test_rank_dict_with_others_top_n_plus_other():
     assert names == ["Read", "Bash", "Grep", "other"]
     assert out[-1]["name"] == "other"
     assert abs(out[-1]["value"] - 4.5) < 1e-9
-    assert out[-1].get("count") == 2
+    # "other" row's tool_count is the number of collapsed tools — used by the
+    # frontend label "(N tools)". The bar's call-count for tokens mode is
+    # set separately by the breakdown endpoint.
+    assert out[-1].get("tool_count") == 2
+
+
+def test_rank_dict_with_others_deterministic_tie_break():
+    """Equal values must sort by name ascending so the 'other' membership and
+    head order are reproducible across runs."""
+    from tokenol.metrics.rollups import _rank_dict_with_others
+    d = {"zebra": 5.0, "apple": 5.0, "mango": 5.0}
+    out1 = _rank_dict_with_others(d, top_n=2)
+    out2 = _rank_dict_with_others({k: v for k, v in reversed(list(d.items()))}, top_n=2)
+    assert [r["name"] for r in out1] == [r["name"] for r in out2]
+    assert [r["name"] for r in out1][:2] == ["apple", "mango"]
 
 
 def test_rank_dict_with_others_skips_other_when_short():
@@ -389,3 +396,119 @@ def test_rank_dict_with_others_skips_other_when_short():
     out = _rank_dict_with_others(d, top_n=5)
     names = [r["name"] for r in out]
     assert names == ["Read", "Bash"]
+
+
+def test_sentinel_tool_name_rejected_by_extract_tool_blocks():
+    """A hostile log emitting a tool_use with name `__unattributed__` or
+    `__unknown__` must not land in tool_names — otherwise the attacker can
+    hide cost under the cost-attribution sentinels."""
+    from tokenol.ingest.parser import _extract_tool_blocks
+    content = [
+        {"type": "tool_use", "id": "a", "name": "__unattributed__"},
+        {"type": "tool_use", "id": "b", "name": "__unknown__"},
+        {"type": "tool_use", "id": "c", "name": "Read"},
+    ]
+    tool_names, tool_use_total, _ = _extract_tool_blocks(content)
+    assert dict(tool_names) == {"Read": 1}
+    # tool_use_total still counts every block — preserves legacy semantics.
+    assert tool_use_total == 3
+
+
+def test_plain_string_content_is_wrapped(tmp_path):
+    """Anthropic API sometimes emits content as a plain string (short replies).
+    Those bytes must still feed the non-tool input pool on subsequent turns,
+    not be silently dropped."""
+    lines = [
+        {
+            "type": "assistant", "timestamp": "2026-05-16T10:00:00Z",
+            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m1", "role": "assistant", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 20,
+                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                # Plain string content — historically zeroed by the parser.
+                "content": "Quick reply with no tool calls.",
+            },
+        },
+    ]
+    p = _write_jsonl(tmp_path, "s1.jsonl", lines)
+    events = list(parse_file(p))
+    assert len(events) == 1
+    ev = events[0]
+    # The plain string gets wrapped as a text block, so it is unattributed
+    # output share = 1.0 (no tool_use blocks at all), not a crash.
+    assert ev.unattributed_output_tokens > 0
+
+
+def test_compaction_resets_peak_so_steady_state_doesnt_re_fire(tmp_path):
+    """After a compaction event, a long run of small-input turns must not
+    keep re-triggering the reset on every turn (which would dump every turn's
+    input cost into unattributed)."""
+    big_result = "x" * 50_000
+    lines = [
+        # Turn 1: peak input 60_000 (10_000 fresh + 50_000 cache_read).
+        {
+            "type": "assistant", "timestamp": "2026-05-16T10:00:00Z",
+            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m1", "role": "assistant", "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10_000, "output_tokens": 20,
+                          "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Read",
+                             "input": {"file_path": "/x"}}],
+            },
+        },
+        {
+            "type": "user", "timestamp": "2026-05-16T10:01:00Z",
+            "sessionId": "s1", "uuid": "u2", "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": big_result}
+            ]},
+        },
+        # Turn 2: input drops to 500 (compaction). Peak should reset here.
+        {
+            "type": "assistant", "timestamp": "2026-05-16T10:02:00Z",
+            "sessionId": "s1", "requestId": "r2", "uuid": "u3", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m2", "role": "assistant", "stop_reason": "tool_use",
+                "usage": {"input_tokens": 500, "output_tokens": 20,
+                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu2", "name": "Grep",
+                             "input": {"pattern": "foo"}}],
+            },
+        },
+        {
+            "type": "user", "timestamp": "2026-05-16T10:03:00Z",
+            "sessionId": "s1", "uuid": "u4", "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu2", "content": "matches"}
+            ]},
+        },
+        # Turn 3: same scale as turn 2. Pre-fix this would have re-fired the
+        # reset (still <20% of original 60_000 peak) and dumped Grep input
+        # share into unattributed. Post-fix peak is 500 from turn 2, so this
+        # turn is *not* a compaction event and Grep gets attributed.
+        {
+            "type": "assistant", "timestamp": "2026-05-16T10:04:00Z",
+            "sessionId": "s1", "requestId": "r3", "uuid": "u5", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "m3", "role": "assistant", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 400, "output_tokens": 10,
+                          "cache_read_input_tokens": 200, "cache_creation_input_tokens": 0},
+                "content": [{"type": "text", "text": "Done."}],
+            },
+        },
+    ]
+    p = _write_jsonl(tmp_path, "s1.jsonl", lines)
+    events = list(parse_file(p))
+    assistants = [e for e in events if e.event_type == "assistant"]
+    assert len(assistants) == 3
+    # Turn 3 should attribute non-trivial input share to Grep (its result is
+    # in context); without the peak reset, all of it would land unattributed.
+    t3 = assistants[2]
+    assert "Grep" in t3.tool_costs
+    assert t3.tool_costs["Grep"].input_tokens > 0

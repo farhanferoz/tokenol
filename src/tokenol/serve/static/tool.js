@@ -1,4 +1,4 @@
-import { renderRankedBars, fmtUSD, fmtTok } from '/assets/components.js';
+import { renderRankedBars, fmtUSD, fmtTok, esc } from '/assets/components.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +23,9 @@ function renderScorecards(sc) {
     },
     {
       label: 'Top project',
+      // top_project.name is a cwd basename; pathological directory names like
+      // `<img src=x onerror=...>` would otherwise be HTML-injected when this
+      // string lands in innerHTML below.
       primary: sc.top_project.name || '—',
       sub: sc.top_project.cost_usd > 0
         ? `${fmtUSD(sc.top_project.cost_usd)} (${(sc.top_project.share * 100).toFixed(0)}%)`
@@ -31,9 +34,9 @@ function renderScorecards(sc) {
   ];
   $('tool-scorecards').innerHTML = cards.map((c) => `
     <article class="scorecard-card">
-      <div class="sc-label">${c.label}</div>
-      <div class="sc-primary">${c.primary}</div>
-      <div class="sc-sub">${c.sub}</div>
+      <div class="sc-label">${esc(c.label)}</div>
+      <div class="sc-primary">${esc(c.primary)}</div>
+      <div class="sc-sub">${esc(c.sub)}</div>
     </article>
   `).join('');
 }
@@ -106,10 +109,11 @@ async function load() {
       renderRankedBars(
         $('tool-by-model'),
         data.by_model.map((r) => ({
-          label: r.project_label || r.name,
-          sublabel: r.last_active
-            ? `${r.invocations} call${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
-            : `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
+          // by_model rows only carry name / cost_usd / invocations — no
+          // project_label or last_active. Don't copy-paste the by_project
+          // shape; render the model name directly.
+          label: r.name,
+          sublabel: `${r.invocations} call${r.invocations === 1 ? '' : 's'}`,
           value: r.cost_usd,
           href: '/model/' + encodeURIComponent(r.name),
         })),

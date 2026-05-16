@@ -443,9 +443,15 @@ function renderToolMix(data) {
     let kind;
     if (t.name === 'other') kind = 'other';
     if (t.name === UNATTRIBUTED_TOOL) kind = 'unattributed';
+    // "other" row carries two distinct counts: tool_count (number of collapsed
+    // tools, used in the label) and count (sum of their invocations, used as
+    // the bar value in tokens mode).
+    const collapsedTools = t.tool_count || 0;
     const displayName = t.name === UNATTRIBUTED_TOOL
       ? 'unattributed'
-      : (t.name === 'other' ? `other (${t.count || 0})` : t.name);
+      : (t.name === 'other'
+        ? `other (${collapsedTools} tool${collapsedTools === 1 ? '' : 's'})`
+        : t.name);
     const lastActiveDate = t.last_active ? t.last_active.slice(0, 10) : null;
     const callCount = t.count || 0;
     const sublabel = kind === 'unattributed'

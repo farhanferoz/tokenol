@@ -1109,6 +1109,14 @@ def _cwd_basename(cwd: str) -> str:
     return cwd.split("/")[-1] if cwd else "–"
 
 
+# Memoize _grouped_cwd_by_sid on the identity of the sessions list. Each new
+# snapshot allocates a fresh list (different id), so the cache naturally drops
+# stale results when the snapshot rebuilds. Bounded so a churning broadcaster
+# doesn't accumulate entries indefinitely.
+_GROUPED_CWD_CACHE: dict[int, dict[str, str]] = {}
+_GROUPED_CWD_CACHE_MAX = 8
+
+
 def _grouped_cwd_by_sid(sessions: list[Session]) -> dict[str, str]:
     """Return {session_id: canonical_cwd}, where nested cwds roll up to their
     shortest active ancestor.
@@ -1116,14 +1124,28 @@ def _grouped_cwd_by_sid(sessions: list[Session]) -> dict[str, str]:
     Example: if both "/dev/proj" and "/dev/proj/backend" appear as cwds, every
     session in "/dev/proj/backend" is remapped to "/dev/proj". Sibling or
     unrelated cwds stay separate. The "(unknown)" sentinel is preserved as-is.
+
+    O(C²) in the number of distinct cwds; memoized per *sessions* identity so
+    a server with many projects doesn't re-do the work on every API request.
     """
+    key = id(sessions)
+    cached = _GROUPED_CWD_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     raw = {s.session_id: (s.cwd or "(unknown)") for s in sessions}
     cwds = {cwd for cwd in raw.values() if cwd != "(unknown)"}
     remap: dict[str, str] = {}
     for cwd in cwds:
         ancestors = [o for o in cwds if len(o) < len(cwd) and cwd.startswith(o + "/")]
         remap[cwd] = min(ancestors, key=len) if ancestors else cwd
-    return {sid: remap.get(cwd, cwd) for sid, cwd in raw.items()}
+    result = {sid: remap.get(cwd, cwd) for sid, cwd in raw.items()}
+
+    if len(_GROUPED_CWD_CACHE) >= _GROUPED_CWD_CACHE_MAX:
+        # Drop oldest entry (insertion order = oldest-first in CPython 3.7+).
+        _GROUPED_CWD_CACHE.pop(next(iter(_GROUPED_CWD_CACHE)))
+    _GROUPED_CWD_CACHE[key] = result
+    return result
 
 
 _COMPARE_TOP_N = 8
@@ -1431,9 +1453,15 @@ def build_tool_detail(
         t.tool_names.get(name, 0) for t in tool_turns if t.timestamp >= seven_days_ago_ts
     )
 
-    daily = build_tool_cost_daily(turns, tool_name=name, days=30)
+    # Pass the already-filtered tool_turns so daily aggregation doesn't walk
+    # the full corpus on every /api/tool/{name} request.
+    daily = build_tool_cost_daily(tool_turns, tool_name=name, days=30)
 
-    by_project = sorted(
+    # Cap by_project / by_model lists at top 50 entries to bound payload size
+    # for users with many projects or model variations. Rare-enough rows
+    # rendered as a single "other" footer would lose their click-through, so
+    # we hard-truncate instead.
+    by_project_full = sorted(
         [{
             "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
             "project_label": cwd.rsplit("/", 1)[-1] if cwd != "(unknown)" else "(unknown)",
@@ -1441,13 +1469,15 @@ def build_tool_detail(
             "invocations": proj_invs[cwd],
             "last_active": proj_last[cwd].isoformat(),
         } for cwd in proj_cost],
-        key=lambda r: -r["cost_usd"],
+        key=lambda r: (-r["cost_usd"], r["project_label"]),
     )
-    by_model = sorted(
+    by_project = by_project_full[:50]
+    by_model_full = sorted(
         [{"name": m, "cost_usd": model_cost[m], "invocations": model_invs[m]}
          for m in model_cost],
-        key=lambda r: -r["cost_usd"],
+        key=lambda r: (-r["cost_usd"], r["name"]),
     )
+    by_model = by_model_full[:50]
 
     return {
         "name": name,

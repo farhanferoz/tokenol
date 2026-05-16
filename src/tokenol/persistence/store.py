@@ -23,11 +23,11 @@ from pathlib import Path
 
 import duckdb
 
-from tokenol.model.events import Session, Turn, Usage
+from tokenol.model.events import Session, ToolCost, Turn, Usage
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
@@ -75,6 +75,18 @@ CREATE INDEX IF NOT EXISTS idx_turns_ts      ON turns(ts);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 """
 
+# v2: add per-tool cost attribution columns. ``ALTER … IF NOT EXISTS`` makes
+# this idempotent so upgrading from a v1 file is a no-op on the second run.
+# Existing rows hydrate with empty tool_costs and zero unattributed floats —
+# warm-tier breakdowns for those rows under-report attribution until they age
+# out of the window. New flushes write the full per-tool slice.
+_MIGRATION_V2 = """
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS tool_costs JSON;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS unattributed_input_tokens DOUBLE DEFAULT 0.0;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS unattributed_output_tokens DOUBLE DEFAULT 0.0;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS unattributed_cost_usd DOUBLE DEFAULT 0.0;
+"""
+
 
 def default_path() -> Path:
     """Resolve `TOKENOL_HISTORY_PATH` env var or fall back to ``~/.tokenol/history.duckdb``."""
@@ -87,6 +99,12 @@ def default_path() -> Path:
 def _turn_row(t: Turn) -> tuple:
     # Strip timezone info before storing in DuckDB to avoid TZ conversion issues
     ts = t.timestamp.replace(tzinfo=None) if t.timestamp.tzinfo else t.timestamp
+    # Tool costs use compact one-letter keys so a corpus with thousands of
+    # turns × tens of tools doesn't bloat the warm-tier file with verbose JSON.
+    tool_costs_json = _json.dumps({
+        name: {"i": tc.input_tokens, "o": tc.output_tokens, "c": tc.cost_usd}
+        for name, tc in t.tool_costs.items()
+    })
     return (
         t.dedup_key,
         ts,
@@ -104,6 +122,10 @@ def _turn_row(t: Turn) -> tuple:
         int(t.tool_error_count),
         _json.dumps(dict(t.tool_names)),
         _json.dumps([a.value for a in t.assumptions]),
+        tool_costs_json,
+        float(t.unattributed_input_tokens),
+        float(t.unattributed_output_tokens),
+        float(t.unattributed_cost_usd),
     )
 
 
@@ -130,12 +152,22 @@ def _row_to_turn(r: tuple) -> Turn:
     from tokenol.enums import AssumptionTag
 
     (dedup_key, ts, sid, model, inp, out, cr, cc, cost, sidechain, interrupted,
-     stop_reason, tu, te, tool_names_json, assumptions_json) = r
+     stop_reason, tu, te, tool_names_json, assumptions_json,
+     tool_costs_json, unattr_in, unattr_out, unattr_cost) = r
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     tool_names = Counter(_json.loads(tool_names_json) if tool_names_json else {})
     assumption_values = _json.loads(assumptions_json) if assumptions_json else []
     assumptions = [AssumptionTag(v) for v in assumption_values]
+    tool_costs: dict[str, ToolCost] = {}
+    if tool_costs_json:
+        for name, tc_data in _json.loads(tool_costs_json).items():
+            tool_costs[name] = ToolCost(
+                tool_name=name,
+                input_tokens=float(tc_data.get("i", 0.0)),
+                output_tokens=float(tc_data.get("o", 0.0)),
+                cost_usd=float(tc_data.get("c", 0.0)),
+            )
     return Turn(
         dedup_key=dedup_key,
         timestamp=ts,
@@ -153,6 +185,10 @@ def _row_to_turn(r: tuple) -> Turn:
         tool_error_count=int(te),
         tool_names=tool_names,
         assumptions=assumptions,
+        tool_costs=tool_costs,
+        unattributed_input_tokens=float(unattr_in or 0.0),
+        unattributed_output_tokens=float(unattr_out or 0.0),
+        unattributed_cost_usd=float(unattr_cost or 0.0),
     )
 
 
@@ -189,12 +225,13 @@ class HistoryStore:
             raise
 
     def _migrate(self) -> None:
-        # Apply schema (DDL is idempotent via IF NOT EXISTS).
+        # Apply schema (DDL is idempotent via IF NOT EXISTS / IF NOT EXISTS).
         self._con.execute(_SCHEMA_V1)
-        # Record schema_version if not present.
+        self._con.execute(_MIGRATION_V2)
+        # Upsert schema_version. Existing v1 files get bumped to v2 here.
         self._con.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
-            "ON CONFLICT (key) DO NOTHING",
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             [str(SCHEMA_VERSION)],
         )
 
@@ -237,8 +274,10 @@ class HistoryStore:
                     dedup_key, ts, session_id, model,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                     cost_usd, is_sidechain, is_interrupted, stop_reason,
-                    tool_use_count, tool_error_count, tool_names, assumptions
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    tool_use_count, tool_error_count, tool_names, assumptions,
+                    tool_costs, unattributed_input_tokens,
+                    unattributed_output_tokens, unattributed_cost_usd
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT (dedup_key) DO NOTHING
             """
             for i in range(0, len(turns), FLUSH_CHUNK_SIZE):
@@ -295,7 +334,9 @@ class HistoryStore:
             SELECT dedup_key, ts, session_id, model,
                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                    cost_usd, is_sidechain, is_interrupted, stop_reason,
-                   tool_use_count, tool_error_count, tool_names, assumptions
+                   tool_use_count, tool_error_count, tool_names, assumptions,
+                   tool_costs, unattributed_input_tokens,
+                   unattributed_output_tokens, unattributed_cost_usd
             FROM turns
             WHERE ts >= ?
             ORDER BY ts
@@ -374,7 +415,9 @@ class HistoryStore:
                    turns.input_tokens, turns.output_tokens, turns.cache_read_tokens,
                    turns.cache_creation_tokens, turns.cost_usd, turns.is_sidechain,
                    turns.is_interrupted, turns.stop_reason, turns.tool_use_count,
-                   turns.tool_error_count, turns.tool_names, turns.assumptions
+                   turns.tool_error_count, turns.tool_names, turns.assumptions,
+                   turns.tool_costs, turns.unattributed_input_tokens,
+                   turns.unattributed_output_tokens, turns.unattributed_cost_usd
             FROM turns {join_clause} {where_clause}
             ORDER BY turns.ts
         """
@@ -397,7 +440,9 @@ class HistoryStore:
             SELECT dedup_key, ts, session_id, model,
                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                    cost_usd, is_sidechain, is_interrupted, stop_reason,
-                   tool_use_count, tool_error_count, tool_names, assumptions
+                   tool_use_count, tool_error_count, tool_names, assumptions,
+                   tool_costs, unattributed_input_tokens,
+                   unattributed_output_tokens, unattributed_cost_usd
             FROM turns WHERE session_id = ? ORDER BY ts
             """,
             [sid],

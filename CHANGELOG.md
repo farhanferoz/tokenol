@@ -32,42 +32,116 @@ All notable changes to tokenol are documented here. The format follows
 
 ### Fixed (Tier 3 release-gate review)
 
+Every finding surfaced by the Tier 3 review pipeline (6-specialist fan-out +
+`fp-check` + `/second-opinion` + adversarial re-run) is fixed in this release.
+No items deferred.
+
+**Frontend correctness**
+
 - **`breakdown.js` no longer crashes on load.** `const UNATTRIBUTED_TOOL =
   UNATTRIBUTED_TOOL;` was a temporal-dead-zone self-reference that threw
   `ReferenceError` and killed the entire Breakdown page. Replaced with the
   literal sentinel value.
-- **`by_tool` rollups now reconcile.** `_accumulate_tool_costs` and its callers
-  (`build_project_detail`, `build_model_detail`) previously iterated only
-  `tool_names`, dropping tools whose presence was purely linger-only cost
-  (cost attributed without a fresh invocation in the window). They now iterate
-  `set(cost) | set(invs)`, so `sum(by_tool[].cost_usd)` matches the scorecard
-  totals.
-- **Tool detail page surfaces linger-only attribution.** `build_tool_detail`
-  expanded its `tool_turns` filter to include turns where the tool appears in
-  `tool_costs` even without a fresh invocation. Sentinel names
-  (`__unattributed__` / `__unknown__`) explicitly return 404.
-- **`__unknown__` no longer leaks as a clickable row.** `/api/breakdown/tools`
-  folds `__unknown__` (unmatched `tool_result` bytes) into the
-  `__unattributed__` row so it never renders as a real tool with a dead-end
-  link.
 - **Tool detail "30d total" subtitle now matches the chart.** `tool.js` was
   passing the all-time `scorecards.cost_usd` to the daily chart's "30d total"
   label; switched to summing the 30 daily points client-side.
+- **`tool.js` model card cleanup.** Removed the `project_label` /
+  `last_active` copy-paste branches that were only relevant to the
+  by_project renderer.
+- **XSS hardening in tool scorecards.** `tool.js` now passes interpolated
+  values through `esc()` before rendering via `innerHTML`. A pathological cwd
+  basename like `<img src=x onerror=…>` no longer executes (self-XSS only,
+  but the fix is one import + four `esc(…)` calls).
+
+**Aggregation correctness**
+
+- **`by_tool` rollups now reconcile.** `_accumulate_tool_costs` and its
+  callers (`build_project_detail`, `build_model_detail`) previously iterated
+  only `tool_names`, dropping tools whose presence was purely linger-only
+  cost. They now iterate `set(cost) | set(invs)`, so
+  `sum(by_tool[].cost_usd)` matches the scorecard totals.
+- **Tool detail page surfaces linger-only attribution.** `build_tool_detail`
+  expanded its `tool_turns` filter to include turns where the tool appears
+  in `tool_costs` even without a fresh invocation. Sentinel names
+  (`__unattributed__` / `__unknown__`) explicitly return 404.
+- **`__unknown__` no longer leaks as a clickable row.** `/api/breakdown/tools`
+  folds `__unknown__` into the `__unattributed__` row; `_accumulate_tool_costs`
+  does the same for project/model `by_tool` views.
+- **`by_project` / `by_model` payloads capped at 50 entries** to bound API
+  response size for users with hundreds of projects or model variations.
+- **`other` row in Tool Mix now reports real call sums.** The "other" row's
+  `count` (used as the bar value in tokens mode) is now the sum of tail tool
+  invocations rather than the count of collapsed tools. The collapsed-tool
+  count moved to a new `tool_count` field, displayed in the row label.
 - **UTC-based date windows in new code paths.** `build_tool_detail` and
   `build_tool_cost_daily` now use `datetime.now(tz=timezone.utc).date()`
   instead of local `date.today()`, matching the UTC timestamps stored on
-  every Turn. Pre-existing `date.today()` callsites elsewhere unchanged.
-- **Persistence warning.** `tokenol serve --persist` now emits a stderr notice
-  that per-tool cost attribution is not yet round-tripped through the warm-tier
-  store; tool breakdowns of historical turns may be incomplete in 0.6.0.
-  (Tracked for 0.6.1.)
+  every Turn.
+
+**Parser correctness**
+
+- **Compaction heuristic resets `peak_input_tokens`.** Previously a long
+  session that stabilised below 20% of its historical peak kept re-triggering
+  the reset on every turn, dumping all per-turn attribution into
+  `__unattributed__`. Peak now resets to the new pool after a compaction
+  event so the heuristic only fires on genuine context drops.
+- **Sentinel tool-name collision rejected.** `_extract_tool_blocks` and
+  `_output_byte_shares` now drop `tool_use` blocks whose name is
+  `__unattributed__` or `__unknown__` so a hostile log can't hide cost under
+  the cost-attribution sentinels.
+- **Plain-string assistant content no longer dropped from byte tallies.**
+  When `message.content` is a string (rare but spec-legal for short replies),
+  the parser now wraps it as a single `text` block so its bytes feed the
+  non-tool input pool on subsequent turns — preventing slight over-attribution
+  to lingering tools.
+- **`_block_bytes` catches `RecursionError`.** A deeply nested malformed
+  content block would have crashed the entire `parse_file` (the previous
+  `except (TypeError, ValueError)` missed `RecursionError`).
+- **`_block_bytes` called once per content block.** `_output_byte_shares`
+  now accepts pre-sized `(block, bytes)` pairs so each block is serialized
+  exactly once per assistant turn rather than twice (output-share pass +
+  context-accumulation pass).
+
+**Performance**
+
+- **`build_tool_cost_daily` now scoped to `tool_turns`** in
+  `build_tool_detail` instead of walking the full corpus on every
+  `/api/tool/{name}` request.
+- **`_grouped_cwd_by_sid` memoized per snapshot.** O(C²) cwd ancestor scan
+  no longer reruns on every API request; bounded LRU keyed on `id(sessions)`.
+
+**Persistence**
+
+- **`tool_costs` and `unattributed_*` round-trip through DuckDB.** Schema
+  v2 adds `tool_costs JSON` plus three `unattributed_*` DOUBLE columns to
+  the `turns` table; migration is idempotent via `ALTER … IF NOT EXISTS`.
+  Existing v1 databases upgrade in place on open. Warm-tier breakdowns
+  for `--persist` users on `range=all` now reconcile correctly. Older v1
+  rows pre-dating this release hydrate with empty `tool_costs` until they
+  age out of the window — re-ingest from the source JSONL files to backfill.
+
+**API hardening**
+
+- **`/api/tool/{name}` and `/api/model/{name}` accept path-segment names.**
+  Switched to FastAPI's `{name:path}` converter so MCP tool names like
+  `mcp__server/tool` resolve instead of 404ing; explicit validation rejects
+  empty names, `..` path-traversal segments, and embedded NULs.
+
+**Rollups**
+
+- **`_rank_dict_with_others` is deterministic on ties.** Sort now uses
+  `(-value, name)` so equal-cost entries don't shuffle "other" membership
+  between runs.
+- **Dead `build_tool_cost_rollups` / `ToolCostRollup` removed.**
+  `state.py:_accumulate_tool_costs` was the only consumer of similar logic
+  and lived in a different shape; the unused rollups version is gone.
 
 ### Notes
 
-- No DuckDB schema change. Attribution is computed in-memory at parse time and
-  attached to `Turn.tool_costs`.
-- Per-tool token fields are floats (fractional after share split); aggregate
-  reconciliation is exact to floating-point precision.
+- DuckDB schema bumps to v2; migration is idempotent so opening an existing
+  0.5.x history file upgrades in place. Per-tool token fields are floats
+  (fractional after share split); aggregate reconciliation is exact to
+  floating-point precision.
 
 ## 0.5.1 — 2026-05-15
 
