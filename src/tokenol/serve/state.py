@@ -46,7 +46,7 @@ from tokenol.metrics.rollups import (
 )
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.metrics.verdicts import compute_verdict
-from tokenol.model.events import RawEvent, Session, Turn, Usage
+from tokenol.model.events import EMPTY_ASSUMPTIONS, RawEvent, Session, Turn, Usage
 from tokenol.model.pricing import context_window
 
 log = logging.getLogger(__name__)
@@ -179,7 +179,7 @@ def _build_turns_and_sessions(
             usage=usage,
             is_sidechain=ev.is_sidechain,
             stop_reason=ev.stop_reason,
-            assumptions=tags,
+            assumptions=tags if tags else EMPTY_ASSUMPTIONS,
             cost_usd=tc.total_usd,
             is_interrupted=is_interrupted,
             tool_use_count=ev.tool_use_count,
@@ -284,7 +284,7 @@ def derive_delta_turns(
             usage=usage,
             is_sidechain=ev.is_sidechain,
             stop_reason=ev.stop_reason,
-            assumptions=tags,
+            assumptions=tags if tags else EMPTY_ASSUMPTIONS,
             cost_usd=tc.total_usd,
             is_interrupted=is_interrupted,
             tool_use_count=ev.tool_use_count,

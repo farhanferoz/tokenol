@@ -8,6 +8,23 @@ from datetime import datetime
 
 from tokenol.enums import AssumptionTag
 
+# Shared read-only sentinels for the "no content" case on RawEvent / Turn.
+# Non-assistant events (user messages, system events) never produce tool_use
+# blocks, and most Turns carry no fallback assumptions; without sharing, the
+# parser would create 283 K empty Counter instances + matching empty dicts +
+# 87 K empty lists, each carrying 56–80 B of per-instance overhead. Sharing
+# saves ~40 MiB on a typical corpus.
+#
+# SAFETY: these singletons must never be mutated. The audit at
+# `src/tokenol/` does not write to .tool_names / .tool_costs / .assumptions
+# anywhere — only reads. The parser and `_build_turns_and_sessions` assign
+# fresh Counter / dict / list when content exists, and these sentinels only
+# in the empty case. If a future caller mutates a Turn's field, it must
+# replace it with a fresh container first; never mutate in place.
+EMPTY_TOOL_NAMES: Counter[str] = Counter()
+EMPTY_TOOL_COSTS: dict[str, ToolCost] = {}
+EMPTY_ASSUMPTIONS: list[AssumptionTag] = []
+
 
 @dataclass(slots=True)
 class Usage:

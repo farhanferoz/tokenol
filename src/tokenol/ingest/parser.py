@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -10,7 +11,13 @@ from pathlib import Path
 
 from tokenol.enums import AssumptionTag
 from tokenol.metrics.cost import cost_for_turn
-from tokenol.model.events import RawEvent, ToolCost, Usage
+from tokenol.model.events import (
+    EMPTY_TOOL_COSTS,
+    EMPTY_TOOL_NAMES,
+    RawEvent,
+    ToolCost,
+    Usage,
+)
 
 UNATTRIBUTED_TOOL = "__unattributed__"
 UNKNOWN_TOOL = "__unknown__"
@@ -74,6 +81,8 @@ def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
                 tool_names[name] += 1
         elif btype == "tool_result" and block.get("is_error") is True:
             tool_error += 1
+    if not tool_names:
+        return EMPTY_TOOL_NAMES, tool_use_total, tool_error
     return tool_names, tool_use_total, tool_error
 
 
@@ -169,7 +178,7 @@ def _attribute_cost(
     unattr_in_share = max(0.0, 1.0 - in_attributed)
 
     return (
-        tool_costs,
+        tool_costs if tool_costs else EMPTY_TOOL_COSTS,
         input_token_pool * unattr_in_share,
         usage.output_tokens * unattr_out_share,
         turn_cost.output_usd * unattr_out_share + input_cost_pool * unattr_in_share,
@@ -186,7 +195,12 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
     - Compaction is detected heuristically (input drop ≥80% from running peak) and
       resets both tallies.
     """
-    session_id = path.stem  # filename without .jsonl == sessionId
+    # Intern fields with low cardinality (1 unique per file or a handful across
+    # the corpus). Each parsed event would otherwise hold a fresh Python str for
+    # source_file / session_id / event_type / model / stop_reason / cwd; sharing
+    # them via the intern table saves ~30-50 MiB across the 376 K event corpus.
+    source_file_str = sys.intern(str(path))
+    session_id_default = sys.intern(path.stem)
 
     # Sidechain detection: lives under a subagents/ subdir anywhere in the path
     is_sidechain = "subagents" in path.parts
@@ -212,6 +226,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
             event_type = ev.get("type", "")
             if not event_type:
                 continue
+            event_type = sys.intern(event_type)
 
             msg = ev.get("message") or {}
 
@@ -229,6 +244,8 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
             usage = _parse_usage(msg)
             model = ev.get("model") or msg.get("model")
+            if model:
+                model = sys.intern(model)
 
             cwd: str | None = ev.get("cwd") or None
             if cwd and (
@@ -239,8 +256,10 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 # (ancestor detection, basename extraction, URL encoding) can
                 # treat every cwd as POSIX.
                 cwd = cwd.replace("\\", "/")
+            if cwd:
+                cwd = sys.intern(cwd)
 
-            tool_costs: dict[str, ToolCost] = {}
+            tool_costs: dict[str, ToolCost] = EMPTY_TOOL_COSTS
             unattr_in = unattr_out = unattr_cost = 0.0
 
             # Block sizes are computed once per line and reused by both the
@@ -301,11 +320,16 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 else:
                     non_tool_bytes_in_context += b
 
+            sid = ev.get("sessionId")
+            sid = sys.intern(sid) if sid else session_id_default
+            stop_reason = msg.get("stop_reason")
+            if stop_reason:
+                stop_reason = sys.intern(stop_reason)
             yield RawEvent(
-                source_file=str(path),
+                source_file=source_file_str,
                 line_number=lineno,
                 event_type=event_type,
-                session_id=ev.get("sessionId", session_id),
+                session_id=sid,
                 request_id=ev.get("requestId"),
                 message_id=msg.get("id"),
                 uuid=ev.get("uuid"),
@@ -313,7 +337,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 usage=usage,
                 model=model,
                 is_sidechain=ev.get("isSidechain", is_sidechain),
-                stop_reason=msg.get("stop_reason"),
+                stop_reason=stop_reason,
                 tool_use_count=tool_use_count,
                 tool_error_count=tool_error_count,
                 tool_names=tool_names,

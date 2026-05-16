@@ -25,7 +25,12 @@ All notable changes to tokenol are documented here. The format follows
 
 ### Performance
 
-- **`-82 MiB steady RSS`** for the no-persist server on a 92 K-turn / 375 K-event corpus. Added `slots=True` to every high-count dataclass: `RawEvent`, `Turn`, `Usage`, `ToolCost`, `Session`, `Project` (the model layer that's replicated 90 K-fold), plus the metrics-side rollup classes (`TurnCost`, `DailyRollup`, `HourlyRollup`, `SessionRollup`, `ProjectRollup`, `ModelRollup`, `DailyToolCost`), `PatternHit`, and `Window`. No behavioural change — `__slots__` drops the per-instance `__dict__` overhead (88 B saved per `Turn`, 88 B per `Usage`, ~60 B per `ToolCost`). Measured on the live corpus: after-derive RSS goes 685 MiB → 603 MiB (-12 %). Run with `uv run tokenol serve --port 8787` from this branch to pick up the change.
+- **`-215 MiB steady RSS` (-31 %)** for the no-persist server on a 92 K-turn / 375 K-event corpus (685 MiB → 470 MiB after-derive). Three stacked optimisations:
+  1. **`slots=True` on every high-count dataclass.** `RawEvent`, `Turn`, `Usage`, `ToolCost`, `Session`, `Project` in the model layer (replicated 90 K-fold), plus the metrics-side rollup classes (`TurnCost`, `DailyRollup`, `HourlyRollup`, `SessionRollup`, `ProjectRollup`, `ModelRollup`, `DailyToolCost`), `PatternHit`, and `Window`. Saves 88 B/`Turn`, 88 B/`Usage`, ~60 B/`ToolCost` by dropping per-instance `__dict__`. **-82 MiB.**
+  2. **Shared empty-container sentinels** (`EMPTY_TOOL_NAMES`, `EMPTY_TOOL_COSTS`, `EMPTY_ASSUMPTIONS` in `tokenol.model.events`). 275 K of 376 K events have no `tool_use` blocks; previously each carried a fresh empty `Counter` (80 B), empty `dict` (64 B), and on the `Turn` side every assumption-free turn carried a fresh empty `list` (56 B). All collapse to module-level singletons (audited: no in-place mutation anywhere in `src/tokenol/`). **-38 MiB.**
+  3. **`sys.intern()` on low-cardinality string fields** at parse time: `source_file` (1929 unique paths × 376 K refs), `event_type` (~3 unique), `session_id` (447 unique × 92 K refs), `model` (~3 unique × 92 K refs), `stop_reason` (~5 unique), `cwd` (~50 unique). Strings from `json.loads` aren't interned by default; without sharing, the corpus carries 1.5 M near-duplicate `str` objects with ~50 B/string overhead. **-95 MiB.**
+
+  No behavioural change — every transformation is internal to the parser + the dataclass layout. Restart the server (`uv run tokenol serve --port 8787`) to pick up the change.
 
 ### Notes
 
