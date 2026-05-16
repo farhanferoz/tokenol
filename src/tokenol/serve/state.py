@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from tokenol.enums import AssumptionTag, BlowUpVerdict
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
-from tokenol.ingest.parser import dedup_key, parse_file
+from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL, dedup_key, parse_file
 
 if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
@@ -1321,9 +1321,9 @@ def build_model_detail(
     by_tool = sorted(
         [{
             "name": tname,
-            "cost_usd": tool_cost[tname],
-            "invocations": tool_invs[tname],
-        } for tname in tool_invs],
+            "cost_usd": tool_cost.get(tname, 0.0),
+            "invocations": tool_invs.get(tname, 0),
+        } for tname in (set(tool_cost) | set(tool_invs)) if tname != UNATTRIBUTED_TOOL],
         key=lambda r: -r["cost_usd"],
     )
 
@@ -1347,14 +1347,24 @@ def _accumulate_tool_costs(
 ) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
     """Walk *turns* and aggregate per-tool cost, invocations, and last_active.
 
-    If with_last_active=False, the returned dict is empty (callers can skip it).
+    ``__unknown__`` (unmatched tool_result bytes) is folded into the
+    ``__unattributed__`` cost bucket so it never surfaces as a separate tool.
+    ``last_active`` is populated for any tool with either cost or invocations
+    so callers can iterate ``set(cost) | set(invs)`` without KeyError.
     """
     cost: defaultdict[str, float] = defaultdict(float)
     invs: defaultdict[str, int] = defaultdict(int)
     last: dict[str, datetime] = {}
     for t in turns:
         for name, tc in t.tool_costs.items():
-            cost[name] += tc.cost_usd
+            if name == UNKNOWN_TOOL:
+                cost[UNATTRIBUTED_TOOL] += tc.cost_usd
+            else:
+                cost[name] += tc.cost_usd
+            if with_last_active and name != UNKNOWN_TOOL and (
+                name not in last or t.timestamp > last[name]
+            ):
+                last[name] = t.timestamp
         for name, count in t.tool_names.items():
             invs[name] += count
             if with_last_active and (name not in last or t.timestamp > last[name]):
@@ -1368,9 +1378,11 @@ def build_tool_detail(
     sessions: list[Session],
 ) -> dict | None:
     """Build the tool drill-down payload for GET /api/tool/{name}."""
+    if name in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL):
+        return None
     tool_turns = [
         t for t in turns
-        if not t.is_interrupted and t.tool_names.get(name, 0) > 0
+        if not t.is_interrupted and (name in t.tool_costs or t.tool_names.get(name, 0) > 0)
     ]
     if not tool_turns:
         return None
@@ -1411,9 +1423,9 @@ def build_tool_detail(
         "share": top_cwd[1] / total_cost if total_cost > 0 else 0.0,
     }
 
-    today = date.today()
+    today_utc = datetime.now(tz=timezone.utc).date()
     seven_days_ago_ts = datetime.combine(
-        today - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc
+        today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc
     )
     invs_7d = sum(
         t.tool_names.get(name, 0) for t in tool_turns if t.timestamp >= seven_days_ago_ts
@@ -1674,10 +1686,10 @@ def build_project_detail(
     by_tool = sorted(
         [{
             "name": tname,
-            "cost_usd": tool_cost[tname],
-            "invocations": tool_invs[tname],
-            "last_active": tool_last[tname].isoformat(),
-        } for tname in tool_invs],
+            "cost_usd": tool_cost.get(tname, 0.0),
+            "invocations": tool_invs.get(tname, 0),
+            "last_active": tool_last[tname].isoformat() if tname in tool_last else None,
+        } for tname in (set(tool_cost) | set(tool_invs)) if tname != UNATTRIBUTED_TOOL],
         key=lambda r: -r["cost_usd"],
     )
 

@@ -82,7 +82,8 @@ async function load() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     renderScorecards(data.scorecards);
-    renderDailyChart(data.daily_cost, data.scorecards.cost_usd);
+    const daily30dTotal = data.daily_cost.reduce((s, d) => s + (d.cost_usd || 0), 0);
+    renderDailyChart(data.daily_cost, daily30dTotal);
     if (!data.by_project.length) {
       $('tool-no-projects').classList.remove('hidden');
     } else {

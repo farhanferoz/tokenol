@@ -16,7 +16,7 @@ import { renderRankedBars } from './components.js';
 
 const SS_PERIOD = 'tokenol.breakdown.period';
 const VALID_RANGES = new Set(['7d', '30d', '90d', 'all']);
-const UNATTRIBUTED_TOOL = UNATTRIBUTED_TOOL;
+const UNATTRIBUTED_TOOL = '__unattributed__';
 
 function getPeriod() {
   const v = sessionStorage.getItem(SS_PERIOD);

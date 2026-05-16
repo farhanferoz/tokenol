@@ -652,6 +652,94 @@ def test_build_tool_detail_excludes_interrupted():
     assert build_tool_detail("Read", [interrupted], sessions) is None
 
 
+def test_build_tool_detail_includes_linger_only_turns():
+    """A tool whose presence on later turns is purely linger-only (cost without
+    a fresh invocation) must still contribute to total_cost and by_project.
+    Regression test for the by_tool/tool_detail reconciliation gap where
+    `tool_turns` previously filtered to tool_names-only turns and dropped
+    linger-only attribution."""
+    from tokenol.model.events import ToolCost
+    t0 = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 4, 14, 11, 0, tzinfo=timezone.utc)
+
+    # Turn 0: invokes Read (cost + names).
+    invoke = Turn(
+        dedup_key="k0", timestamp=t0, session_id="s1", model="claude-opus-4-7",
+        usage=Usage(input_tokens=10, output_tokens=10), is_sidechain=False,
+        stop_reason="tool_use", cost_usd=0.05, tool_use_count=1,
+        tool_names=Counter({"Read": 1}),
+        tool_costs={"Read": ToolCost(tool_name="Read", output_tokens=10, cost_usd=0.05)},
+    )
+    # Turn 1: no fresh invocation, but Read result lingers in input bytes →
+    # cost attributed to Read with no entry in tool_names.
+    linger = Turn(
+        dedup_key="k1", timestamp=t1, session_id="s1", model="claude-opus-4-7",
+        usage=Usage(input_tokens=50, output_tokens=5), is_sidechain=False,
+        stop_reason="end_turn", cost_usd=0.04, tool_use_count=0,
+        tool_names=Counter(),
+        tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40, cost_usd=0.03)},
+    )
+    sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p/a", turns=[invoke, linger])]
+
+    detail = build_tool_detail("Read", [invoke, linger], sessions)
+    assert detail is not None
+    # Total cost reflects both the invocation slice and the linger slice.
+    assert detail["scorecards"]["cost_usd"] == 0.05 + 0.03
+    # Invocations counted from tool_names only; linger turn doesn't bump it.
+    assert detail["total_invocations"] == 1
+
+
+def test_build_tool_detail_rejects_sentinels():
+    """The cost-attribution sentinels are not real tools; tool detail must 404
+    rather than render a bogus page (which would have happened before the
+    sentinel rejection was added at the entry point)."""
+    from tokenol.serve.state import build_tool_detail as _build
+    assert _build("__unattributed__", [], []) is None
+    assert _build("__unknown__", [], []) is None
+
+
+def test_accumulate_tool_costs_union_includes_linger_only():
+    """_accumulate_tool_costs must surface tools that appear in tool_costs even
+    when they're absent from tool_names — without this, project/model by_tool
+    rollups silently drop linger-only attribution."""
+    from tokenol.model.events import ToolCost
+    from tokenol.serve.state import _accumulate_tool_costs
+    ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
+    linger = Turn(
+        dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
+        usage=Usage(input_tokens=50, output_tokens=5), is_sidechain=False,
+        stop_reason="end_turn", cost_usd=0.04,
+        tool_names=Counter(),
+        tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40, cost_usd=0.03)},
+    )
+    cost, invs, last = _accumulate_tool_costs([linger])
+    assert cost["Read"] == 0.03
+    # Invocations 0 (no tool_names entry) but the tool is still represented.
+    assert invs.get("Read", 0) == 0
+    # last_active populated from the tool_costs pass so callers can iterate the
+    # union without a KeyError.
+    assert "Read" in last
+
+
+def test_accumulate_tool_costs_folds_unknown_into_unattributed():
+    """The __unknown__ sentinel (unmatched tool_result bytes) must not surface
+    as a real tool — it gets folded into __unattributed__ so callers' filter
+    drops it from project/model by_tool rollups."""
+    from tokenol.model.events import ToolCost
+    from tokenol.serve.state import _accumulate_tool_costs
+    ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
+    turn = Turn(
+        dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
+        usage=Usage(input_tokens=50, output_tokens=5), is_sidechain=False,
+        stop_reason="end_turn", cost_usd=0.02,
+        tool_names=Counter(),
+        tool_costs={"__unknown__": ToolCost(tool_name="__unknown__", input_tokens=20, cost_usd=0.02)},
+    )
+    cost, _invs, _last = _accumulate_tool_costs([turn])
+    assert "__unknown__" not in cost
+    assert cost["__unattributed__"] == 0.02
+
+
 # ---- derive_delta_turns tests ------------------------------------------
 
 

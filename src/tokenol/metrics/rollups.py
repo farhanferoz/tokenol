@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from tokenol.enums import BlowUpVerdict
 from tokenol.metrics.context import (
@@ -150,8 +150,12 @@ class DailyToolCost:
 def build_tool_cost_daily(
     turns: list[Turn], *, tool_name: str, days: int = 30, today: date | None = None
 ) -> list[DailyToolCost]:
-    """Per-day cost_usd for *tool_name* over the last *days* days, zero-filled."""
-    today = today or date.today()
+    """Per-day cost_usd for *tool_name* over the last *days* days, zero-filled.
+
+    Defaults *today* to UTC so the window aligns with the UTC turn timestamps;
+    local-TZ callers risk a day's drift on either side of midnight UTC.
+    """
+    today = today or datetime.now(tz=timezone.utc).date()
     start = today - timedelta(days=days - 1)
     buckets: dict[date, float] = {start + timedelta(days=i): 0.0 for i in range(days)}
     for turn in turns:

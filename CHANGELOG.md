@@ -30,6 +30,38 @@ All notable changes to tokenol are documented here. The format follows
     keys removed.
   - `/api/project/{cwd_b64}` and `/api/model/{name}` add a `by_tool` block.
 
+### Fixed (Tier 3 release-gate review)
+
+- **`breakdown.js` no longer crashes on load.** `const UNATTRIBUTED_TOOL =
+  UNATTRIBUTED_TOOL;` was a temporal-dead-zone self-reference that threw
+  `ReferenceError` and killed the entire Breakdown page. Replaced with the
+  literal sentinel value.
+- **`by_tool` rollups now reconcile.** `_accumulate_tool_costs` and its callers
+  (`build_project_detail`, `build_model_detail`) previously iterated only
+  `tool_names`, dropping tools whose presence was purely linger-only cost
+  (cost attributed without a fresh invocation in the window). They now iterate
+  `set(cost) | set(invs)`, so `sum(by_tool[].cost_usd)` matches the scorecard
+  totals.
+- **Tool detail page surfaces linger-only attribution.** `build_tool_detail`
+  expanded its `tool_turns` filter to include turns where the tool appears in
+  `tool_costs` even without a fresh invocation. Sentinel names
+  (`__unattributed__` / `__unknown__`) explicitly return 404.
+- **`__unknown__` no longer leaks as a clickable row.** `/api/breakdown/tools`
+  folds `__unknown__` (unmatched `tool_result` bytes) into the
+  `__unattributed__` row so it never renders as a real tool with a dead-end
+  link.
+- **Tool detail "30d total" subtitle now matches the chart.** `tool.js` was
+  passing the all-time `scorecards.cost_usd` to the daily chart's "30d total"
+  label; switched to summing the 30 daily points client-side.
+- **UTC-based date windows in new code paths.** `build_tool_detail` and
+  `build_tool_cost_daily` now use `datetime.now(tz=timezone.utc).date()`
+  instead of local `date.today()`, matching the UTC timestamps stored on
+  every Turn. Pre-existing `date.today()` callsites elsewhere unchanged.
+- **Persistence warning.** `tokenol serve --persist` now emits a stderr notice
+  that per-tool cost attribution is not yet round-tripped through the warm-tier
+  store; tool breakdowns of historical turns may be incomplete in 0.6.0.
+  (Tracked for 0.6.1.)
+
 ### Notes
 
 - No DuckDB schema change. Attribution is computed in-memory at parse time and

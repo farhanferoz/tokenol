@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from tokenol.ingest.parser import UNATTRIBUTED_TOOL
+from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.rollups import _rank_dict_with_others
 from tokenol.metrics.thresholds import DEFAULTS
@@ -197,6 +197,18 @@ def create_app(
         flush_queue = _FlushQueue(history_store)
         write_pidfile_fn = _write_pidfile
         clear_pidfile_fn = _clear_pidfile
+        # The per-tool cost attribution fields (tool_costs, unattributed_*) are
+        # not yet persisted to the on-disk history store. Warm-tier turns
+        # hydrate with empty tool_costs, so /api/breakdown/tools and the new
+        # tool detail pages will under-report attribution for turns older than
+        # the hot window. Tracked for 0.6.1.
+        import sys
+        print(
+            "[tokenol] --persist: per-tool cost attribution is not yet "
+            "persisted; tool breakdown for warm-tier turns may be incomplete "
+            "in this release. (Tracked for 0.6.1.)",
+            file=sys.stderr,
+        )
     else:
         _warn_if_orphan_store_exists()
 
@@ -690,7 +702,11 @@ def create_app(
     async def api_breakdown_tools(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         result = _current_snapshot_result(request)
-        since = range_since(range, date.today()) if range != "all" else None
+        since = (
+            range_since(range, datetime.now(tz=timezone.utc).date())
+            if range != "all"
+            else None
+        )
 
         cost_by_tool: dict[str, float] = {}
         tokens_by_tool: Counter[str] = Counter()
@@ -704,6 +720,10 @@ def create_app(
                 continue
             tokens_by_tool.update(t.tool_names)
             for name, tc in t.tool_costs.items():
+                # __unknown__ (unmatched tool_result bytes) folds into unattributed.
+                if name == UNKNOWN_TOOL:
+                    unattr_cost += tc.cost_usd
+                    continue
                 cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
                 if name in t.tool_names and (name not in last_active or t.timestamp > last_active[name]):
                     last_active[name] = t.timestamp
