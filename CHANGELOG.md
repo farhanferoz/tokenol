@@ -16,6 +16,10 @@ All notable changes to tokenol are documented here. The format follows
 
 - `_wireUnitPills` (in `breakdown.js`) gains an optional `dataAttr` parameter so a single helper can drive both `data-bdunit` and `data-bdmode` pill groups. Existing call sites unchanged.
 
+### Fixed
+
+- **`$/kW` scorecard read `$0`** on the Overview page. `fmtUSD` (introduced in 0.6.0's "standardise dollar formatting on whole dollars" pass) was applying `Math.round` to every value, stamping out the entire sub-dollar signal — `$/kW` is inherently $0.01–$1 territory, so the scorecard, its `<$X GOOD · >$Y RED` threshold labels, and the `last hour: $…` sub-line all read `$0`. Now `fmtUSD` keeps two decimals for values in `[$0.01, $1)`, five decimals for `(0, $0.01)`, and whole dollars for `≥ $1` (the original rationale held for the $10+ table values). No call-site changes required.
+
 ### Notes
 
 - No persistence changes — the mode toggle is purely a presentation-layer reinterpretation of already-stored per-turn `tool_costs` data.

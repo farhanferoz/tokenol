@@ -3,9 +3,13 @@
 export const fmtUSD   = v => {
   const n = +v;
   if (!Number.isFinite(n)) return '—';
-  // Whole-dollar formatting across the dashboard — cent-precision adds noise
-  // at the scale these tables show ($10–$10,000) and made adjacent rows hard
-  // to compare (some with two decimals, some without).
+  const abs = Math.abs(n);
+  // Sub-dollar values ($/kW, threshold boundaries, per-hour micro-costs) must
+  // keep cent precision — rounding $0.14 to $0 hides the entire signal.
+  // Above $1, strip cents: at the $10–$10,000 scale most tables show, cent
+  // precision adds noise and made adjacent rows hard to compare.
+  if (abs > 0 && abs < 0.01) return '$' + n.toFixed(5);
+  if (abs > 0 && abs < 1)    return '$' + n.toFixed(2);
   return '$' + Math.round(n).toLocaleString('en-US');
 };
 export const fmtPct   = v => `${(100 * (+v || 0)).toFixed(1)}%`;
