@@ -72,24 +72,50 @@ GET /api/breakdown/tools?range=7d&mode=excl_cache_read
         |
         v
 serve/app.py:api_breakdown_tools(request, range="30d", mode="prorata")
-        |  validate mode -> 'prorata' fallback for any unknown value
-        |  window-filter turns by `range` (unchanged from today)
+        |  validate `range` (existing _validate_breakdown_range)
+        |  validate `mode`: unknown values fall back to 'prorata'
+        |  fetch result.turns from current snapshot (existing)
+        |  window-filter by `range` (existing)
         v
-serve/state.py:build_tool_detail(turns, *, mode="prorata")
+serve/state.py:build_breakdown_tools(filtered_turns, *, mode='prorata')  ← NEW
         |
-        |  for each turn t:
-        |     per_tool_cost: dict[str, float] = _tool_cost_for_mode(t, mode)
-        |        if mode == 'prorata':
-        |           per_tool_cost = {n: tc.cost_usd for n, tc in t.tool_costs.items()}
-        |        else:  # excl_cache_read
-        |           per_tool_cost = _recompute_excl_cache_read(t)
-        |  sum per_tool_cost across turns into accumulator
-        |  __unattributed__ row = window_total_cost - sum(real-tool per_tool_cost)
+        |  walk turns once, accumulating:
+        |     - cost_by_tool: dict[str, float]
+        |     - tokens_by_tool: Counter[str]            (invocation counts; mode-invariant)
+        |     - last_active: dict[str, datetime]
+        |     - unattr_cost: float
+        |
+        |  Per turn, the per-tool cost contribution depends on `mode`:
+        |     mode == 'prorata':
+        |        per_tool_cost = {name: tc.cost_usd for name, tc in t.tool_costs.items()
+        |                         if name != UNKNOWN_TOOL}
+        |        unknown_share  = sum(tc.cost_usd for name, tc in t.tool_costs.items()
+        |                             if name == UNKNOWN_TOOL)
+        |        turn_unattr = t.unattributed_cost_usd + unknown_share
+        |     mode == 'excl_cache_read':
+        |        recomputed = _recompute_excl_cache_read(t)
+        |        per_tool_cost = {name: cost for name, cost in recomputed.items()
+        |                         if name != UNKNOWN_TOOL}
+        |        unknown_share  = sum(cost for name, cost in recomputed.items()
+        |                             if name == UNKNOWN_TOOL)
+        |        turn_total = cost_for_turn(t.model, t.usage).total_usd
+        |        turn_unattr = turn_total - sum(recomputed.values()) + unknown_share
+        |
+        |  fold per_tool_cost into cost_by_tool; add turn_unattr to unattr_cost;
+        |  update last_active where t.tool_names says the tool was invoked.
+        |
+        |  apply existing _rank_dict_with_others top-10 + 'other' tail collapse,
+        |  attach `count` (from tokens_by_tool) and `last_active`, append
+        |  {name: '__unattributed__', cost_usd: unattr_cost}.
         v
 JSON: { range, mode, tools: [...] }
 ```
 
-`_recompute_excl_cache_read(turn)` is a new module-private helper in `serve/state.py`:
+The prorata path is a one-for-one move of the existing inline loop in `api_breakdown_tools` — same fields, same aggregation, same output. The excl_cache_read path is the only new logic; it pays the per-turn `cost_for_turn(...)` call only when the user opts in.
+
+**Note on `UNKNOWN_TOOL` folding.** The existing endpoint folds `__unknown__` (unmatched `tool_result` bytes) into the unattributed bucket. The new helper preserves that fold under both modes.
+
+`_recompute_excl_cache_read(turn)` is a new helper in `serve/state.py`:
 
 ```python
 def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
@@ -113,7 +139,7 @@ def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
 ### Edge cases (inherited from existing pro-rata code)
 
 - Sentinel-name collision (`__unattributed__`, `__unknown__`) — already rejected by `_is_real_tool_name` at parse time, so they never appear as keys in `turn.tool_costs`.
-- Linger-only tools (tool used in past turn, no fresh `tool_use` this turn) — already surfaced via the `set(cost) | set(invs)` union in `_accumulate_tool_costs`. The recomputation runs over `turn.tool_costs`, which already contains the linger entry.
+- Linger-only tools (tool whose `tool_result` bytes are still in context this turn, but no fresh `tool_use` block in this turn) — appear in `t.tool_costs` even though they don't appear in `t.tool_names`. The new helper iterates `t.tool_costs.items()` so linger entries get a recomputed cost contribution under both modes. Their `count` (sourced from `tokens_by_tool`, which only counts invocations) and `last_active` come from earlier turns and are unaffected.
 - Compaction reset — doesn't matter at this layer. We work with already-attributed shares.
 - Interrupted turns — already filtered (no `usage`).
 - Unknown model — `cost_for_turn` already tags `UNKNOWN_MODEL_FALLBACK` and returns zero costs; both modes yield zero for that turn.
@@ -150,9 +176,12 @@ def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
 
 ### Internal
 
-- `state.build_tool_detail(turns, *, mode: str = "prorata")` — gains keyword-only `mode` parameter; default unchanged.
-- `state._recompute_excl_cache_read(turn) -> dict[str, float]` — new module-private helper, tested in isolation.
-- `state._accumulate_tool_costs` does **not** gain a `mode` parameter — `build_tool_detail` is the only caller of the new recomputation. Other callers of `_accumulate_tool_costs` (project detail page, model detail page) stay on pro-rata, matching the non-goals.
+- `state.build_breakdown_tools(turns, *, mode: str = "prorata") -> list[dict]` — new module-public function returning the ranked `tools` list (including the `__unattributed__` row). The body is a near-verbatim extract of the existing inline loop in `api_breakdown_tools`, gaining a single per-turn branch on `mode`. The endpoint owns the response envelope (mode validation, `mode`/`range` echo).
+- `state._recompute_excl_cache_read(turn) -> dict[str, float]` — new helper, tested in isolation. Returns per-tool cost for one turn under the alternative formula.
+- `state._accumulate_tool_costs` (the existing helper used by `/api/tool/{name}` and other detail pages) is **not** modified and **not** called by the new function. The breakdown endpoint and the detail endpoints intentionally have separate aggregation paths because their output shapes differ (breakdown ranks + collapses to top-10 + "other"; detail expands per-project / per-model). The mode toggle only affects the breakdown path; detail pages stay on pro-rata as a non-goal.
+- `app.py:api_breakdown_tools` shrinks from a ~40-line inline loop to a call site: validate inputs, slice turns, call `state.build_breakdown_tools(...)`, return the JSON. No behavioural change for any existing caller.
+
+**Invariant under the new code path:** for any input `turns`, `build_breakdown_tools(turns, mode="prorata")` returns the exact same `tools` list (per-tool `cost_usd`, `count`, `last_active`, ordering, and `__unattributed__` residual) as today's `api_breakdown_tools` body computed inline. Verified by a regression test that compares "current implementation snapshot" against "new function output" on a synthetic turns fixture.
 
 ## UI behaviour
 
@@ -169,7 +198,7 @@ The new pill group sits between the period pills and the value-unit toggle. Uses
 - `localStorage` key: `tokenol.breakdown.toolMode`, default `'prorata'`.
 - Joins the existing per-panel state pattern (`tokenol.breakdown.toolPeriod`, `tokenol.breakdown.toolUnit`).
 - Module-level `let _bdToolMode = localStorage.getItem('tokenol.breakdown.toolMode') || 'prorata';`
-- A `wirePillGroup(...)` call near the existing period/unit wiring, mirroring their structure.
+- Wiring re-uses (or minimally extends) the existing `_wireUnitPills(groupId, lsKey, getter, setter, onChange)` helper in `breakdown.js`. The call pattern matches the existing `bd-tools-unit-pills` wiring exactly, with `onChange = refreshTools` so the toggle re-fetches with the new `mode=` query param. If a different `data-*` attribute is needed (existing helper hardcodes `data-bdunit`), the helper gains an optional 6th `dataAttr` parameter (or a one-line refactor extracting the attribute name) — implementation detail decided during plan-writing.
 
 ### Interaction
 
@@ -206,27 +235,28 @@ In `tests/test_per_tool_cost.py` and `tests/test_serve_state.py`:
 3. **Empty `tool_costs`** — both modes yield `{}` for tools; full turn_cost in unattributed.
 4. **Defensive sentinel rejection** — synthetic `__unattributed__` key in `tool_costs` (shouldn't occur in practice but a defensive check): never surfaces as a real tool; folds into unattributed under both modes.
 5. **Linger-only tool** — `input_tokens > 0, output_tokens = 0`: produces a non-zero cost in `excl_cache_read` mode from the input-side share alone.
-6. **Multi-turn aggregation** — 5 synthetic turns spanning two days and two models; call `build_tool_detail(turns, mode='excl_cache_read')`; assert sum of `tool_cost + unattributed_cost` equals sum of `cost_for_turn(...).total_usd` across the turns (mode invariance of total).
+6. **Multi-turn aggregation** — 5 synthetic turns spanning two days and two models; call `build_breakdown_tools(turns, mode='excl_cache_read')`; assert sum of per-tool `cost_usd` + `__unattributed__` `cost_usd` equals sum of `cost_for_turn(...).total_usd` across the turns (mode invariance of total cost).
 7. **Non-cost field invariance** — `count`, `last_active`, `tool_count` identical between `mode='prorata'` and `mode='excl_cache_read'`.
+8. **Pro-rata extraction regression guard** — capture the live `GET /api/breakdown/tools?range=...` response *before* the extraction (or its inline-loop equivalent computed in the test), then assert `build_breakdown_tools(turns, mode='prorata')` returns identical output (same tool ordering, same per-tool `cost_usd` to bit equality, same `__unattributed__` cost). Guarantees the loop-extraction step doesn't perturb the default response.
 
 ### Endpoint tests
 
 In `tests/test_serve_app.py`:
 
-8. **`GET /api/breakdown/tools?mode=excl_cache_read`** — returns 200; `mode` echoed back; sum of `cost_usd` across tools + unattributed matches the window total from `/api/breakdown/summary` to within float epsilon.
-9. **Default mode** — `GET` without `mode` returns the same per-tool `cost_usd` values as `GET` with `mode=prorata`, and echoes `"mode": "prorata"` in the response envelope.
-10. **Invalid mode value** — `GET ...?mode=bogus` falls back to `prorata` silently (no 4xx); `mode` echoed back as `prorata`.
-11. **Empty window** — range covering zero turns: both modes return `tools=[]` (or just `__unattributed__` with 0.0); no division errors.
+9. **`GET /api/breakdown/tools?mode=excl_cache_read`** — returns 200; `mode` echoed back; sum of `cost_usd` across tools + unattributed matches the window total from `/api/breakdown/summary` to within float epsilon.
+10. **Default mode** — `GET` without `mode` returns the same per-tool `cost_usd` values as `GET` with `mode=prorata`, and echoes `"mode": "prorata"` in the response envelope.
+11. **Invalid mode value** — `GET ...?mode=bogus` falls back to `prorata` silently (no 4xx); `mode` echoed back as `prorata`.
+12. **Empty window** — range covering zero turns: both modes return `tools=[]` (or just `__unattributed__` with 0.0); no division errors.
 
 ### Frontend (manual smoke)
 
 No automated frontend test infrastructure exists in this repo. Smoke loop via running `tokenol serve`:
 
-12. Pill renders in the header; defaults to `PRO-RATA`; switches state on click; persists across page reload.
-13. Clicking a mode pill triggers exactly one `/api/breakdown/tools` fetch and re-renders bars + subtitle.
-14. In `TOKENS` unit mode, the attribution pill group is hidden; switching back to `$` restores it with the persisted selection.
-15. The mode pill is the only thing on the page that changes when toggled (scope-containment sanity check — scorecards, daily charts, by-project, by-model, tool detail page all show identical numbers regardless of mode).
-16. Tooltip on each pill renders the expected explanation.
+13. Pill renders in the header; defaults to `PRO-RATA`; switches state on click; persists across page reload.
+14. Clicking a mode pill triggers exactly one `/api/breakdown/tools` fetch and re-renders bars + subtitle.
+15. In `TOKENS` unit mode, the attribution pill group is hidden; switching back to `$` restores it with the persisted selection.
+16. The mode pill is the only thing on the page that changes when toggled (scope-containment sanity check — scorecards, daily charts, by-project, by-model, tool detail page all show identical numbers regardless of mode).
+17. Tooltip on each pill renders the expected explanation.
 
 ### Optional property test
 
@@ -260,4 +290,5 @@ Generate 20 random valid turns via Hypothesis; assert `total_cost_under_mode == 
 - `GET /api/breakdown/tools?mode=excl_cache_read` shifts `cache_read_usd` from tool bucket to `__unattributed__` such that the per-window total is invariant.
 - The Tool Mix panel header on `/breakdown` renders a `PRO-RATA / EXCL CACHE-READ` pill group, defaulting to `PRO-RATA`, persisted in `localStorage`, hidden when the panel is in `TOKENS` unit mode.
 - Switching the mode pill re-fetches and re-renders Tool Mix only; no other panel reacts.
-- All new unit tests and endpoint tests pass; existing 311-test suite stays green; `ruff check` clean.
+- All new unit tests and endpoint tests pass; existing tests stay green (baseline 311 at spec time); `ruff check src tests` clean.
+- `build_breakdown_tools(turns, mode="prorata")` returns identical output to today's inline-loop implementation in `api_breakdown_tools` (regression-guarded by a dedicated test).
