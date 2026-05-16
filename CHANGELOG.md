@@ -4,6 +4,23 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.1
+
+### Added
+
+- **Attribution mode toggle on the Tool Mix panel.** Two-position pill group in the panel header lets you switch between the existing pro-rata cost split and a new "exclude cache-read" lens. The second mode routes cache_read_usd 100% to the non-tool residual instead of distributing it pro-rata across visible tool bytes, answering "what do tools cost excluding the cost of keeping their output around for subsequent turns?" Selection persists in localStorage; hidden when the panel is displaying token counts (mode is a cost-only concept).
+- `mode=` query parameter on `GET /api/breakdown/tools` — accepts `prorata` (default) or `excl_cache_read`. Unknown values fall back to `prorata` silently. The response echoes the effective `mode` in a new top-level field.
+- `state.build_breakdown_tools(turns, *, mode='prorata') -> list[dict]` — extracts the previously-inline aggregation loop from `api_breakdown_tools` into a unit-testable module-level function.
+
+### Changed
+
+- `_wireUnitPills` (in `breakdown.js`) gains an optional `dataAttr` parameter so a single helper can drive both `data-bdunit` and `data-bdmode` pill groups. Existing call sites unchanged.
+
+### Notes
+
+- No persistence changes — the mode toggle is purely a presentation-layer reinterpretation of already-stored per-turn `tool_costs` data.
+- No changes to other panels — scorecards, daily charts, by-project, by-model, and the tool detail page (`/tool/{name}`) all stay on pro-rata regardless of the toggle.
+
 ## 0.6.0 — 2026-05-15
 
 ### Added
