@@ -1364,6 +1364,31 @@ def build_model_detail(
     }
 
 
+def _recompute_excl_cache_read(turn: Turn) -> dict[str, float]:
+    """Per-tool cost under the 'exclude cache_read' attribution mode.
+
+    cache_read_usd is dropped from the per-tool input pool entirely; its share
+    that would have gone to each tool flows into the non-tool residual computed
+    by the caller. See docs/superpowers/specs/2026-05-16-attribution-mode-toggle-design.md.
+    """
+    usage = turn.usage
+    input_token_pool = (
+        usage.input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens
+    )
+    output_token_count = usage.output_tokens
+    turn_cost = cost_for_turn(turn.model, usage)
+    input_pool_excl = turn_cost.input_usd + turn_cost.cache_creation_usd
+
+    out: dict[str, float] = {}
+    for name, tc in turn.tool_costs.items():
+        in_share = (tc.input_tokens / input_token_pool) if input_token_pool else 0.0
+        out_share = (tc.output_tokens / output_token_count) if output_token_count else 0.0
+        out[name] = in_share * input_pool_excl + out_share * turn_cost.output_usd
+    return out
+
+
 def _accumulate_tool_costs(
     turns: list[Turn], *, with_last_active: bool = True,
 ) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:

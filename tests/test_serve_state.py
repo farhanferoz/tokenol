@@ -12,11 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
-from tokenol.model.events import RawEvent, Session, Turn, Usage
+from tokenol.metrics.cost import cost_for_turn
+from tokenol.model.events import RawEvent, Session, ToolCost, Turn, Usage
 from tokenol.persistence.store import HistoryStore
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
+    _recompute_excl_cache_read,
     build_project_detail,
     build_snapshot_full,
     build_tool_detail,
@@ -873,3 +875,115 @@ def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
         assert {s.session_id for s in r1.sessions} == {s.session_id for s in r2.sessions}
     finally:
         store.close()
+
+
+# ---- _recompute_excl_cache_read tests ---------------------------------
+
+
+def _turn_with_costs(usage: Usage, model: str, tool_costs: dict[str, ToolCost],
+                     *, unattr_input=0.0, unattr_output=0.0, unattr_cost=0.0,
+                     ts: datetime | None = None) -> Turn:
+    ts = ts or datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc)
+    return Turn(
+        dedup_key=f"k-{ts.isoformat()}",
+        timestamp=ts,
+        session_id="s1",
+        model=model,
+        usage=usage,
+        is_sidechain=False,
+        stop_reason="tool_use",
+        tool_costs=tool_costs,
+        unattributed_input_tokens=unattr_input,
+        unattributed_output_tokens=unattr_output,
+        unattributed_cost_usd=unattr_cost,
+    )
+
+
+def test_recompute_excl_cache_read_drops_cache_read_from_input_pool():
+    """A turn with 60% tool byte-share on input and 40% on output should see
+    its cache_read_usd flow entirely to unattributed; tool cost becomes
+    in_share * (input_usd + cache_creation_usd) + out_share * output_usd."""
+    usage = Usage(
+        input_tokens=1_000,
+        output_tokens=10_000,
+        cache_read_input_tokens=900_000,
+        cache_creation_input_tokens=99_000,
+    )
+    # Pool = 1_000_000; 60% tool input share => 600_000 input_tokens stored.
+    # 40% tool output share => 4_000 output_tokens stored.
+    tool_costs = {
+        "Read": ToolCost(tool_name="Read", input_tokens=600_000.0,
+                         output_tokens=4_000.0, cost_usd=0.0),
+    }
+    turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
+    turn_cost = cost_for_turn("claude-opus-4-7", usage)
+
+    result = _recompute_excl_cache_read(turn)
+
+    expected_read = (
+        0.6 * (turn_cost.input_usd + turn_cost.cache_creation_usd)
+        + 0.4 * turn_cost.output_usd
+    )
+    assert result.keys() == {"Read"}
+    assert result["Read"] == pytest.approx(expected_read, rel=1e-9)
+
+
+def test_recompute_excl_cache_read_handles_zero_input_pool():
+    """input_token_pool == 0 should not raise; in_share is 0."""
+    usage = Usage(input_tokens=0, output_tokens=100,
+                  cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    tool_costs = {
+        "Edit": ToolCost(tool_name="Edit", input_tokens=0.0,
+                         output_tokens=80.0, cost_usd=0.0),
+    }
+    turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
+    turn_cost = cost_for_turn("claude-opus-4-7", usage)
+
+    result = _recompute_excl_cache_read(turn)
+
+    # Only output side contributes; out_share = 80/100 = 0.8.
+    assert result["Edit"] == pytest.approx(0.8 * turn_cost.output_usd, rel=1e-9)
+
+
+def test_recompute_excl_cache_read_handles_zero_output_tokens():
+    """output_tokens == 0 (rare but possible) should not raise; out_share is 0."""
+    usage = Usage(input_tokens=1_000, output_tokens=0,
+                  cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
+    tool_costs = {
+        "Read": ToolCost(tool_name="Read", input_tokens=5_000.0,
+                         output_tokens=0.0, cost_usd=0.0),
+    }
+    turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
+    turn_cost = cost_for_turn("claude-opus-4-7", usage)
+
+    result = _recompute_excl_cache_read(turn)
+    # in_share = 5000/10000 = 0.5; out_share = 0.
+    expected = 0.5 * (turn_cost.input_usd + turn_cost.cache_creation_usd)
+    assert result["Read"] == pytest.approx(expected, rel=1e-9)
+
+
+def test_recompute_excl_cache_read_empty_tool_costs():
+    usage = Usage(input_tokens=1_000, output_tokens=1_000,
+                  cache_read_input_tokens=5_000, cache_creation_input_tokens=0)
+    turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs={})
+    assert _recompute_excl_cache_read(turn) == {}
+
+
+def test_recompute_excl_cache_read_linger_only_tool():
+    """Tool with positive input share but zero output share (lingered from
+    a prior turn) gets a non-zero cost on the input side alone."""
+    usage = Usage(input_tokens=0, output_tokens=100,
+                  cache_read_input_tokens=10_000, cache_creation_input_tokens=0)
+    tool_costs = {
+        "Read": ToolCost(tool_name="Read", input_tokens=3_000.0,
+                         output_tokens=0.0, cost_usd=0.0),
+    }
+    turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
+    turn_cost = cost_for_turn("claude-opus-4-7", usage)
+
+    result = _recompute_excl_cache_read(turn)
+
+    # in_share = 3000/10000 = 0.3; out_share = 0; cache_creation is 0.
+    # Tool cost = 0.3 * (input_usd + 0) + 0 * output_usd = 0.3 * input_usd.
+    expected = 0.3 * turn_cost.input_usd
+    assert result["Read"] == pytest.approx(expected, rel=1e-9)
