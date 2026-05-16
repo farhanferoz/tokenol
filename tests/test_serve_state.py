@@ -973,7 +973,7 @@ def test_recompute_excl_cache_read_linger_only_tool():
     """Tool with positive input share but zero output share (lingered from
     a prior turn) gets a non-zero cost on the input side alone."""
     usage = Usage(input_tokens=0, output_tokens=100,
-                  cache_read_input_tokens=10_000, cache_creation_input_tokens=0)
+                  cache_read_input_tokens=7_000, cache_creation_input_tokens=3_000)
     tool_costs = {
         "Read": ToolCost(tool_name="Read", input_tokens=3_000.0,
                          output_tokens=0.0, cost_usd=0.0),
@@ -983,7 +983,10 @@ def test_recompute_excl_cache_read_linger_only_tool():
 
     result = _recompute_excl_cache_read(turn)
 
-    # in_share = 3000/10000 = 0.3; out_share = 0; cache_creation is 0.
-    # Tool cost = 0.3 * (input_usd + 0) + 0 * output_usd = 0.3 * input_usd.
-    expected = 0.3 * turn_cost.input_usd
+    # input_token_pool = 0 + 7000 + 3000 = 10_000
+    # in_share = 3000 / 10000 = 0.3; out_share = 0
+    # input_pool_excl = input_usd + cache_creation_usd (cache_read_usd dropped)
+    # cost = 0.3 * (input_usd + cache_creation_usd) + 0 * output_usd
+    expected = 0.3 * (turn_cost.input_usd + turn_cost.cache_creation_usd)
     assert result["Read"] == pytest.approx(expected, rel=1e-9)
+    assert result["Read"] > 0.0   # non-zero — the whole point of this case
