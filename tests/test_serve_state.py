@@ -1093,3 +1093,93 @@ def test_build_breakdown_tools_prorata_matches_legacy_inline_loop():
 
     got = build_breakdown_tools(turns, mode="prorata")
     assert got == expected
+
+
+def test_build_breakdown_tools_excl_cache_read_total_invariant():
+    """Sum of per-tool cost_usd + __unattributed__ cost_usd under
+    mode='excl_cache_read' must equal sum of cost_for_turn().total_usd
+    across the non-interrupted turns (total cost is mode-invariant)."""
+    turns = _btt_turns_fixture()
+    expected_total = sum(
+        cost_for_turn(t.model, t.usage).total_usd for t in turns if not t.is_interrupted
+    )
+
+    got = build_breakdown_tools(turns, mode="excl_cache_read")
+    got_total = sum(row["cost_usd"] for row in got)
+    assert got_total == pytest.approx(expected_total, rel=1e-9)
+
+
+def test_build_breakdown_tools_excl_cache_read_shifts_cache_read_to_unattributed():
+    """The __unattributed__ row in excl_cache_read mode must be strictly larger
+    than in prorata mode by the amount of cache_read_usd that previously
+    flowed to tools (since cache_read now flows 100% to unattributed)."""
+    # Build a realistic fixture where tool_costs track token shares correctly
+    # and include pre-computed costs as they would be in real operation.
+    t0 = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
+    usage = Usage(input_tokens=1_000, output_tokens=100,
+                  cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
+    turn_cost = cost_for_turn("claude-opus-4-7", usage)
+    # Tool uses 50% of input pool (5_000 / 10_000), 40% of output (40 / 100).
+    # In prorata, tool cost = 0.5 * (input_usd + cache_read_usd + 0) + 0.4 * output_usd
+    in_share = 0.5
+    out_share = 0.4
+    tool_cost_prorata = in_share * (turn_cost.input_usd + turn_cost.cache_read_usd) + out_share * turn_cost.output_usd
+    unattr_cost_prorata = turn_cost.total_usd - tool_cost_prorata
+
+    turns = [
+        Turn(
+            dedup_key="k0", timestamp=t0, session_id="s1",
+            model="claude-opus-4-7", usage=usage,
+            is_sidechain=False, stop_reason="tool_use",
+            tool_use_count=1, tool_names=Counter({"Read": 1}),
+            tool_costs={
+                "Read": ToolCost(tool_name="Read", input_tokens=5_000.0,
+                                 output_tokens=40.0, cost_usd=tool_cost_prorata),
+            },
+            unattributed_input_tokens=5_000.0, unattributed_output_tokens=60.0,
+            unattributed_cost_usd=unattr_cost_prorata,
+        ),
+    ]
+
+    pro = {row["name"]: row["cost_usd"] for row in build_breakdown_tools(turns, mode="prorata")}
+    exc = {row["name"]: row["cost_usd"] for row in build_breakdown_tools(turns, mode="excl_cache_read")}
+
+    # The cache_read share that flows to tools in prorata is:
+    # in_share * cache_read_usd = 0.5 * cache_read_usd
+    # In excl mode, this entire amount flows to unattributed instead.
+    expected_unattr_growth = in_share * turn_cost.cache_read_usd
+    actual_growth = exc["__unattributed__"] - pro["__unattributed__"]
+    assert actual_growth == pytest.approx(expected_unattr_growth, rel=1e-9)
+
+
+def test_build_breakdown_tools_non_cost_fields_are_mode_invariant():
+    """count, last_active, tool_count, and tool ordering must be identical
+    between prorata and excl_cache_read modes (only cost_usd is recomputed)."""
+    turns = _btt_turns_fixture()
+    pro = build_breakdown_tools(turns, mode="prorata")
+    exc = build_breakdown_tools(turns, mode="excl_cache_read")
+
+    assert [r["name"] for r in pro] == [r["name"] for r in exc]
+    for p, e in zip(pro, exc, strict=True):
+        for key in ("count", "last_active", "tool_count"):
+            if key in p or key in e:
+                assert p.get(key) == e.get(key), f"{p['name']} {key} drift"
+
+
+def test_build_breakdown_tools_excludes_interrupted_turns():
+    """Interrupted turns must contribute to neither mode."""
+    t_ok = _btt_turns_fixture()[0]
+    t_interrupt = Turn(
+        dedup_key="k-int",
+        timestamp=datetime(2026, 5, 14, 13, 0, tzinfo=timezone.utc),
+        session_id="s1", model="claude-opus-4-7", usage=Usage(),
+        is_sidechain=False, stop_reason=None, is_interrupted=True,
+        tool_use_count=1, tool_names=Counter({"Read": 1}),
+    )
+    got_pro = build_breakdown_tools([t_ok, t_interrupt], mode="prorata")
+    got_exc = build_breakdown_tools([t_ok, t_interrupt], mode="excl_cache_read")
+    # The Read row's count should be 1 (from the one healthy turn) in both.
+    by_name_pro = {r["name"]: r for r in got_pro}
+    by_name_exc = {r["name"]: r for r in got_exc}
+    assert by_name_pro["Read"]["count"] == 1
+    assert by_name_exc["Read"]["count"] == 1
