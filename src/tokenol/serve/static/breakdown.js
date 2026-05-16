@@ -34,6 +34,23 @@ let _bdProjectUnit = localStorage.getItem(_LS_BD_PROJECT_UNIT) || 'tokens';
 let _bdModelUnit   = localStorage.getItem(_LS_BD_MODEL_UNIT)   || 'tokens';
 let _bdToolUnit    = localStorage.getItem(_LS_BD_TOOL_UNIT)    || 'cost';
 
+// Per-panel period overrides. The page-level period (sessionStorage) drives
+// the scorecards + daily charts; the three breakdown panels each persist
+// their own period in localStorage so the user can compare different windows
+// across panels (e.g., last 7d of tool spend vs last 90d of project mix).
+const _LS_BD_PROJECT_PERIOD = 'tokenol.breakdown.projectPeriod';
+const _LS_BD_MODEL_PERIOD   = 'tokenol.breakdown.modelPeriod';
+const _LS_BD_TOOL_PERIOD    = 'tokenol.breakdown.toolPeriod';
+
+function _readPanelPeriod(key) {
+  const v = localStorage.getItem(key);
+  return VALID_RANGES.has(v) ? v : '30d';
+}
+
+let _bdProjectPeriod = _readPanelPeriod(_LS_BD_PROJECT_PERIOD);
+let _bdModelPeriod   = _readPanelPeriod(_LS_BD_MODEL_PERIOD);
+let _bdToolPeriod    = _readPanelPeriod(_LS_BD_TOOL_PERIOD);
+
 // ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
@@ -419,40 +436,43 @@ function renderToolMix(data) {
   const tools = d.tools || [];
   const useCost = _bdToolUnit === 'cost';
 
-  // Filter the unattributed sentinel out of the count for the subheading, and
-  // show "N tools · $X total" in cost mode, "N tools · Y calls" in tokens mode.
+  // The unattributed sentinel is the non-tool cost residual (prompts, text,
+  // thinking, cached conversation history, plus a small attribution gap from
+  // compaction edges). It's not a tool, so we surface it as a number in the
+  // subtitle rather than as a bar that would visually claim "this tool
+  // dominates everything."
   const realTools = tools.filter(t => t.name !== UNATTRIBUTED_TOOL);
+  const unattrRow = tools.find(t => t.name === UNATTRIBUTED_TOOL);
+  const nonToolCost = unattrRow ? (unattrRow.cost_usd || 0) : 0;
   const totalCalls = realTools.reduce((s, t) => s + (t.count || 0), 0);
-  const totalCost = realTools.reduce((s, t) => s + (t.cost_usd || 0), 0);
+  const toolCost = realTools.reduce((s, t) => s + (t.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-tools-sub');
   if (realTools.length === 0) {
     subEl.textContent = 'no tool calls';
+  } else if (useCost) {
+    subEl.textContent =
+      `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ` +
+      `${fmtUSD(toolCost)} tool cost · ${fmtUSD(nonToolCost)} non-tool`;
   } else {
-    subEl.textContent = useCost
-      ? `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ${fmtUSD(totalCost)} attributed`
-      : `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ${fmtInt(totalCalls)} calls`;
+    subEl.textContent =
+      `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ` +
+      `${fmtInt(totalCalls)} calls`;
   }
 
-  const rows = tools.map(t => {
-    let kind;
-    if (t.name === 'other') kind = 'other';
-    if (t.name === UNATTRIBUTED_TOOL) kind = 'unattributed';
+  const rows = realTools.map(t => {
+    const kind = t.name === 'other' ? 'other' : undefined;
     // "other" row carries two distinct counts: tool_count (number of collapsed
     // tools, used in the label) and count (sum of their invocations, used as
     // the bar value in tokens mode).
     const collapsedTools = t.tool_count || 0;
-    const displayName = t.name === UNATTRIBUTED_TOOL
-      ? 'unattributed'
-      : (t.name === 'other'
-        ? `other (${collapsedTools} tool${collapsedTools === 1 ? '' : 's'})`
-        : t.name);
+    const displayName = t.name === 'other'
+      ? `other (${collapsedTools} tool${collapsedTools === 1 ? '' : 's'})`
+      : t.name;
     const lastActiveDate = t.last_active ? t.last_active.slice(0, 10) : null;
     const callCount = t.count || 0;
-    const sublabel = kind === 'unattributed'
-      ? undefined
-      : (lastActiveDate
-        ? `${callCount} call${callCount === 1 ? '' : 's'} · ${lastActiveDate}`
-        : `${callCount} call${callCount === 1 ? '' : 's'}`);
+    const sublabel = lastActiveDate
+      ? `${callCount} call${callCount === 1 ? '' : 's'} · ${lastActiveDate}`
+      : `${callCount} call${callCount === 1 ? '' : 's'}`;
     return {
       label: displayName,
       sublabel,
@@ -655,21 +675,44 @@ function wirePeriodPills() {
   }
 }
 
+function _wirePanelPeriodPills(groupId, getCur, setCur, onChange) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  // Sync initial DOM state to persisted value.
+  for (const span of group.querySelectorAll('[data-range]')) {
+    span.classList.toggle('on', span.dataset.range === getCur());
+  }
+  for (const span of group.querySelectorAll('[data-range]')) {
+    span.addEventListener('click', () => {
+      const r = span.dataset.range;
+      if (!VALID_RANGES.has(r) || r === getCur()) return;
+      setCur(r);
+      for (const s of group.querySelectorAll('[data-range]')) {
+        s.classList.toggle('on', s === span);
+      }
+      onChange();
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
 
 async function refreshAll() {
-  const range = getPeriod();
+  // The page-level period drives only the scorecards + daily charts now; each
+  // breakdown panel pulls its own period so the user can compare different
+  // windows across panels.
+  const globalRange = getPeriod();
   try {
     await whenChartReady();
     configureChartDefaults();
     const [summary, daily, byProject, byModel, tools] = await Promise.all([
-      fetchSummary(range),
-      fetchDailyTokens(range),
-      fetchByProject(range),
-      fetchByModel(range),
-      fetchTools(range),
+      fetchSummary(globalRange),
+      fetchDailyTokens(globalRange),
+      fetchByProject(_bdProjectPeriod),
+      fetchByModel(_bdModelPeriod),
+      fetchTools(_bdToolPeriod),
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
@@ -680,6 +723,22 @@ async function refreshAll() {
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
+}
+
+async function refreshByProject() {
+  try {
+    renderByProject(await fetchByProject(_bdProjectPeriod));
+  } catch (err) { console.error('[breakdown] project refresh', err); }
+}
+async function refreshByModel() {
+  try {
+    renderByModel(await fetchByModel(_bdModelPeriod));
+  } catch (err) { console.error('[breakdown] model refresh', err); }
+}
+async function refreshTools() {
+  try {
+    renderToolMix(await fetchTools(_bdToolPeriod));
+  } catch (err) { console.error('[breakdown] tools refresh', err); }
 }
 
 // ---------------------------------------------------------------------------
@@ -735,4 +794,23 @@ _wireUnitPills('bd-tools-unit-pills', _LS_BD_TOOL_UNIT,
   v  => { _bdToolUnit = v; },
   () => renderToolMix(null),
 );
+
+// Per-panel period pills — each panel refreshes only its own data so the
+// other panels keep their independent windows.
+_wirePanelPeriodPills('bd-project-period-pills',
+  () => _bdProjectPeriod,
+  p  => { _bdProjectPeriod = p; localStorage.setItem(_LS_BD_PROJECT_PERIOD, p); },
+  refreshByProject,
+);
+_wirePanelPeriodPills('bd-model-period-pills',
+  () => _bdModelPeriod,
+  p  => { _bdModelPeriod = p; localStorage.setItem(_LS_BD_MODEL_PERIOD, p); },
+  refreshByModel,
+);
+_wirePanelPeriodPills('bd-tools-period-pills',
+  () => _bdToolPeriod,
+  p  => { _bdToolPeriod = p; localStorage.setItem(_LS_BD_TOOL_PERIOD, p); },
+  refreshTools,
+);
+
 loadThresholdsFromPrefs().then(() => refreshAll());
