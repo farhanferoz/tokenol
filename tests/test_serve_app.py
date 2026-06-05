@@ -1341,7 +1341,9 @@ async def test_project_detail_includes_by_tool(tmp_path: Path) -> None:
     with _mock_dirs(tmp_path):
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get(f"/api/project/{cwd_b64}")
+            # range=all so the fixture's absolute 2026-05-15 timestamps stay
+            # in scope regardless of when the suite runs (default is 14d).
+            resp = await client.get(f"/api/project/{cwd_b64}?range=all")
 
     assert resp.status_code == 200
     data = resp.json()
