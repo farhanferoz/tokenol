@@ -17,7 +17,7 @@ Claude Code bills you for everything the model reads — input, output, **and** 
 
 ![Main dashboard](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/main.jpg)
 
-Breakdowns tab — daily work / cache trends, project · model · tool mix with click-through. Daily Billable Tokens, Tokens by Project, Model Mix, **and Tool Mix** each have a small `TOKENS / $` toggle that swaps token counts for actual cost without a roundtrip. Tool Mix in `$` mode also exposes a **PRO-RATA / EXCL CACHE-READ** attribution toggle that controls whether `cache_read_usd` is split across visible tools by byte share or routed entirely to a non-tool residual:
+Breakdown page — daily work / cache trends plus four entity mixes (project · model · tool · skill) under one **Breakdowns** section, each row clicking through to a detail page. Daily Billable Tokens, Tokens by Project, Model Mix, Tool Mix, **and Skill Mix** each have a small `TOKENS / $` toggle that swaps token counts for actual cost without a roundtrip; the Tool Mix and Skill Mix subheadings also report their share of the whole (% of total spend in `$`, % of billable tokens under `TOKENS` — the two differ because $/token isn't uniform). Tool Mix in `$` mode additionally exposes a **PRO-RATA / EXCL CACHE-READ** attribution toggle that controls whether `cache_read_usd` is split across visible tools by byte share or routed entirely to a non-tool residual. Every panel carries a small ⓘ with a plain-language note on what it does and doesn't measure (per-tool and unrecognised-model costs are estimates; Skill Mix excludes un-skilled work, so it won't sum to the total):
 
 ![Breakdowns, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_top.jpg)
 ![Breakdowns, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/breakdown_bottom.jpg)
@@ -27,7 +27,7 @@ Session drill-down — pattern detection + cost-per-turn small multiples:
 ![Session drill-down, top](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_top.jpg)
 ![Session drill-down, lower panels](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/session_bottom.jpg)
 
-Project page — cache efficiency trend, verdict distribution, top turns, **and cost-by-tool**:
+Project page — cache efficiency trend, verdict distribution, top turns, **and cost-by-tool / cost-by-skill**:
 
 ![Project page](https://raw.githubusercontent.com/farhanferoz/tokenol/main/docs/screenshots/project.jpg)
 
@@ -237,6 +237,16 @@ Every assistant turn's cost is split across the tools it invoked, surfacing acro
 Tools whose byte shares sum below 1.0 (because non-tool content like user prompts and assistant text also lives in the window) leave the residual as `__unattributed__`. Compaction is detected heuristically when the assistant's input token pool drops below **20 %** of the session's running peak (`COMPACTION_DROP_RATIO = 0.2` in `src/tokenol/ingest/parser.py`); when it fires, the per-session byte tallies reset, the input side of the detection turn flows entirely into `__unattributed__` (no tool bytes remain in the window), and subsequent turns rebuild their per-tool tallies from scratch.
 
 The per-tool data is dashboard-only — there is no `tokenol tools` CLI command. See [`docs/METRICS.md`](docs/METRICS.md) for the full attribution formula and the API surface (`/api/breakdown/tools`, `/api/tool/<name>`, plus the `by_tool` blocks on project and model endpoints).
+
+### Per-skill cost attribution
+
+Claude Code tags every turn that runs under a skill — inline work and sidechain sub-agents alike — with an `attributionSkill` field, so skill cost is **turn-level**: a turn belongs wholly to one skill or to none, with no byte-share split. Surfaced across the dashboard:
+
+- **Skill Mix panel** (Breakdowns) — top-10 skills ranked by spend (or invocation count, via the `TOKENS / $` toggle), an `other` tail, and a `+N started with no separate cost` footnote for skills that ran but had no cost billed to them. Unlike Tool Mix there is no `__unattributed__` row: turns with no skill are simply excluded — the vast majority of interactive work runs under none — so the panel intentionally does not reconcile to overall spend. Its subheading reports the fraction that does run under a skill (~% of total spend in `$`, ~% of billable tokens under `TOKENS`).
+- **Skill detail page** (`/skill/<name>`) — 30-day daily cost chart, scorecards (Est. Cost · Output tokens · Invocations · Top project), cost-by-model and cost-by-project ranked bars, and the headline **inline vs sub-agent** cost split.
+- **Project and model detail pages** — each gains a "Cost by skill" ranked-bar list, symmetric with cost-by-tool.
+
+A skill's cost includes its sub-agent fan-out; nested skills (one skill triggering another) roll into the skill you launched; and skills used before Claude Code began emitting `attributionSkill` don't appear. Like the per-tool data it is dashboard-only, exposed via `/api/breakdown/skills`, `/api/skill/<name>`, and the `by_skill` blocks on project and model endpoints.
 
 ## What it detects
 
