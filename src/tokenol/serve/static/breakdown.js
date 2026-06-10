@@ -93,6 +93,15 @@ function fmtPct(n, decimals = 1) {
   return `${n.toFixed(decimals)}%`;
 }
 
+// A " · X% <label>" subheading fragment, or '' when the whole is zero. Shared by
+// Tool Mix and Skill Mix: both report an amount plus its share of the whole,
+// matched to the active unit (spend in $ mode, billable tokens under Tokens).
+// The two shares genuinely differ because $/token isn't uniform (model + cache
+// mix); the shared helper just keeps the wording and precision from drifting.
+function shareSuffix(part, whole, label) {
+  return whole > 0 ? ` · ${fmtPct((part / whole) * 100, 0)} ${label}` : '';
+}
+
 // ---------------------------------------------------------------------------
 // Summary / scorecard
 // ---------------------------------------------------------------------------
@@ -481,18 +490,12 @@ function renderToolMix(data) {
   const nonToolCost = unattrRow ? (unattrRow.cost_usd || 0) : 0;
   const toolCost = realTools.reduce((s, t) => s + (t.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-tools-sub');
-  // Both views report actual amounts + a share, matched to the unit: dollars
-  // and "% of total spend" in $ mode; billable tokens (input+output, no cache)
-  // and "% of billable tokens" under Tokens. The two shares differ because
-  // $/token isn't uniform (model + cache mix).
   const grandTool = toolCost + nonToolCost;
-  const spendShare = grandTool > 0
-    ? ` · ${fmtPct((toolCost / grandTool) * 100, 0)} of total spend` : '';
+  const spendShare = shareSuffix(toolCost, grandTool, 'of total spend');
   const totBill = d.total_billable_tokens || 0;
   const nonToolBill = d.nontool_billable_tokens || 0;
   const toolBill = Math.max(0, totBill - nonToolBill);
-  const tokShare = totBill > 0
-    ? ` · ${fmtPct((toolBill / totBill) * 100, 0)} of billable tokens` : '';
+  const tokShare = shareSuffix(toolBill, totBill, 'of billable tokens');
   if (realTools.length === 0) {
     subEl.textContent = 'no tool calls';
   } else if (useCost) {
@@ -546,18 +549,17 @@ function renderSkillMix(data) {
 
   const totalCost = skills.reduce((s, sk) => s + (sk.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-skills-sub');
-  // Both views report actual amounts + a share, matched to the unit: dollars
-  // and "% of total spend" in $ mode; billable tokens (input+output, no cache)
-  // and "% of billable tokens" under Tokens.
   const grandCost = d.total_cost || 0;
-  const spendShare = grandCost > 0
-    ? ` · ${fmtPct((totalCost / grandCost) * 100, 0)} of total spend` : '';
+  const spendShare = shareSuffix(totalCost, grandCost, 'of total spend');
   const totBill = d.total_billable_tokens || 0;
   const skillBill = d.skill_billable_tokens || 0;
-  const tokShare = totBill > 0
-    ? ` · ${fmtPct((skillBill / totBill) * 100, 0)} of billable tokens` : '';
+  const tokShare = shareSuffix(skillBill, totBill, 'of billable tokens');
   if (skills.length === 0) {
-    subEl.textContent = 'no skill usage';
+    // Panel ranks by cost, so an empty list means no cost-bearing skill — but
+    // skills may still have run uncharged (reported in the footer below). Say
+    // "no skill cost" in that case so the subheading and footer don't contradict.
+    const ranUncharged = d.invoked_no_cost && d.invoked_no_cost.skills > 0;
+    subEl.textContent = ranUncharged ? 'no skill cost' : 'no skill usage';
   } else if (useCost) {
     subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtUSD(totalCost)} under skills${spendShare}`;
   } else {
