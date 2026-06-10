@@ -29,6 +29,7 @@ from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     _grouped_cwd_by_sid,
+    build_breakdown_skills,
     build_breakdown_tools,
     build_daily_panel,
     build_day_detail,
@@ -38,6 +39,7 @@ from tokenol.serve.state import (
     build_project_detail,
     build_recent_activity_panel,
     build_search_results,
+    build_skill_detail,
     build_snapshot_full,
     build_tool_detail,
     decode_cwd,
@@ -272,6 +274,16 @@ def create_app(
         p = STATIC_DIR / "tool.html"
         return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
 
+    @app.get("/skill/{name}", include_in_schema=False)
+    async def skill_page(name: str):
+        p = STATIC_DIR / "skill.html"
+        return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
+
+    @app.get("/skills", include_in_schema=False)
+    async def skills_page():
+        # "Skills" nav tab lands on the Breakdown page's Skill Mix section.
+        return FileResponse(str(STATIC_DIR / "breakdown.html"))
+
     @app.get("/api/snapshot")
     async def api_snapshot(request: Request, period: str = "today"):
         # Reuse the broadcaster's cached payload when a SSE group is live for
@@ -501,6 +513,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="Tool not found")
         return JSONResponse(detail)
 
+    @app.get("/api/skill/{name:path}")
+    async def api_skill_detail(name: str, request: Request):
+        name = _validate_tool_or_model_name(name)
+        result = _current_snapshot_result(request)
+        detail = build_skill_detail(name, result.turns, result.sessions)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        return JSONResponse(detail)
+
     @app.get("/api/search")
     async def api_search(request: Request, q: str = ""):
         if not q.strip():
@@ -722,5 +743,21 @@ def create_app(
         ]
         tools = build_breakdown_tools(filtered, mode=mode)
         return JSONResponse({"range": range, "mode": mode, "tools": tools})
+
+    @app.get("/api/breakdown/skills")
+    async def api_breakdown_skills(request: Request, range: str = "30d"):
+        _validate_breakdown_range(range)
+        result = _current_snapshot_result(request)
+        since = (
+            range_since(range, datetime.now(tz=timezone.utc).date())
+            if range != "all"
+            else None
+        )
+        filtered = [
+            t for t in result.turns
+            if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
+        ]
+        skills = build_breakdown_skills(filtered)
+        return JSONResponse({"range": range, "skills": skills})
 
     return app

@@ -1464,3 +1464,50 @@ async def test_breakdown_tools_empty_window(tmp_path: Path) -> None:
         assert non_unattr == []
         unattr = [t for t in body["tools"] if t["name"] == "__unattributed__"]
         assert unattr == [] or unattr[0]["cost_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_api_breakdown_skills(tmp_path: Path) -> None:
+    """GET /api/breakdown/skills returns 200 + skills list envelope."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/skills?range=all")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["range"] == "all"
+    assert isinstance(body["skills"], list)
+
+
+@pytest.mark.asyncio
+async def test_api_skill_detail_404_for_unknown(tmp_path: Path) -> None:
+    """GET /api/skill/<unknown> returns 404."""
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/skill/definitely-not-a-skill")
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_skill_page_serves_html(tmp_path: Path) -> None:
+    """GET /skill/<name> serves an HTML page."""
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/skill/tiered-review")
+
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
