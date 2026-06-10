@@ -1514,6 +1514,38 @@ async def test_skill_page_serves_html(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_skills_is_a_breakdown_panel_not_a_tab(tmp_path: Path) -> None:
+    """Skills is a peer entity-mix panel on the Breakdown page, not a tab/route.
+
+    The `/skills` landing route is gone (404), and no "Skills" nav tab is
+    rendered on Overview or Breakdown — but the Skill Mix panel still ships on
+    the Breakdown page and the `/skill/<name>` detail page still serves HTML.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            skills_route = await client.get("/skills")
+            overview = await client.get("/")
+            breakdown = await client.get("/breakdown")
+            detail = await client.get("/skill/tiered-review")
+
+    # The dedicated landing route never shipped — it now 404s.
+    assert skills_route.status_code == 404
+    # No "Skills" nav tab on either page.
+    assert '>Skills</a>' not in overview.text
+    assert '>Skills</a>' not in breakdown.text
+    assert 'href="/skills"' not in overview.text
+    assert 'href="/skills"' not in breakdown.text
+    # The Skill Mix panel still lives on the Breakdown page.
+    assert 'bp-skills-bars' in breakdown.text
+    # Click-through to a per-skill detail page is unchanged.
+    assert detail.status_code == 200
+    assert "text/html" in detail.headers["content-type"]
+
+
+@pytest.mark.asyncio
 async def test_api_breakdown_skills_populated_end_to_end(tmp_path: Path) -> None:
     """The served snapshot path carries skill attribution end-to-end (regression
     guard for the _build_turns_and_sessions wiring)."""

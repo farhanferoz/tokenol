@@ -279,11 +279,6 @@ def create_app(
         p = STATIC_DIR / "skill.html"
         return FileResponse(str(p)) if p.exists() else FileResponse(str(STATIC_DIR / "index.html"))
 
-    @app.get("/skills", include_in_schema=False)
-    async def skills_page():
-        # "Skills" nav tab lands on the Breakdown page's Skill Mix section.
-        return FileResponse(str(STATIC_DIR / "breakdown.html"))
-
     @app.get("/api/snapshot")
     async def api_snapshot(request: Request, period: str = "today"):
         # Reuse the broadcaster's cached payload when a SSE group is live for

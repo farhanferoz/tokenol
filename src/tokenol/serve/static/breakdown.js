@@ -911,18 +911,4 @@ _wirePanelPeriodPills('bd-skills-period-pills',
   refreshSkills,
 );
 
-// The "Skills" nav tab routes here (/skills) and lands on the Skill Mix panel.
-// Move the active-tab highlight off "Breakdown" and scroll the panel into view
-// so the user sees why they're here.
-if (location.pathname === '/skills') {
-  for (const tab of document.querySelectorAll('.nav-tabs .nav-tab')) {
-    const isSkills = tab.getAttribute('href') === '/skills';
-    tab.classList.toggle('is-active', isSkills);
-    if (isSkills) tab.setAttribute('aria-current', 'page');
-    else tab.removeAttribute('aria-current');
-  }
-  const panel = document.getElementById('bp-skills-title');
-  if (panel) panel.scrollIntoView({ block: 'start' });
-}
-
 loadThresholdsFromPrefs().then(() => refreshAll());

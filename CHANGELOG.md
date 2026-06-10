@@ -8,7 +8,7 @@ All notable changes to tokenol are documented here. The format follows
 
 ### Added
 
-- **Skills cost dimension.** New first-class Skill dimension parallel to Tools/Models/Projects, driven by Claude Code's `attributionSkill` log tag. A "Skill Mix" panel on the Breakdown page ranks skills by cost (incl. their sub-agent fan-out); a Skill detail page (`/skill/{name}`) shows scorecards, a 30-day daily-cost chart, cost-by-model / cost-by-project, and an **inline vs sub-agent** cost split. Model and Project detail pages gain a Cost-by-skill bar; a "Skills" nav tab is added. The previously-misleading single "Skill" row in Tool Mix (trigger cost only) is dropped in favour of the real per-skill numbers.
+- **Skills cost dimension.** New first-class Skill dimension parallel to Tools/Models/Projects, driven by Claude Code's `attributionSkill` log tag. A "Skill Mix" panel sits alongside the Tool/Model/Project mixes in the Breakdown page's Breakdowns section, ranking skills by cost (incl. their sub-agent fan-out); a Skill detail page (`/skill/{name}`) shows scorecards, a 30-day daily-cost chart, cost-by-model / cost-by-project, and an **inline vs sub-agent** cost split. Model and Project detail pages gain a Cost-by-skill bar. The previously-misleading single "Skill" row in Tool Mix (trigger cost only) is dropped in favour of the real per-skill numbers.
 
 ## 0.6.1 — 2026-05-16
 
