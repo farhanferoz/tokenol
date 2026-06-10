@@ -1466,6 +1466,49 @@ def build_breakdown_tools(
     return ranked
 
 
+def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
+    """Build the ranked skill list for GET /api/breakdown/skills.
+
+    Skill cost is turn-level: a turn's full cost_usd is credited to its
+    `attribution_skill` (which tags both inline main-thread work and sidechain
+    sub-agents). Unlike tools there is no byte-share split and no
+    `__unattributed__` row — turns with no skill are simply excluded, since the
+    vast majority of normal interactive work runs under no skill.
+
+    Returns top-`top_n` skills by cost + a collapsed `other` tail row.
+    `invocations` come from Skill-tool trigger blocks (`skill_names`).
+    """
+    cost_by_skill: dict[str, float] = {}
+    inv_by_skill: Counter[str] = Counter()
+    last_active: dict[str, datetime] = {}
+
+    for t in turns:
+        if t.is_interrupted:
+            continue
+        if t.skill_names:
+            inv_by_skill.update(t.skill_names)
+        skill = t.attribution_skill
+        if not skill:
+            continue
+        cost_by_skill[skill] = cost_by_skill.get(skill, 0.0) + t.cost_usd
+        if skill not in last_active or t.timestamp > last_active[skill]:
+            last_active[skill] = t.timestamp
+
+    ranked = _rank_dict_with_others(cost_by_skill, top_n=top_n)
+    head_names = {r["name"] for r in ranked if r["name"] != "other"}
+    tail_inv_sum = sum(c for n, c in inv_by_skill.items() if n not in head_names)
+    for row in ranked:
+        name = row["name"]
+        if name == "other":
+            row["invocations"] = tail_inv_sum
+        else:
+            row["invocations"] = inv_by_skill.get(name, 0)
+            if name in last_active:
+                row["last_active"] = last_active[name].isoformat()
+        row["cost_usd"] = row.pop("value")
+    return ranked
+
+
 def _accumulate_tool_costs(
     turns: list[Turn], *, with_last_active: bool = True,
 ) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
