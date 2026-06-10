@@ -1427,7 +1427,10 @@ def build_breakdown_tools(
         if t.is_interrupted:
             continue
         if t.tool_names:
-            tokens_by_tool.update(t.tool_names)
+            # The literal `Skill` tool is the trigger-call byte-share only; its
+            # real cost is owned by the dedicated Skill dimension. Strip it so
+            # the two don't double-read.
+            tokens_by_tool.update({n: c for n, c in t.tool_names.items() if n != "Skill"})
 
         if excl:
             turn_cost = cost_for_turn(t.model, t.usage)
@@ -1441,6 +1444,8 @@ def build_breakdown_tools(
             residual = t.unattributed_cost_usd + per_tool.pop(UNKNOWN_TOOL, 0.0)
 
         for name, cost in per_tool.items():
+            if name == "Skill":
+                continue  # represented by the dedicated Skill dimension
             cost_by_tool[name] = cost_by_tool.get(name, 0.0) + cost
             if name in t.tool_names and (
                 name not in last_active or t.timestamp > last_active[name]
@@ -1548,7 +1553,7 @@ def build_tool_detail(
     sessions: list[Session],
 ) -> dict | None:
     """Build the tool drill-down payload for GET /api/tool/{name}."""
-    if name in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL):
+    if name in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, "Skill"):
         return None
     tool_turns = [
         t for t in turns

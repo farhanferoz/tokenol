@@ -5,8 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenol.ingest.builder import build_turns
-from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, Turn, Usage
-from tokenol.serve.state import build_breakdown_skills, build_skill_detail
+from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost, Turn, Usage
+from tokenol.serve.state import (
+    build_breakdown_skills,
+    build_breakdown_tools,
+    build_skill_detail,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -118,3 +122,20 @@ def test_build_skill_detail_splits_inline_vs_subagent():
 
 def test_build_skill_detail_unknown_returns_none():
     assert build_skill_detail("nope", [], []) is None
+
+
+def test_tool_mix_excludes_literal_skill_row():
+    t = Turn(
+        dedup_key="k", timestamp=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
+        session_id="s", model="claude-opus-4-8",
+        usage=Usage(input_tokens=1000, output_tokens=100),
+        is_sidechain=False, stop_reason="tool_use",
+    )
+    t.cost_usd = 0.10
+    t.tool_names = Counter({"Skill": 1, "Read": 2})
+    t.tool_costs = {"Skill": ToolCost("Skill", cost_usd=0.02),
+                    "Read": ToolCost("Read", cost_usd=0.05)}
+    rows = build_breakdown_tools([t])
+    names = {r["name"] for r in rows}
+    assert "Skill" not in names
+    assert "Read" in names
