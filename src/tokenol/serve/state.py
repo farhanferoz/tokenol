@@ -190,6 +190,8 @@ def _build_turns_and_sessions(
             unattributed_input_tokens=ev.unattributed_input_tokens,
             unattributed_output_tokens=ev.unattributed_output_tokens,
             unattributed_cost_usd=ev.unattributed_cost_usd,
+            attribution_skill=ev.attribution_skill,
+            skill_names=ev.skill_names,
         ))
 
     session_turns: dict[str, list[Turn]] = defaultdict(list)
