@@ -12,6 +12,7 @@ from pathlib import Path
 from tokenol.enums import AssumptionTag
 from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import (
+    EMPTY_SKILL_NAMES,
     EMPTY_TOOL_COSTS,
     EMPTY_TOOL_NAMES,
     RawEvent,
@@ -86,6 +87,20 @@ def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
     if not tool_names:
         return EMPTY_TOOL_NAMES, tool_use_total, tool_error
     return tool_names, tool_use_total, tool_error
+
+
+def _extract_skill_names(content: list) -> Counter[str]:
+    """Count Skill-tool invocations by slug from `input.skill` of `Skill` blocks."""
+    skills: Counter[str] = Counter()
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use" and block.get("name") == "Skill":
+            inp = block.get("input")
+            slug = inp.get("skill") if isinstance(inp, dict) else None
+            if isinstance(slug, str) and slug:
+                skills[slug] += 1
+    return skills
 
 
 def _block_bytes(block: dict) -> int:
@@ -243,6 +258,8 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
             elif not isinstance(content, list):
                 content = []
             tool_names, tool_use_count, tool_error_count = _extract_tool_blocks(content)
+            skill_names = _extract_skill_names(content)
+            attribution_skill: str | None = ev.get("attributionSkill") or None
 
             usage = _parse_usage(msg)
             model = ev.get("model") or msg.get("model")
@@ -348,6 +365,8 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 unattributed_input_tokens=unattr_in,
                 unattributed_output_tokens=unattr_out,
                 unattributed_cost_usd=unattr_cost,
+                attribution_skill=attribution_skill,
+                skill_names=skill_names if skill_names else EMPTY_SKILL_NAMES,
             )
 
 

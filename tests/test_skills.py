@@ -2,8 +2,12 @@
 
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 
+from tokenol.ingest.builder import build_turns
 from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Turn, Usage
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_turn_has_skill_fields_with_defaults():
@@ -29,4 +33,22 @@ def test_rawevent_has_skill_fields_with_defaults():
 
 
 def test_empty_skill_names_sentinel_is_empty_counter():
-    assert EMPTY_SKILL_NAMES == Counter()
+    assert Counter() == EMPTY_SKILL_NAMES
+
+
+def test_parser_reads_attribution_skill_and_invocations():
+    turns = build_turns([FIXTURES / "skills.jsonl"])
+    assert len(turns) == 3
+
+    trigger = turns[0]
+    assert trigger.skill_names == Counter({"tiered-review": 1})
+    assert trigger.attribution_skill is None  # trigger turn itself isn't attributed
+
+    subagent = turns[1]
+    assert subagent.attribution_skill == "tiered-review"
+    assert subagent.is_sidechain is True
+    assert subagent.skill_names == Counter()
+
+    inline = turns[2]
+    assert inline.attribution_skill == "simplify"
+    assert inline.is_sidechain is False
