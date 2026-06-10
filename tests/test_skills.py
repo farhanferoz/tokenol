@@ -14,6 +14,7 @@ from tokenol.serve.state import (
     billable_token_totals,
     build_breakdown_skills,
     build_breakdown_tools,
+    build_skill_breakdown,
     build_skill_detail,
     count_invoked_without_cost,
     derive_delta_turns,
@@ -310,6 +311,22 @@ def test_billable_token_totals_scales_input_share_off_the_cache_pool():
     assert total == 1200  # input + output only, cache excluded
     # non-tool input fraction = 1000/2000 = 0.5 -> 0.5*1000 = 500; + 100 output
     assert non_tool == 600.0
+
+
+def test_build_skill_breakdown_matches_separate_builders_in_one_pass():
+    # Same results as calling the individual builders, but consolidated.
+    turns = [
+        _turn("tiered-review", 4.0, out=2000, skill_names={"tiered-review": 1}),
+        _turn(None, 1.0, out=500, skill_names={"brainstorming": 2}),  # uncharged
+        _turn("simplify", 0.9, out=300),
+    ]
+    p = build_skill_breakdown(turns)
+    assert p["skills"] == build_breakdown_skills(turns)
+    assert p["invoked_no_cost"] == count_invoked_without_cost(turns)
+    assert p["total_cost"] == 4.0 + 1.0 + 0.9
+    # _turn sets Usage(output_tokens=out), input defaults 0 -> billable = output.
+    assert p["total_billable_tokens"] == 2000 + 500 + 300
+    assert p["skill_billable_tokens"] == 2000 + 300  # attributed turns only
 
 
 def test_count_invoked_without_cost_counts_started_but_uncharged_skills():

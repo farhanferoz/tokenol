@@ -1505,8 +1505,17 @@ def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
     """
     # Same accumulation (and same interrupted-turn handling) the model/project
     # detail pages use, so the Skill Mix panel can't drift from them.
-    cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(turns)
+    return _rank_skill_costs(*_accumulate_skill_costs(turns), top_n=top_n)
 
+
+def _rank_skill_costs(
+    cost_by_skill: dict[str, float],
+    inv_by_skill: dict[str, int],
+    last_active: dict[str, datetime],
+    *,
+    top_n: int = 10,
+) -> list[dict]:
+    """Rank pre-accumulated skill costs into the Skill Mix rows (no turn walk)."""
     # Skill Mix ranks by cost, so a skill that was triggered but accrued no
     # attributed cost (invocations only) intentionally doesn't get a row. The
     # `other` tally therefore sums invocations of the collapsed *cost-bearing*
@@ -1527,6 +1536,40 @@ def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
                 row["last_active"] = last_active[name].isoformat()
         row["cost_usd"] = row.pop("value")
     return ranked
+
+
+def build_skill_breakdown(turns: list[Turn], top_n: int = 10) -> dict:
+    """Full GET /api/breakdown/skills payload in a single pair of turn walks.
+
+    Calling ``build_breakdown_skills`` + ``count_invoked_without_cost`` + three
+    separate cost/token sums back-to-back walks ``turns`` five times and
+    accumulates skills twice. This does one ``_accumulate_skill_costs`` pass
+    (reused for the ranked rows and the invoked-without-cost tally) plus one
+    sweep for the spend/billable-token totals, then derives everything else in
+    O(skills). Returns ``{skills, total_cost, total_billable_tokens,
+    skill_billable_tokens, invoked_no_cost}``.
+    """
+    cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(turns)
+
+    total_cost = 0.0
+    total_billable = 0.0
+    skill_billable = 0.0
+    for t in turns:
+        if t.is_interrupted:
+            continue
+        total_cost += t.cost_usd
+        billable = t.usage.input_tokens + t.usage.output_tokens
+        total_billable += billable
+        if t.attribution_skill:
+            skill_billable += billable
+
+    return {
+        "skills": _rank_skill_costs(cost_by_skill, inv_by_skill, last_active, top_n=top_n),
+        "total_cost": total_cost,
+        "total_billable_tokens": total_billable,
+        "skill_billable_tokens": skill_billable,
+        "invoked_no_cost": _invoked_without_cost(cost_by_skill, inv_by_skill),
+    }
 
 
 def _accumulate_tool_costs(
@@ -1644,6 +1687,13 @@ def count_invoked_without_cost(turns: list[Turn]) -> dict:
     panel shows "+N started with no separate cost" instead of dropping them.
     """
     cost_by_skill, inv_by_skill, _ = _accumulate_skill_costs(turns)
+    return _invoked_without_cost(cost_by_skill, inv_by_skill)
+
+
+def _invoked_without_cost(
+    cost_by_skill: dict[str, float], inv_by_skill: dict[str, int],
+) -> dict:
+    """Invoked-but-uncharged tally from pre-accumulated skill dicts."""
     no_cost = {n: c for n, c in inv_by_skill.items() if c > 0 and n not in cost_by_skill}
     return {"skills": len(no_cost), "uses": sum(no_cost.values())}
 

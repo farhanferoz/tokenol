@@ -30,7 +30,6 @@ from tokenol.serve.state import (
     SnapshotResult,
     _grouped_cwd_by_sid,
     billable_token_totals,
-    build_breakdown_skills,
     build_breakdown_tools,
     build_daily_panel,
     build_day_detail,
@@ -40,10 +39,10 @@ from tokenol.serve.state import (
     build_project_detail,
     build_recent_activity_panel,
     build_search_results,
+    build_skill_breakdown,
     build_skill_detail,
     build_snapshot_full,
     build_tool_detail,
-    count_invoked_without_cost,
     decode_cwd,
     encode_cwd,
     model_price_status,
@@ -768,25 +767,9 @@ def create_app(
             t for t in result.turns
             if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
         ]
-        skills = build_breakdown_skills(filtered)
-        return JSONResponse({
-            "range": range,
-            "skills": skills,
-            # Total spend over the same window, so the panel can show what
-            # fraction of all spend ran under a skill.
-            "total_cost": sum(t.cost_usd for t in filtered),
-            # Billable-token totals so the Tokens view can show the skill share
-            # of all tokens — a different number than the spend share.
-            "total_billable_tokens": sum(
-                t.usage.input_tokens + t.usage.output_tokens for t in filtered
-            ),
-            "skill_billable_tokens": sum(
-                t.usage.input_tokens + t.usage.output_tokens
-                for t in filtered if t.attribution_skill
-            ),
-            # Skills that ran but had no cost billed specifically to them, so the
-            # panel can show "+N started with no separate cost" rather than drop them.
-            "invoked_no_cost": count_invoked_without_cost(filtered),
-        })
+        # One combined builder (two turn walks) instead of calling the ranked
+        # list, the invoked-without-cost tally, and three cost/token sums
+        # separately — which would walk `filtered` five times.
+        return JSONResponse({"range": range, **build_skill_breakdown(filtered)})
 
     return app
