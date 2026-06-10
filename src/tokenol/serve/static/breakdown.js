@@ -65,6 +65,12 @@ let _bdProjectPeriod = _readPanelPeriod(_LS_BD_PROJECT_PERIOD);
 let _bdModelPeriod   = _readPanelPeriod(_LS_BD_MODEL_PERIOD);
 let _bdToolPeriod    = _readPanelPeriod(_LS_BD_TOOL_PERIOD);
 
+const _LS_BD_SKILL_UNIT   = 'tokenol.breakdown.skillUnit';
+const _LS_BD_SKILL_PERIOD = 'tokenol.breakdown.skillPeriod';
+let _bdSkillUnit   = _readUnit(_LS_BD_SKILL_UNIT, 'cost');
+let _bdSkillPeriod = _readPanelPeriod(_LS_BD_SKILL_PERIOD);
+let _skillsData = null;
+
 // ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
@@ -500,6 +506,50 @@ function renderToolMix(data) {
   renderRankedBars(document.getElementById('bp-tools-bars'), rows, { valueFormat: fmt });
 }
 
+async function fetchSkills(range) {
+  const resp = await fetch(`/api/breakdown/skills?range=${encodeURIComponent(range)}`);
+  if (!resp.ok) throw new Error(`skills ${resp.status}`);
+  return resp.json();
+}
+
+function renderSkillMix(data) {
+  if (data) _skillsData = data;
+  const d = _skillsData;
+  if (!d) return;
+  const skills = d.skills || [];
+  const useCost = _bdSkillUnit === 'cost';
+
+  const totalInv = skills.reduce((s, sk) => s + (sk.invocations || 0), 0);
+  const totalCost = skills.reduce((s, sk) => s + (sk.cost_usd || 0), 0);
+  const subEl = document.getElementById('bp-skills-sub');
+  if (skills.length === 0) {
+    subEl.textContent = 'no skill usage';
+  } else if (useCost) {
+    subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtUSD(totalCost)} under skills`;
+  } else {
+    subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtInt(totalInv)} invocations`;
+  }
+
+  const rows = skills.map(sk => {
+    const isOther = sk.name === 'other';
+    const inv = sk.invocations || 0;
+    return {
+      label: isOther ? `other (${sk.tool_count || 0} skills)` : sk.name,
+      sublabel: `${inv} use${inv === 1 ? '' : 's'}`,
+      value: useCost ? (sk.cost_usd || 0) : inv,
+      href: isOther ? undefined : `/skill/${encodeURIComponent(sk.name)}`,
+      kind: isOther ? 'other' : undefined,
+    };
+  });
+  const fmt = useCost ? fmtUSD : (n) => fmtInt(n) + ' uses';
+  renderRankedBars(document.getElementById('bp-skills-bars'), rows, { valueFormat: fmt });
+}
+
+async function refreshSkills() {
+  try { renderSkillMix(await fetchSkills(_bdSkillPeriod)); }
+  catch (err) { console.error('[breakdown] skill refresh', err); }
+}
+
 let _chartDefaultsApplied = false;
 function configureChartDefaults() {
   if (_chartDefaultsApplied || typeof window.Chart === 'undefined') return;
@@ -724,12 +774,13 @@ async function refreshAll() {
   try {
     await whenChartReady();
     configureChartDefaults();
-    const [summary, daily, byProject, byModel, tools] = await Promise.all([
+    const [summary, daily, byProject, byModel, tools, skills] = await Promise.all([
       fetchSummary(globalRange),
       fetchDailyTokens(globalRange),
       fetchByProject(_bdProjectPeriod),
       fetchByModel(_bdModelPeriod),
       fetchTools(_bdToolPeriod, _bdToolMode),
+      fetchSkills(_bdSkillPeriod),
     ]);
     renderScorecard(summary);
     renderDailyWork(daily);
@@ -737,6 +788,7 @@ async function refreshAll() {
     renderByProject(byProject);
     renderByModel(byModel);
     renderToolMix(tools);
+    renderSkillMix(skills);
   } catch (err) {
     console.error('[breakdown] refresh failed', err);
   }
@@ -845,6 +897,18 @@ _wirePanelPeriodPills('bd-tools-period-pills',
   () => _bdToolPeriod,
   p  => { _bdToolPeriod = p; localStorage.setItem(_LS_BD_TOOL_PERIOD, p); },
   refreshTools,
+);
+
+_wirePillGroup('bd-skills-unit-pills', _LS_BD_SKILL_UNIT,
+  () => _bdSkillUnit,
+  v  => { _bdSkillUnit = v; },
+  () => renderSkillMix(null),
+  'bdunit',
+);
+_wirePanelPeriodPills('bd-skills-period-pills',
+  () => _bdSkillPeriod,
+  p  => { _bdSkillPeriod = p; localStorage.setItem(_LS_BD_SKILL_PERIOD, p); },
+  refreshSkills,
 );
 
 loadThresholdsFromPrefs().then(() => refreshAll());
