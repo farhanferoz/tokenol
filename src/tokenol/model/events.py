@@ -24,6 +24,7 @@ from tokenol.enums import AssumptionTag
 EMPTY_TOOL_NAMES: Counter[str] = Counter()
 EMPTY_TOOL_COSTS: dict[str, ToolCost] = {}
 EMPTY_ASSUMPTIONS: list[AssumptionTag] = []
+EMPTY_SKILL_NAMES: Counter[str] = Counter()
 
 
 @dataclass(slots=True)
@@ -92,6 +93,12 @@ class RawEvent:
     unattributed_output_tokens: float = 0.0
     unattributed_cost_usd: float = 0.0
 
+    # Skill attribution (turn-level). attribution_skill names the skill this
+    # turn ran under (main-thread inline work AND sidechain sub-agents are both
+    # tagged in the logs). skill_names counts Skill-tool invocations by slug.
+    attribution_skill: str | None = None
+    skill_names: Counter[str] = field(default_factory=Counter)
+
 
 @dataclass(slots=True)
 class Turn:
@@ -116,6 +123,10 @@ class Turn:
     unattributed_input_tokens: float = 0.0
     unattributed_output_tokens: float = 0.0
     unattributed_cost_usd: float = 0.0
+
+    # Skill attribution (turn-level) — see RawEvent.
+    attribution_skill: str | None = None
+    skill_names: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass(slots=True)
