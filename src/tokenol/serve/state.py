@@ -1608,6 +1608,33 @@ def model_price_status(model: str | None) -> str:
     return "known"
 
 
+def billable_token_totals(turns: list[Turn]) -> tuple[float, float]:
+    """``(non_tool_billable, total_billable)`` on the input+output token basis.
+
+    "Billable" matches the rest of the UI: input + output, excluding cache.
+    Output is already billable, so its non-tool slice is ``unattributed_output_tokens``
+    directly. The stored ``unattributed_input_tokens`` is a share of the *input +
+    cache* pool, so we recover the non-tool input *fraction* and apply it to the
+    billable input alone — keeping the token share off the (huge) cache pool.
+    """
+    total = 0.0
+    non_tool = 0.0
+    for t in turns:
+        if t.is_interrupted:
+            continue
+        bill_in = t.usage.input_tokens
+        bill_out = t.usage.output_tokens
+        total += bill_in + bill_out
+        input_pool = (
+            bill_in
+            + t.usage.cache_read_input_tokens
+            + t.usage.cache_creation_input_tokens
+        )
+        nontool_in_share = (t.unattributed_input_tokens / input_pool) if input_pool > 0 else 0.0
+        non_tool += nontool_in_share * bill_in + t.unattributed_output_tokens
+    return non_tool, total
+
+
 def count_invoked_without_cost(turns: list[Turn]) -> dict:
     """Skills that were started but had no cost billed specifically to them.
 

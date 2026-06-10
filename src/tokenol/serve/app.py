@@ -29,6 +29,7 @@ from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
     _grouped_cwd_by_sid,
+    billable_token_totals,
     build_breakdown_skills,
     build_breakdown_tools,
     build_daily_panel,
@@ -742,7 +743,17 @@ def create_app(
             if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
         ]
         tools = build_breakdown_tools(filtered, mode=mode)
-        return JSONResponse({"range": range, "mode": mode, "tools": tools})
+        # Billable-token totals so the Tokens view can show what fraction of all
+        # tokens ran through tool calls — a different number than the cost share,
+        # since $/token varies by model and cache.
+        nontool_billable, total_billable = billable_token_totals(filtered)
+        return JSONResponse({
+            "range": range,
+            "mode": mode,
+            "tools": tools,
+            "total_billable_tokens": total_billable,
+            "nontool_billable_tokens": nontool_billable,
+        })
 
     @app.get("/api/breakdown/skills")
     async def api_breakdown_skills(request: Request, range: str = "30d"):
@@ -761,6 +772,18 @@ def create_app(
         return JSONResponse({
             "range": range,
             "skills": skills,
+            # Total spend over the same window, so the panel can show what
+            # fraction of all spend ran under a skill.
+            "total_cost": sum(t.cost_usd for t in filtered),
+            # Billable-token totals so the Tokens view can show the skill share
+            # of all tokens — a different number than the spend share.
+            "total_billable_tokens": sum(
+                t.usage.input_tokens + t.usage.output_tokens for t in filtered
+            ),
+            "skill_billable_tokens": sum(
+                t.usage.input_tokens + t.usage.output_tokens
+                for t in filtered if t.attribution_skill
+            ),
             # Skills that ran but had no cost billed specifically to them, so the
             # panel can show "+N started with no separate cost" rather than drop them.
             "invoked_no_cost": count_invoked_without_cost(filtered),

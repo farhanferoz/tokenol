@@ -12,6 +12,7 @@ All notable changes to tokenol are documented here. The format follows
 - **Plain-language caveat notes on every Breakdown panel.** Each panel (and the Billable-tokens scorecard) gains a small ⓘ with a jargon-free explanation of what it does and doesn't measure — that per-tool and (unrecognised) model costs are estimates, that Skill Mix excludes un-skilled work and won't sum to the total, that cache re-use is money saved rather than spent.
 - **Honest pricing on Model Mix.** Models whose price isn't in the table are flagged in the subheading — "estimated price" for an unrecognised Claude model (matched to a similar one) or "shown as $0" for a provider with no price — instead of silently understating cost.
 - **Skill Mix shows started-but-uncharged skills.** Skills that ran without any cost billed to them are summarised ("+N started with no separate cost") rather than vanishing from the cost-ranked list.
+- **Share-of-total in Tool Mix and Skill Mix.** Each panel's subheading shows what fraction of the whole it accounts for, matched to the active unit: share of total spend in the $ view, share of all billable tokens in the Tokens view. The two genuinely differ because $/token isn't uniform — e.g. tool calls are ~51% of spend but ~78% of billable tokens (input-heavy, and input is cheaper than output).
 
 ## 0.6.1 — 2026-05-16
 

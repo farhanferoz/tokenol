@@ -479,19 +479,30 @@ function renderToolMix(data) {
   const realTools = tools.filter(t => t.name !== UNATTRIBUTED_TOOL);
   const unattrRow = tools.find(t => t.name === UNATTRIBUTED_TOOL);
   const nonToolCost = unattrRow ? (unattrRow.cost_usd || 0) : 0;
-  const totalCalls = realTools.reduce((s, t) => s + (t.count || 0), 0);
   const toolCost = realTools.reduce((s, t) => s + (t.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-tools-sub');
+  // Both views report actual amounts + a share, matched to the unit: dollars
+  // and "% of total spend" in $ mode; billable tokens (input+output, no cache)
+  // and "% of billable tokens" under Tokens. The two shares differ because
+  // $/token isn't uniform (model + cache mix).
+  const grandTool = toolCost + nonToolCost;
+  const spendShare = grandTool > 0
+    ? ` · ${fmtPct((toolCost / grandTool) * 100, 0)} of total spend` : '';
+  const totBill = d.total_billable_tokens || 0;
+  const nonToolBill = d.nontool_billable_tokens || 0;
+  const toolBill = Math.max(0, totBill - nonToolBill);
+  const tokShare = totBill > 0
+    ? ` · ${fmtPct((toolBill / totBill) * 100, 0)} of billable tokens` : '';
   if (realTools.length === 0) {
     subEl.textContent = 'no tool calls';
   } else if (useCost) {
     subEl.textContent =
       `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ` +
-      `${fmtUSD(toolCost)} tool cost · ${fmtUSD(nonToolCost)} non-tool`;
+      `${fmtUSD(toolCost)} tool cost · ${fmtUSD(nonToolCost)} non-tool${spendShare}`;
   } else {
     subEl.textContent =
       `${realTools.length} tool${realTools.length === 1 ? '' : 's'} · ` +
-      `${fmtInt(totalCalls)} calls`;
+      `${fmtTok(toolBill)} tool tokens · ${fmtTok(nonToolBill)} non-tool${tokShare}`;
   }
 
   const rows = realTools.map(t => {
@@ -533,15 +544,24 @@ function renderSkillMix(data) {
   const skills = d.skills || [];
   const useCost = _bdSkillUnit === 'cost';
 
-  const totalInv = skills.reduce((s, sk) => s + (sk.invocations || 0), 0);
   const totalCost = skills.reduce((s, sk) => s + (sk.cost_usd || 0), 0);
   const subEl = document.getElementById('bp-skills-sub');
+  // Both views report actual amounts + a share, matched to the unit: dollars
+  // and "% of total spend" in $ mode; billable tokens (input+output, no cache)
+  // and "% of billable tokens" under Tokens.
+  const grandCost = d.total_cost || 0;
+  const spendShare = grandCost > 0
+    ? ` · ${fmtPct((totalCost / grandCost) * 100, 0)} of total spend` : '';
+  const totBill = d.total_billable_tokens || 0;
+  const skillBill = d.skill_billable_tokens || 0;
+  const tokShare = totBill > 0
+    ? ` · ${fmtPct((skillBill / totBill) * 100, 0)} of billable tokens` : '';
   if (skills.length === 0) {
     subEl.textContent = 'no skill usage';
   } else if (useCost) {
-    subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtUSD(totalCost)} under skills`;
+    subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtUSD(totalCost)} under skills${spendShare}`;
   } else {
-    subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtInt(totalInv)} invocations`;
+    subEl.textContent = `${skills.length} skill${skills.length === 1 ? '' : 's'} · ${fmtTok(skillBill)} tokens under skills${tokShare}`;
   }
 
   const rows = skills.map(sk => {

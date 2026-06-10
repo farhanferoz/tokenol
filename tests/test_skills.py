@@ -11,6 +11,7 @@ from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost,
 from tokenol.serve.state import (
     _accumulate_skill_costs,
     _accumulate_tool_costs,
+    billable_token_totals,
     build_breakdown_skills,
     build_breakdown_tools,
     build_skill_detail,
@@ -290,6 +291,25 @@ def test_model_price_status_classifies_pricing_confidence():
     assert model_price_status("gemini-2.5-pro") == "unpriced"  # non-Claude provider
     assert model_price_status(None) == "unpriced"
     assert model_price_status("(unknown)") == "unpriced"
+
+
+def test_billable_token_totals_scales_input_share_off_the_cache_pool():
+    # input 1000 (+1000 cache read), output 200. A tool took half the visible
+    # bytes, so the stored non-tool share over the input+cache pool is
+    # 0.5*(1000+1000)=1000, and non-tool output is 0.5*200=100.
+    t = Turn(
+        dedup_key="k", timestamp=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
+        session_id="s", model="claude-opus-4-8",
+        usage=Usage(input_tokens=1000, output_tokens=200,
+                    cache_read_input_tokens=1000, cache_creation_input_tokens=0),
+        is_sidechain=False, stop_reason=None,
+    )
+    t.unattributed_input_tokens = 1000.0
+    t.unattributed_output_tokens = 100.0
+    non_tool, total = billable_token_totals([t])
+    assert total == 1200  # input + output only, cache excluded
+    # non-tool input fraction = 1000/2000 = 0.5 -> 0.5*1000 = 500; + 100 output
+    assert non_tool == 600.0
 
 
 def test_count_invoked_without_cost_counts_started_but_uncharged_skills():

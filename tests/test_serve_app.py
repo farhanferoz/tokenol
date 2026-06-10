@@ -1610,6 +1610,33 @@ async def test_api_breakdown_skills_reports_invoked_no_cost(tmp_path: Path) -> N
     assert set(body["invoked_no_cost"]) == {"skills", "uses"}
     assert isinstance(body["invoked_no_cost"]["skills"], int)
     assert isinstance(body["invoked_no_cost"]["uses"], int)
+    # Grand total over the same window, for the "% of total spend" subheading.
+    assert "total_cost" in body
+    assert isinstance(body["total_cost"], (int, float))
+    assert body["total_cost"] >= sum(s["cost_usd"] for s in body["skills"] if s["name"] != "other")
+    # Billable-token totals for the Tokens-view "% of all tokens" subheading.
+    assert "total_billable_tokens" in body and "skill_billable_tokens" in body
+    assert body["total_billable_tokens"] >= body["skill_billable_tokens"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_api_breakdown_tools_carries_billable_token_totals(tmp_path: Path) -> None:
+    """The tools envelope reports billable-token totals for the token share."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/tools?range=all")
+
+    body = resp.json()
+    assert "total_billable_tokens" in body and "nontool_billable_tokens" in body
+    # Non-tool tokens are a subset of the billable total.
+    assert body["total_billable_tokens"] >= body["nontool_billable_tokens"] >= 0
 
 
 @pytest.mark.asyncio
