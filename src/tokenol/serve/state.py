@@ -22,7 +22,13 @@ from typing import TYPE_CHECKING
 
 from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
-from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL, dedup_key, parse_file
+from tokenol.ingest.parser import (
+    SKILL_TOOL,
+    UNATTRIBUTED_TOOL,
+    UNKNOWN_TOOL,
+    dedup_key,
+    parse_file,
+)
 
 if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
@@ -1438,7 +1444,7 @@ def build_breakdown_tools(
             # The literal `Skill` tool is the trigger-call byte-share only; its
             # real cost is owned by the dedicated Skill dimension. Strip it so
             # the two don't double-read.
-            tokens_by_tool.update({n: c for n, c in t.tool_names.items() if n != "Skill"})
+            tokens_by_tool.update({n: c for n, c in t.tool_names.items() if n != SKILL_TOOL})
 
         if excl:
             turn_cost = cost_for_turn(t.model, t.usage)
@@ -1452,7 +1458,7 @@ def build_breakdown_tools(
             residual = t.unattributed_cost_usd + per_tool.pop(UNKNOWN_TOOL, 0.0)
 
         for name, cost in per_tool.items():
-            if name == "Skill":
+            if name == SKILL_TOOL:
                 continue  # represented by the dedicated Skill dimension
             cost_by_tool[name] = cost_by_tool.get(name, 0.0) + cost
             if name in t.tool_names and (
@@ -1494,21 +1500,13 @@ def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
     Returns top-`top_n` skills by cost + a collapsed `other` tail row.
     `invocations` come from Skill-tool trigger blocks (`skill_names`).
     """
-    cost_by_skill: dict[str, float] = {}
-    inv_by_skill: Counter[str] = Counter()
-    last_active: dict[str, datetime] = {}
-
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        if t.skill_names:
-            inv_by_skill.update(t.skill_names)
-        skill = t.attribution_skill
-        if not skill:
-            continue
-        cost_by_skill[skill] = cost_by_skill.get(skill, 0.0) + t.cost_usd
-        if skill not in last_active or t.timestamp > last_active[skill]:
-            last_active[skill] = t.timestamp
+    # Same accumulation the model/project detail pages use, so the Skill Mix
+    # panel can't drift from them. _accumulate_skill_costs has no interrupted
+    # guard, so filter here (interrupted turns carry zero cost but may still
+    # carry a stray skill tag).
+    cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(
+        [t for t in turns if not t.is_interrupted]
+    )
 
     ranked = _rank_dict_with_others(cost_by_skill, top_n=top_n)
     head_names = {r["name"] for r in ranked if r["name"] != "other"}
@@ -1580,7 +1578,7 @@ def build_tool_detail(
     sessions: list[Session],
 ) -> dict | None:
     """Build the tool drill-down payload for GET /api/tool/{name}."""
-    if name in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, "Skill"):
+    if name in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, SKILL_TOOL):
         return None
     tool_turns = [
         t for t in turns
@@ -1688,22 +1686,39 @@ def build_skill_detail(
     trigger blocks across all turns. `split` partitions attributed cost into
     inline (main-thread) vs sub-agent (sidechain) — the dimension's headline.
     """
-    attributed = [t for t in turns if not t.is_interrupted and t.attribution_skill == name]
-    invocations = sum(t.skill_names.get(name, 0) for t in turns if not t.is_interrupted)
-    if not attributed and invocations == 0:
-        return None
-
     cwd_by_sid = _grouped_cwd_by_sid(sessions)
+    today_utc = datetime.now(tz=timezone.utc).date()
+    seven_days_ago_ts = datetime.combine(
+        today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc
+    )
 
+    # Single pass over the corpus: invocations (from the trigger turns, which
+    # are usually NOT in `attributed`) and grand_total_cost span all turns,
+    # while the cost/token/project/model tallies are confined to `attributed`.
+    attributed: list[Turn] = []
     total_cost = 0.0
     total_output_tokens = 0.0
     inline_usd = 0.0
     subagent_usd = 0.0
+    invocations = 0
+    invs_7d = 0
+    grand_total_cost = 0.0
     proj_cost: defaultdict[str, float] = defaultdict(float)
     proj_last: dict[str, datetime] = {}
     model_cost: defaultdict[str, float] = defaultdict(float)
 
-    for t in attributed:
+    for t in turns:
+        if t.is_interrupted:
+            continue
+        grand_total_cost += t.cost_usd
+        n = t.skill_names.get(name, 0)
+        if n:
+            invocations += n
+            if t.timestamp >= seven_days_ago_ts:
+                invs_7d += n
+        if t.attribution_skill != name:
+            continue
+        attributed.append(t)
         total_cost += t.cost_usd
         total_output_tokens += t.usage.output_tokens
         if t.is_sidechain:
@@ -1716,7 +1731,8 @@ def build_skill_detail(
             proj_last[cwd] = t.timestamp
         model_cost[t.model or "(unknown)"] += t.cost_usd
 
-    grand_total_cost = sum(tt.cost_usd for tt in turns if not tt.is_interrupted)
+    if not attributed and invocations == 0:
+        return None
 
     top_cwd = max(proj_cost.items(), key=lambda kv: kv[1], default=("(unknown)", 0.0))
     top_project = {
@@ -1724,16 +1740,6 @@ def build_skill_detail(
         "cost_usd": top_cwd[1],
         "share": top_cwd[1] / total_cost if total_cost > 0 else 0.0,
     }
-
-    today_utc = datetime.now(tz=timezone.utc).date()
-    seven_days_ago_ts = datetime.combine(
-        today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc
-    )
-    invs_7d = sum(
-        t.skill_names.get(name, 0)
-        for t in turns
-        if not t.is_interrupted and t.timestamp >= seven_days_ago_ts
-    )
 
     daily = build_skill_cost_daily(attributed, skill_name=name, days=30)
 

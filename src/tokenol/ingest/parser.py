@@ -22,6 +22,9 @@ from tokenol.model.events import (
 
 UNATTRIBUTED_TOOL = "__unattributed__"
 UNKNOWN_TOOL = "__unknown__"
+# The tool_use block name Claude Code emits when a skill is invoked. Its cost is
+# owned by the dedicated Skill dimension, so the Tools dimension excludes it.
+SKILL_TOOL = "Skill"
 COMPACTION_DROP_RATIO = 0.2
 
 
@@ -95,7 +98,7 @@ def _extract_skill_names(content: list) -> Counter[str]:
     for block in content:
         if not isinstance(block, dict):
             continue
-        if block.get("type") == "tool_use" and block.get("name") == "Skill":
+        if block.get("type") == "tool_use" and block.get("name") == SKILL_TOOL:
             inp = block.get("input")
             slug = inp.get("skill") if isinstance(inp, dict) else None
             if isinstance(slug, str) and slug:
