@@ -1,7 +1,8 @@
 """Flat per-model pricing (USD per 1M tokens) and context windows.
 
-Rates from Anthropic docs (2026-04-20). All Claude 4.x models price flat
-at all context sizes — no 1M-tier surcharge.
+Rates from Anthropic docs (Fable 5 added 2026-06-10). All current Claude
+models price flat at all context sizes — no 1M-tier surcharge. Cache-write
+is 1.25x input (5-minute TTL) and cache-read is 0.1x input throughout.
 Unknown models fall back to nearest family sibling via ModelRegistry.
 """
 
@@ -18,7 +19,24 @@ class ModelEntry(TypedDict):
 
 
 CLAUDE_MODELS: dict[str, ModelEntry] = {
+    # Fable 5 (top tier, above Opus)
+    "claude-fable-5": {
+        "family": "fable",
+        "context": 1_000_000,
+        "input": 10.00,
+        "output": 50.00,
+        "cache_write": 12.50,
+        "cache_read": 1.00,
+    },
     # Opus 4.x
+    "claude-opus-4-8": {
+        "family": "opus",
+        "context": 1_000_000,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
+    },
     "claude-opus-4-7": {
         "family": "opus",
         "context": 1_000_000,
@@ -106,7 +124,8 @@ def context_window(model: str) -> int | None:
 # Family fallback order — when unknown model matches a family prefix,
 # use the first (newest) entry in the corresponding list.
 FAMILY_FALLBACKS: dict[str, list[str]] = {
-    "opus": ["claude-opus-4-7", "claude-opus-4-6"],
+    "fable": ["claude-fable-5"],
+    "opus": ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
     "sonnet": ["claude-sonnet-4-6", "claude-sonnet-3-7-20250219"],
     "haiku": ["claude-haiku-4-5-20251001", "claude-haiku-3-5-20241022"],
 }

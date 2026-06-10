@@ -4,6 +4,14 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0 — Unreleased
+
+### Added
+
+- **Claude Fable 5 pricing.** New top-tier model (`claude-fable-5`) above Opus, priced at $10.00 input / $50.00 output per 1M tokens, with a 1M-token context window. Cache rates follow the table-wide convention: $12.50 cache-write (1.25x input) and $1.00 cache-read (0.1x input). A new `fable` model family is registered ahead of `opus`/`sonnet`/`haiku`, so unknown or future-dated Fable IDs (e.g. `claude-fable-5-20260601`) fall back to Fable pricing rather than the wrong family. Cost, cache-savings, and dashboard model breakdowns pick it up with no further changes.
+- **Claude Opus 4.8 pricing.** Added `claude-opus-4-8` to the model table (same rates as Opus 4.7: $5.00 / $25.00 per 1M, 1M context, $6.25 cache-write / $0.50 cache-read) and made it the newest `opus` fallback. Closes the gap where Opus 4.8 turns were priced via family fallback to Opus 4.7.
+- **Context-window suffix normalization in model resolution.** Claude Code appends a `[1m]` marker to logged model IDs for the 1M-context variant (e.g. `claude-opus-4-8[1m]`). `ModelRegistry.resolve` now strips any trailing `[...]` marker before lookup, so a `claude-fable-5[1m]` turn prices as `claude-fable-5` (exact match, no assumption flag) instead of falling through to family fallback. Model-agnostic: benefits every present and future model whose logged ID carries the suffix.
+
 ## 0.6.1 — 2026-05-16
 
 ### Added

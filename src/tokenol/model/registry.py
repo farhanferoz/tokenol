@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import re
+
 from tokenol.enums import AssumptionTag
 from tokenol.model.pricing import CLAUDE_MODELS, FAMILY_FALLBACKS, ModelEntry
 
-# Canonical family name substrings, ordered by specificity.
-_FAMILY_KEYWORDS = ["opus", "sonnet", "haiku"]
+# Canonical family name substrings, ordered by specificity (top tier first).
+_FAMILY_KEYWORDS = ["fable", "opus", "sonnet", "haiku"]
 
 # Non-Claude providers whose models appear in logs — unpriced in v1.
 _UNPRICED_PREFIXES = ("gemini", "gpt", "o1", "o3", "o4")
+
+# Trailing context-window marker Claude Code appends to logged model IDs,
+# e.g. "claude-opus-4-8[1m]" for the 1M-context variant. Stripped before
+# lookup so a "[1m]" turn prices as its base model instead of falling back.
+_CONTEXT_SUFFIX = re.compile(r"\[[^\[\]]*\]$")
 
 
 class ModelRegistry:
@@ -24,8 +31,9 @@ class ModelRegistry:
         """
         tags: list[AssumptionTag] = []
 
-        # Strip -thinking suffix (unreliable across versions)
-        clean = model.replace("-thinking", "")
+        # Strip -thinking suffix (unreliable across versions) and any trailing
+        # context-window marker like "[1m]".
+        clean = _CONTEXT_SUFFIX.sub("", model.replace("-thinking", ""))
 
         # Exact match first.
         if clean in CLAUDE_MODELS:

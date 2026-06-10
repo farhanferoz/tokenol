@@ -37,6 +37,63 @@ def test_cost_haiku_45():
     assert abs(tc.total_usd - expected) < 1e-9
 
 
+def test_cost_fable_5():
+    usage = Usage(input_tokens=1000, output_tokens=200,
+                  cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    tc = cost_for_turn("claude-fable-5", usage)
+    # input: 1000 * 10.00 / 1M = 0.010
+    # output: 200 * 50.00 / 1M = 0.010
+    # cache_read: 500 * 1.00 / 1M = 0.0005
+    # cache_write: 100 * 12.50 / 1M = 0.00125
+    expected = (1000 * 10.00 + 200 * 50.00 + 500 * 1.00 + 100 * 12.50) / _M
+    assert abs(tc.total_usd - expected) < 1e-9
+    assert tc.assumptions == []
+
+
+def test_unknown_fable_variant_falls_back_to_fable_family():
+    # A future dated/suffixed Fable id must price off the Fable entry, not Opus.
+    from tokenol.enums import AssumptionTag
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-fable-5-20260601")
+    assert entry == CLAUDE_MODELS["claude-fable-5"]
+    assert AssumptionTag.UNKNOWN_MODEL_FALLBACK in tags
+
+
+def test_fable_with_context_suffix_resolves_clean():
+    # Claude Code appends "[1m]" for the 1M-context variant. It must price as
+    # the base model with no fallback assumption.
+    from tokenol.enums import AssumptionTag
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-fable-5[1m]")
+    assert entry == CLAUDE_MODELS["claude-fable-5"]
+    assert tags == []
+    assert AssumptionTag.UNKNOWN_MODEL_FALLBACK not in tags
+
+
+def test_context_suffix_stripped_for_known_model():
+    # The "[1m]" strip is model-agnostic, not Fable-specific.
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-sonnet-4-6[1m]")
+    assert entry == CLAUDE_MODELS["claude-sonnet-4-6"]
+    assert tags == []
+
+
+def test_opus_48_priced_and_suffix_clean():
+    # Opus 4.8 is in the table; "[1m]" turns resolve to it cleanly.
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-opus-4-8[1m]")
+    assert entry == CLAUDE_MODELS["claude-opus-4-8"]
+    assert tags == []
+
+
 def test_cost_gemini_unpriced():
     usage = Usage(input_tokens=1000, output_tokens=100, cache_read_input_tokens=0,
                   cache_creation_input_tokens=0)
