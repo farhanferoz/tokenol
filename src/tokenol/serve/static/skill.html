@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tokenol — skill</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 A14 14 0 0 1 30 16' stroke='%23a66408' stroke-width='4' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css">
+
+  <!-- Chart.js 4.4.7 — UMD build, pinned with SRI. -->
+  <script defer
+          src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.js"
+          integrity="sha384-zYPBGXwO4633CABX/5Spf6emCKUJCfoOkhOMYyxMsatqQZPnDblmmOewfjsIVWCM"
+          crossorigin="anonymous"></script>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar-row1">
+      <div class="brand"><a href="/" style="color:inherit;text-decoration:none">tokenol</a> <span class="dim">— skill</span></div>
+    </div>
+  </header>
+
+  <div id="skill-error" class="tl-insufficient hidden"></div>
+
+  <div class="section-heading" style="margin-top:24px">
+    <h2 id="skill-name" style="font-family:var(--font-serif);font-size:24px">—</h2>
+  </div>
+
+  <!-- Daily cost chart -->
+  <section style="margin: 14px 32px; background: var(--bg-raised); border: 1px solid var(--rule); border-radius: 3px; padding: 16px;">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+      <div>
+        <span style="font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--mute-2)">Daily cost · last 30d</span>
+        <span id="skill-daily-total" style="color:var(--accent);margin-left:10px;font-family:var(--font-mono);font-size:12px"></span>
+        <span id="skill-split" class="dim" style="font-family:var(--font-mono);font-size:12px;margin-left:10px"></span>
+      </div>
+      <div class="dim" id="skill-daily-peak" style="font-family:var(--font-mono);font-size:12px"></div>
+    </div>
+    <div style="height:160px;position:relative">
+      <canvas id="chart-skill-daily"></canvas>
+    </div>
+  </section>
+
+  <!-- Scorecards -->
+  <section class="scorecard" id="skill-scorecards" aria-label="Skill totals"></section>
+
+  <!-- Cost by model -->
+  <div class="section-heading"><h2>Cost by model</h2></div>
+  <div id="skill-by-model" style="padding: 0 32px"></div>
+  <div id="skill-no-models" class="ra-empty hidden">No model data.</div>
+
+  <!-- Cost by project -->
+  <div class="section-heading"><h2>Cost by project</h2></div>
+  <div id="skill-by-project" style="padding: 0 32px"></div>
+  <div id="skill-no-projects" class="ra-empty hidden">No project data.</div>
+</div>
+<script type="module" src="/assets/skill.js"></script>
+</body>
+</html>
