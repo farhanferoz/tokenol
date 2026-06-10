@@ -1354,6 +1354,13 @@ def build_model_detail(
         key=lambda r: -r["cost_usd"],
     )
 
+    skill_cost, skill_invs, _ = _accumulate_skill_costs(model_turns, with_last_active=False)
+    by_skill = sorted(
+        [{"name": s, "cost_usd": skill_cost[s], "invocations": skill_invs.get(s, 0)}
+         for s in skill_cost],
+        key=lambda r: -r["cost_usd"],
+    )
+
     return {
         "name": name,
         "total_cost": sum(t.cost_usd for t in model_turns),
@@ -1366,6 +1373,7 @@ def build_model_detail(
         } if mr else None,
         "projects_using_model": projects,
         "by_tool": by_tool,
+        "by_skill": by_skill,
     }
 
 
@@ -1544,6 +1552,25 @@ def _accumulate_tool_costs(
             invs[name] += count
             if with_last_active and (name not in last or t.timestamp > last[name]):
                 last[name] = t.timestamp
+    return cost, invs, last
+
+
+def _accumulate_skill_costs(
+    turns: list[Turn], *, with_last_active: bool = True,
+) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
+    """Group attributed turns' full cost_usd by skill. invocations from skill_names."""
+    cost: defaultdict[str, float] = defaultdict(float)
+    invs: defaultdict[str, int] = defaultdict(int)
+    last: dict[str, datetime] = {}
+    for t in turns:
+        for name, count in t.skill_names.items():
+            invs[name] += count
+        skill = t.attribution_skill
+        if not skill:
+            continue
+        cost[skill] += t.cost_usd
+        if with_last_active and (skill not in last or t.timestamp > last[skill]):
+            last[skill] = t.timestamp
     return cost, invs, last
 
 
@@ -1970,6 +1997,17 @@ def build_project_detail(
         key=lambda r: -r["cost_usd"],
     )
 
+    skill_cost, skill_invs, skill_last = _accumulate_skill_costs(project_turns)
+    by_skill = sorted(
+        [{
+            "name": s,
+            "cost_usd": skill_cost[s],
+            "invocations": skill_invs.get(s, 0),
+            "last_active": skill_last[s].isoformat() if s in skill_last else None,
+        } for s in skill_cost],
+        key=lambda r: -r["cost_usd"],
+    )
+
     return {
         "cwd": cwd,
         "cwd_b64": cwd_b64,
@@ -1999,6 +2037,7 @@ def build_project_detail(
             for t in top_turns
         ],
         "by_tool": by_tool,
+        "by_skill": by_skill,
     }
 
 

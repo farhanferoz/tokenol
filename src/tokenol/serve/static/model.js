@@ -77,4 +77,24 @@ function render(d) {
       { valueFormat: fmtUSD },
     );
   }
+
+  const bySkill = d.by_skill || [];
+  const bsContainer = $('model-by-skill');
+  const bsEmpty = $('model-by-skill-empty');
+  if (!bySkill.length) {
+    bsContainer.innerHTML = '';
+    bsEmpty.classList.remove('hidden');
+  } else {
+    bsEmpty.classList.add('hidden');
+    renderRankedBars(
+      bsContainer,
+      bySkill.map((r) => ({
+        label: r.name,
+        sublabel: `${r.invocations} use${r.invocations === 1 ? '' : 's'}`,
+        value: r.cost_usd,
+        href: '/skill/' + encodeURIComponent(r.name),
+      })),
+      { valueFormat: fmtUSD },
+    );
+  }
 }

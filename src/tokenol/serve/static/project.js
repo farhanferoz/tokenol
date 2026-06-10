@@ -118,6 +118,28 @@ function renderAll(d) {
     );
   }
 
+  const bySkill = d.by_skill || [];
+  const bsContainer = $('proj-by-skill');
+  const bsEmpty = $('proj-by-skill-empty');
+  if (!bySkill.length) {
+    bsContainer.innerHTML = '';
+    bsEmpty.classList.remove('hidden');
+  } else {
+    bsEmpty.classList.add('hidden');
+    renderRankedBars(
+      bsContainer,
+      bySkill.map((r) => ({
+        label: r.name,
+        sublabel: r.last_active
+          ? `${r.invocations} use${r.invocations === 1 ? '' : 's'} · ${r.last_active.slice(0, 10)}`
+          : `${r.invocations} use${r.invocations === 1 ? '' : 's'}`,
+        value: r.cost_usd,
+        href: '/skill/' + encodeURIComponent(r.name),
+      })),
+      { valueFormat: fmtUSD },
+    );
+  }
+
   _initGlossary();
 }
 

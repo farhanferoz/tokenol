@@ -7,6 +7,7 @@ from pathlib import Path
 from tokenol.ingest.builder import build_turns
 from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost, Turn, Usage
 from tokenol.serve.state import (
+    _accumulate_skill_costs,
     build_breakdown_skills,
     build_breakdown_tools,
     build_skill_detail,
@@ -139,3 +140,14 @@ def test_tool_mix_excludes_literal_skill_row():
     names = {r["name"] for r in rows}
     assert "Skill" not in names
     assert "Read" in names
+
+
+def test_accumulate_skill_costs_groups_turns():
+    turns = [
+        _turn("tiered-review", 4.0, model="claude-opus-4-8"),
+        _turn("tiered-review", 0.5),
+        _turn("simplify", 0.9),
+        _turn(None, 9.0),
+    ]
+    cost, invs, last = _accumulate_skill_costs(turns)
+    assert cost == {"tiered-review": 4.5, "simplify": 0.9}
