@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenol.ingest.builder import build_turns
-from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Turn, Usage
-from tokenol.serve.state import build_breakdown_skills
+from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, Turn, Usage
+from tokenol.serve.state import build_breakdown_skills, build_skill_detail
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -90,3 +90,31 @@ def test_build_breakdown_skills_groups_cost_by_skill():
 def test_build_breakdown_skills_empty_returns_empty():
     assert build_breakdown_skills([]) == []
     assert build_breakdown_skills([_turn(None, 1.0)]) == []
+
+
+def test_build_skill_detail_splits_inline_vs_subagent():
+    turns = [
+        _turn("tiered-review", 0.06, model="claude-opus-4-8",
+              skill_names={"tiered-review": 1}),                 # inline trigger
+        _turn("tiered-review", 4.00, sidechain=True,
+              model="claude-opus-4-8", out=2000),                # sub-agent
+        _turn("simplify", 0.90),                                 # other skill, ignored
+    ]
+    sessions = [Session(session_id="s", source_file="f.jsonl",
+                        is_sidechain=False, cwd="/home/u/proj", turns=turns)]
+    d = build_skill_detail("tiered-review", turns, sessions)
+    assert d is not None
+    assert d["name"] == "tiered-review"
+    assert d["scorecards"]["cost_usd"] == 4.06
+    assert d["scorecards"]["invocations"] == 1
+    assert d["split"] == {"inline_usd": 0.06, "subagent_usd": 4.00}
+    # by_model groups attributed turns' full cost by model.
+    assert d["by_model"][0] == {"name": "claude-opus-4-8",
+                                "cost_usd": 4.06, "invocations": 0}
+    # by_project keyed on the session cwd.
+    assert d["by_project"][0]["cost_usd"] == 4.06
+    assert len(d["daily_cost"]) == 30
+
+
+def test_build_skill_detail_unknown_returns_none():
+    assert build_skill_detail("nope", [], []) is None

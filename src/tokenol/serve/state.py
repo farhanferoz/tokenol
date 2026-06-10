@@ -42,6 +42,7 @@ from tokenol.metrics.rollups import (
     build_model_rollups,
     build_project_rollups,
     build_session_rollup,
+    build_skill_cost_daily,
     build_tool_cost_daily,
 )
 from tokenol.metrics.thresholds import DEFAULTS
@@ -1635,6 +1636,100 @@ def build_tool_detail(
             "share_of_total": (total_cost / grand_total_cost) if grand_total_cost else 0.0,
             "top_project": top_project,
         },
+        "daily_cost": [{"date": d.date.isoformat(), "cost_usd": d.cost_usd} for d in daily],
+        "by_project": by_project,
+        "by_model": by_model,
+    }
+
+
+def build_skill_detail(
+    name: str,
+    turns: list[Turn],
+    sessions: list[Session],
+) -> dict | None:
+    """Build the skill drill-down payload for GET /api/skill/{name}.
+
+    Cost/tokens/by_model/by_project/daily come from turns attributed to the
+    skill (turn-level: full cost_usd each). Invocations come from Skill-tool
+    trigger blocks across all turns. `split` partitions attributed cost into
+    inline (main-thread) vs sub-agent (sidechain) — the dimension's headline.
+    """
+    attributed = [t for t in turns if not t.is_interrupted and t.attribution_skill == name]
+    invocations = sum(t.skill_names.get(name, 0) for t in turns if not t.is_interrupted)
+    if not attributed and invocations == 0:
+        return None
+
+    cwd_by_sid = _grouped_cwd_by_sid(sessions)
+
+    total_cost = 0.0
+    total_output_tokens = 0.0
+    inline_usd = 0.0
+    subagent_usd = 0.0
+    proj_cost: defaultdict[str, float] = defaultdict(float)
+    proj_last: dict[str, datetime] = {}
+    model_cost: defaultdict[str, float] = defaultdict(float)
+
+    for t in attributed:
+        total_cost += t.cost_usd
+        total_output_tokens += t.usage.output_tokens
+        if t.is_sidechain:
+            subagent_usd += t.cost_usd
+        else:
+            inline_usd += t.cost_usd
+        cwd = cwd_by_sid.get(t.session_id, "(unknown)")
+        proj_cost[cwd] += t.cost_usd
+        if cwd not in proj_last or t.timestamp > proj_last[cwd]:
+            proj_last[cwd] = t.timestamp
+        model_cost[t.model or "(unknown)"] += t.cost_usd
+
+    grand_total_cost = sum(tt.cost_usd for tt in turns if not tt.is_interrupted)
+
+    top_cwd = max(proj_cost.items(), key=lambda kv: kv[1], default=("(unknown)", 0.0))
+    top_project = {
+        "name": top_cwd[0].rsplit("/", 1)[-1] if top_cwd[0] != "(unknown)" else "—",
+        "cost_usd": top_cwd[1],
+        "share": top_cwd[1] / total_cost if total_cost > 0 else 0.0,
+    }
+
+    today_utc = datetime.now(tz=timezone.utc).date()
+    seven_days_ago_ts = datetime.combine(
+        today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc
+    )
+    invs_7d = sum(
+        t.skill_names.get(name, 0)
+        for t in turns
+        if not t.is_interrupted and t.timestamp >= seven_days_ago_ts
+    )
+
+    daily = build_skill_cost_daily(attributed, skill_name=name, days=30)
+
+    by_project = sorted(
+        [{
+            "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
+            "project_label": cwd.rsplit("/", 1)[-1] if cwd != "(unknown)" else "(unknown)",
+            "cost_usd": proj_cost[cwd],
+            "invocations": 0,
+            "last_active": proj_last[cwd].isoformat(),
+        } for cwd in proj_cost],
+        key=lambda r: (-r["cost_usd"], r["project_label"]),
+    )[:50]
+    by_model = sorted(
+        [{"name": m, "cost_usd": model_cost[m], "invocations": 0} for m in model_cost],
+        key=lambda r: (-r["cost_usd"], r["name"]),
+    )[:50]
+
+    return {
+        "name": name,
+        "total_invocations": invocations,
+        "scorecards": {
+            "cost_usd": total_cost,
+            "output_tokens": total_output_tokens,
+            "invocations": invocations,
+            "invocations_7d": invs_7d,
+            "share_of_total": (total_cost / grand_total_cost) if grand_total_cost else 0.0,
+            "top_project": top_project,
+        },
+        "split": {"inline_usd": inline_usd, "subagent_usd": subagent_usd},
         "daily_cost": [{"date": d.date.isoformat(), "cost_usd": d.cost_usd} for d in daily],
         "by_project": by_project,
         "by_model": by_model,

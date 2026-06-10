@@ -138,6 +138,26 @@ def build_tool_cost_daily(
     return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
 
 
+def build_skill_cost_daily(
+    turns: list[Turn], *, skill_name: str, days: int = 30, today: date | None = None
+) -> list[DailyToolCost]:
+    """Per-day cost_usd for *skill_name* over the last *days* days, zero-filled.
+
+    Skill cost is turn-level: each attributed turn's full cost_usd is summed.
+    Reuses DailyToolCost (date, cost_usd) — no new shape needed.
+    """
+    today = today or datetime.now(tz=timezone.utc).date()
+    start = today - timedelta(days=days - 1)
+    buckets: dict[date, float] = {start + timedelta(days=i): 0.0 for i in range(days)}
+    for turn in turns:
+        if turn.is_interrupted or turn.attribution_skill != skill_name:
+            continue
+        d = turn.timestamp.date()
+        if d in buckets:
+            buckets[d] += turn.cost_usd
+    return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
+
+
 def build_session_rollup(session: Session) -> SessionRollup:
     """Compute a SessionRollup from a Session."""
     billable_turns = [t for t in session.turns if not t.is_interrupted]
