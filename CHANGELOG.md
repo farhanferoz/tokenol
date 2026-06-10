@@ -4,6 +4,12 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0 — Unreleased
+
+### Added
+
+- **Skills cost dimension.** New first-class Skill dimension parallel to Tools/Models/Projects, driven by Claude Code's `attributionSkill` log tag. A "Skill Mix" panel on the Breakdown page ranks skills by cost (incl. their sub-agent fan-out); a Skill detail page (`/skill/{name}`) shows scorecards, a 30-day daily-cost chart, cost-by-model / cost-by-project, and an **inline vs sub-agent** cost split. Model and Project detail pages gain a Cost-by-skill bar; a "Skills" nav tab is added. The previously-misleading single "Skill" row in Tool Mix (trigger cost only) is dropped in favour of the real per-skill numbers.
+
 ## 0.6.1 — 2026-05-16
 
 ### Added
