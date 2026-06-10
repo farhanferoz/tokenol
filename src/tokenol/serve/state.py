@@ -303,6 +303,8 @@ def derive_delta_turns(
             unattributed_input_tokens=ev.unattributed_input_tokens,
             unattributed_output_tokens=ev.unattributed_output_tokens,
             unattributed_cost_usd=ev.unattributed_cost_usd,
+            attribution_skill=ev.attribution_skill,
+            skill_names=ev.skill_names,
         ))
 
     # Build *delta* Session records for any session_id we touched (one Session per
@@ -1500,13 +1502,9 @@ def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
     Returns top-`top_n` skills by cost + a collapsed `other` tail row.
     `invocations` come from Skill-tool trigger blocks (`skill_names`).
     """
-    # Same accumulation the model/project detail pages use, so the Skill Mix
-    # panel can't drift from them. _accumulate_skill_costs has no interrupted
-    # guard, so filter here (interrupted turns carry zero cost but may still
-    # carry a stray skill tag).
-    cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(
-        [t for t in turns if not t.is_interrupted]
-    )
+    # Same accumulation (and same interrupted-turn handling) the model/project
+    # detail pages use, so the Skill Mix panel can't drift from them.
+    cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(turns)
 
     ranked = _rank_dict_with_others(cost_by_skill, top_n=top_n)
     head_names = {r["name"] for r in ranked if r["name"] != "other"}
@@ -1556,11 +1554,18 @@ def _accumulate_tool_costs(
 def _accumulate_skill_costs(
     turns: list[Turn], *, with_last_active: bool = True,
 ) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
-    """Group attributed turns' full cost_usd by skill. invocations from skill_names."""
+    """Group attributed turns' full cost_usd by skill. invocations from skill_names.
+
+    Interrupted turns are skipped (they carry zero cost but can still carry a
+    stray skill tag), so every caller — Skill Mix, skill detail, and the
+    model/project ``by_skill`` bars — agrees on which turns count.
+    """
     cost: defaultdict[str, float] = defaultdict(float)
     invs: defaultdict[str, int] = defaultdict(int)
     last: dict[str, datetime] = {}
     for t in turns:
+        if t.is_interrupted:
+            continue
         for name, count in t.skill_names.items():
             invs[name] += count
         skill = t.attribution_skill

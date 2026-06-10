@@ -500,3 +500,30 @@ def test_schema_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
         ).fetchall()
     finally:
         store.close()
+
+
+def test_skill_fields_survive_flush_and_hydrate(tmp_path: Path) -> None:
+    """attribution_skill + skill_names round-trip through the DuckDB warm tier."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        s = _session("sess-sk")
+        trigger = _turn("k-trig", "sess-sk")
+        trigger.skill_names = Counter({"tiered-review": 2})
+        subagent = _turn("k-sub", "sess-sk",
+                         ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))
+        subagent.attribution_skill = "tiered-review"
+        store.flush(turns=[trigger, subagent], sessions=[s])
+
+        hydrated, _ = store.hydrate_hot(window_days=3650)
+        by_key = {t.dedup_key: t for t in hydrated}
+        assert by_key["k-trig"].skill_names == Counter({"tiered-review": 2})
+        assert by_key["k-trig"].attribution_skill is None
+        assert by_key["k-sub"].attribution_skill == "tiered-review"
+        assert by_key["k-sub"].skill_names == Counter()
+    finally:
+        store.close()
+
+
+def test_schema_version_is_three(tmp_path: Path) -> None:
+    from tokenol.persistence.store import SCHEMA_VERSION
+    assert SCHEMA_VERSION == 3

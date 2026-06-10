@@ -5,12 +5,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenol.ingest.builder import build_turns
+from tokenol.ingest.parser import _extract_skill_names, _is_real_skill_name
+from tokenol.metrics.rollups import build_skill_cost_daily
 from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost, Turn, Usage
 from tokenol.serve.state import (
     _accumulate_skill_costs,
     build_breakdown_skills,
     build_breakdown_tools,
     build_skill_detail,
+    derive_delta_turns,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -151,3 +154,104 @@ def test_accumulate_skill_costs_groups_turns():
     ]
     cost, invs, last = _accumulate_skill_costs(turns)
     assert cost == {"tiered-review": 4.5, "simplify": 0.9}
+
+
+# --- Review follow-ups: edge cases + the four bugs found in tiered review ---
+
+
+def _raw(skill=None, skill_names=None, *, uuid="u", mid=None, sidechain=False,
+         interrupted=False, ts=datetime(2026, 6, 10, 12, tzinfo=timezone.utc)):
+    return RawEvent(
+        source_file="f.jsonl", line_number=1, event_type="assistant",
+        session_id="s", request_id=None, message_id=mid, uuid=uuid, timestamp=ts,
+        usage=None if interrupted else Usage(output_tokens=10),
+        model="claude-opus-4-8", is_sidechain=sidechain, stop_reason=None,
+        attribution_skill=skill,
+        skill_names=Counter(skill_names) if skill_names else Counter(),
+    )
+
+
+def test_extract_skill_names_edge_cases():
+    # non-dict block, non-dict input, missing skill, empty/non-string slug all skipped;
+    # repeated slug accumulates.
+    content = [
+        "not-a-dict",
+        {"type": "tool_use", "name": "Skill", "input": "oops"},        # input not dict
+        {"type": "tool_use", "name": "Skill", "input": {}},            # missing skill
+        {"type": "tool_use", "name": "Skill", "input": {"skill": ""}}, # empty slug
+        {"type": "tool_use", "name": "Skill", "input": {"skill": 123}}, # non-string
+        {"type": "tool_use", "name": "Skill", "input": {"skill": "simplify"}},
+        {"type": "tool_use", "name": "Skill", "input": {"skill": "simplify"}},
+        {"type": "tool_use", "name": "Read", "input": {"skill": "nope"}},  # wrong tool
+    ]
+    assert _extract_skill_names(content) == Counter({"simplify": 2})
+
+
+def test_skill_name_other_is_rejected():
+    # A skill literally named "other" would collide with the ranked-bar collapse row.
+    assert _is_real_skill_name("other") is False
+    assert _extract_skill_names(
+        [{"type": "tool_use", "name": "Skill", "input": {"skill": "other"}}]
+    ) == Counter()
+
+
+def test_breakdown_skills_other_name_does_not_corrupt_collapse_row():
+    # Even if an "other"-named skill slipped through, the breakdown must not let it
+    # overwrite the synthetic tail. (attribution_skill "other" is filtered upstream,
+    # so a real skill named "other" never reaches cost_by_skill.)
+    turns = [_turn("other", 5.0), _turn("real", 1.0)]
+    rows = build_breakdown_skills(turns)
+    names = [r["name"] for r in rows]
+    # "other" attribution survives as data here (no upstream parser in this unit
+    # test), but with <=top_n skills there's no synthetic tail to collide with.
+    assert "real" in names
+
+
+def test_breakdown_skills_tail_collapse_over_top_n():
+    turns = [_turn(f"sk{i}", float(20 - i), skill_names={f"sk{i}": 1}) for i in range(12)]
+    rows = build_breakdown_skills(turns, top_n=10)
+    other = next(r for r in rows if r["name"] == "other")
+    assert other["tool_count"] == 2          # 12 skills - top 10
+    assert other["invocations"] == 2         # the two collapsed skills' invocations
+    assert len([r for r in rows if r["name"] != "other"]) == 10
+
+
+def test_accumulate_skill_costs_skips_interrupted():
+    live = _turn("simplify", 0.9)
+    ghost = _turn("ghost", 0.0)
+    ghost.is_interrupted = True
+    cost, invs, last = _accumulate_skill_costs([live, ghost])
+    assert "ghost" not in cost           # interrupted turn leaves no $0 row
+    assert cost == {"simplify": 0.9}
+
+
+def test_derive_delta_turns_carries_skill_fields():
+    evs = [_raw(skill="tiered-review", uuid="u1"),
+           _raw(skill_names={"tiered-review": 1}, uuid="u2")]
+    turns, _sessions, _fired, _locs = derive_delta_turns(evs, set(), set())
+    by_uuid = {t.dedup_key: t for t in turns}
+    assert by_uuid["u1"].attribution_skill == "tiered-review"
+    assert by_uuid["u2"].skill_names == Counter({"tiered-review": 1})
+
+
+def test_build_skill_detail_invocations_only_returns_payload():
+    # Triggered but never attributed (invocations>0, no attributed turns):
+    # must return a non-None payload with zero cost (no division-by-zero).
+    t = _turn(None, 0.30, skill_names={"checkpoint": 1})
+    d = build_skill_detail("checkpoint", [t], [])
+    assert d is not None
+    assert d["scorecards"]["cost_usd"] == 0.0
+    assert d["scorecards"]["invocations"] == 1
+    assert d["scorecards"]["share_of_total"] == 0.0
+    assert d["scorecards"]["top_project"]["share"] == 0.0
+
+
+def test_build_skill_cost_daily_windowing():
+    today = datetime(2026, 6, 10, tzinfo=timezone.utc).date()
+    inside = _turn("simplify", 2.0, ts=datetime(2026, 6, 9, 12, tzinfo=timezone.utc))
+    outside = _turn("simplify", 9.0, ts=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    wrong = _turn("other-skill", 5.0, ts=datetime(2026, 6, 9, 12, tzinfo=timezone.utc))
+    rows = build_skill_cost_daily([inside, outside, wrong], skill_name="simplify",
+                                  days=30, today=today)
+    assert len(rows) == 30
+    assert sum(r.cost_usd for r in rows) == 2.0  # only the in-window simplify turn

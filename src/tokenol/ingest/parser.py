@@ -64,6 +64,15 @@ def _is_real_tool_name(name: object) -> bool:
     )
 
 
+def _is_real_skill_name(name: object) -> bool:
+    """A skill name is real only if it's a non-empty string that doesn't collide
+    with the synthetic ``"other"`` row used by ranked-bar collapsing — a hostile
+    log could otherwise masquerade as the Skill Mix collapse tail (the same
+    class of bug ``_is_real_tool_name`` guards for tools).
+    """
+    return isinstance(name, str) and bool(name) and name != "other"
+
+
 def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
     """Return (tool_names, tool_use_total, tool_error_count) from a content list.
 
@@ -101,7 +110,7 @@ def _extract_skill_names(content: list) -> Counter[str]:
         if block.get("type") == "tool_use" and block.get("name") == SKILL_TOOL:
             inp = block.get("input")
             slug = inp.get("skill") if isinstance(inp, dict) else None
-            if isinstance(slug, str) and slug:
+            if _is_real_skill_name(slug):
                 skills[slug] += 1
     return skills
 
@@ -262,7 +271,9 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 content = []
             tool_names, tool_use_count, tool_error_count = _extract_tool_blocks(content)
             skill_names = _extract_skill_names(content)
-            attribution_skill: str | None = ev.get("attributionSkill") or None
+            attribution_skill = ev.get("attributionSkill")
+            if not _is_real_skill_name(attribution_skill):
+                attribution_skill = None
 
             usage = _parse_usage(msg)
             model = ev.get("model") or msg.get("model")

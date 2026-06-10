@@ -27,7 +27,7 @@ from tokenol.model.events import Session, ToolCost, Turn, Usage
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
@@ -87,6 +87,15 @@ ALTER TABLE turns ADD COLUMN IF NOT EXISTS unattributed_output_tokens DOUBLE DEF
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS unattributed_cost_usd DOUBLE DEFAULT 0.0;
 """
 
+# v3: add the Skill cost-dimension columns. ``ALTER … IF NOT EXISTS`` keeps this
+# idempotent. Rows written before v3 hydrate with attribution_skill NULL and an
+# empty skill_names map — those turns simply don't contribute to the Skill
+# dimension until they age out of the window; new flushes write both fields.
+_MIGRATION_V3 = """
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS attribution_skill VARCHAR;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS skill_names JSON;
+"""
+
 
 def default_path() -> Path:
     """Resolve `TOKENOL_HISTORY_PATH` env var or fall back to ``~/.tokenol/history.duckdb``."""
@@ -126,6 +135,8 @@ def _turn_row(t: Turn) -> tuple:
         float(t.unattributed_input_tokens),
         float(t.unattributed_output_tokens),
         float(t.unattributed_cost_usd),
+        t.attribution_skill,
+        _json.dumps(dict(t.skill_names)),
     )
 
 
@@ -153,10 +164,12 @@ def _row_to_turn(r: tuple) -> Turn:
 
     (dedup_key, ts, sid, model, inp, out, cr, cc, cost, sidechain, interrupted,
      stop_reason, tu, te, tool_names_json, assumptions_json,
-     tool_costs_json, unattr_in, unattr_out, unattr_cost) = r
+     tool_costs_json, unattr_in, unattr_out, unattr_cost,
+     attribution_skill, skill_names_json) = r
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     tool_names = Counter(_json.loads(tool_names_json) if tool_names_json else {})
+    skill_names = Counter(_json.loads(skill_names_json) if skill_names_json else {})
     assumption_values = _json.loads(assumptions_json) if assumptions_json else []
     assumptions = [AssumptionTag(v) for v in assumption_values]
     tool_costs: dict[str, ToolCost] = {}
@@ -189,6 +202,8 @@ def _row_to_turn(r: tuple) -> Turn:
         unattributed_input_tokens=float(unattr_in or 0.0),
         unattributed_output_tokens=float(unattr_out or 0.0),
         unattributed_cost_usd=float(unattr_cost or 0.0),
+        attribution_skill=attribution_skill,
+        skill_names=skill_names,
     )
 
 
@@ -228,7 +243,8 @@ class HistoryStore:
         # Apply schema (DDL is idempotent via IF NOT EXISTS / IF NOT EXISTS).
         self._con.execute(_SCHEMA_V1)
         self._con.execute(_MIGRATION_V2)
-        # Upsert schema_version. Existing v1 files get bumped to v2 here.
+        self._con.execute(_MIGRATION_V3)
+        # Upsert schema_version. Existing v1/v2 files get bumped here.
         self._con.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -276,8 +292,9 @@ class HistoryStore:
                     cost_usd, is_sidechain, is_interrupted, stop_reason,
                     tool_use_count, tool_error_count, tool_names, assumptions,
                     tool_costs, unattributed_input_tokens,
-                    unattributed_output_tokens, unattributed_cost_usd
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    unattributed_output_tokens, unattributed_cost_usd,
+                    attribution_skill, skill_names
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT (dedup_key) DO NOTHING
             """
             for i in range(0, len(turns), FLUSH_CHUNK_SIZE):
@@ -336,7 +353,8 @@ class HistoryStore:
                    cost_usd, is_sidechain, is_interrupted, stop_reason,
                    tool_use_count, tool_error_count, tool_names, assumptions,
                    tool_costs, unattributed_input_tokens,
-                   unattributed_output_tokens, unattributed_cost_usd
+                   unattributed_output_tokens, unattributed_cost_usd,
+                   attribution_skill, skill_names
             FROM turns
             WHERE ts >= ?
             ORDER BY ts
@@ -417,7 +435,8 @@ class HistoryStore:
                    turns.is_interrupted, turns.stop_reason, turns.tool_use_count,
                    turns.tool_error_count, turns.tool_names, turns.assumptions,
                    turns.tool_costs, turns.unattributed_input_tokens,
-                   turns.unattributed_output_tokens, turns.unattributed_cost_usd
+                   turns.unattributed_output_tokens, turns.unattributed_cost_usd,
+                   turns.attribution_skill, turns.skill_names
             FROM turns {join_clause} {where_clause}
             ORDER BY turns.ts
         """
@@ -442,7 +461,8 @@ class HistoryStore:
                    cost_usd, is_sidechain, is_interrupted, stop_reason,
                    tool_use_count, tool_error_count, tool_names, assumptions,
                    tool_costs, unattributed_input_tokens,
-                   unattributed_output_tokens, unattributed_cost_usd
+                   unattributed_output_tokens, unattributed_cost_usd,
+                   attribution_skill, skill_names
             FROM turns WHERE session_id = ? ORDER BY ts
             """,
             [sid],

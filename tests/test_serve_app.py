@@ -1511,3 +1511,40 @@ async def test_skill_page_serves_html(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_api_breakdown_skills_populated_end_to_end(tmp_path: Path) -> None:
+    """The served snapshot path carries skill attribution end-to-end (regression
+    guard for the _build_turns_and_sessions wiring)."""
+    dst = tmp_path / "projects" / "sk.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "skills.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            skills_resp = await client.get("/api/breakdown/skills?range=all")
+            detail_resp = await client.get("/api/skill/simplify")
+            model_resp = await client.get("/api/model/claude-opus-4-8")
+
+    skills = {s["name"] for s in skills_resp.json()["skills"]}
+    assert {"tiered-review", "simplify"} <= skills
+    detail = detail_resp.json()
+    assert detail["name"] == "simplify"
+    assert "inline_usd" in detail["split"] and "subagent_usd" in detail["split"]
+    assert "by_skill" in model_resp.json()  # cross-link key present
+
+
+@pytest.mark.asyncio
+async def test_api_breakdown_skills_bad_range_400(tmp_path: Path) -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/skills?range=bogus")
+
+    assert resp.status_code == 400
