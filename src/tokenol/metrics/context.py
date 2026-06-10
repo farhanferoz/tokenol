@@ -7,8 +7,7 @@ from tokenol.model.events import Turn
 
 def context_tokens(turn: Turn) -> int:
     """Total tokens the model 'sees': input + cache_read + cache_creation."""
-    u = turn.usage
-    return u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+    return turn.usage.input_token_pool
 
 
 def max_turn_input(turns: list[Turn]) -> int:
@@ -73,12 +72,7 @@ def ctx_used_latest(latest_turn: Turn, model_context_window: int | None) -> floa
     Returns None when context window is unknown for the model."""
     if not model_context_window:
         return None
-    visible = (
-        latest_turn.usage.input_tokens
-        + latest_turn.usage.cache_read_input_tokens
-        + latest_turn.usage.cache_creation_input_tokens
-    )
-    return visible / model_context_window
+    return latest_turn.usage.input_token_pool / model_context_window
 
 
 def context_growth_rate(turns: list[Turn]) -> float:

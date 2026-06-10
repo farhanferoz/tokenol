@@ -16,7 +16,6 @@ from tokenol.serve.state import (
     build_breakdown_tools,
     build_skill_breakdown,
     build_skill_detail,
-    count_invoked_without_cost,
     derive_delta_turns,
     model_price_status,
 )
@@ -322,20 +321,21 @@ def test_build_skill_breakdown_matches_separate_builders_in_one_pass():
     ]
     p = build_skill_breakdown(turns)
     assert p["skills"] == build_breakdown_skills(turns)
-    assert p["invoked_no_cost"] == count_invoked_without_cost(turns)
     assert p["total_cost"] == 4.0 + 1.0 + 0.9
     # _turn sets Usage(output_tokens=out), input defaults 0 -> billable = output.
     assert p["total_billable_tokens"] == 2000 + 500 + 300
     assert p["skill_billable_tokens"] == 2000 + 300  # attributed turns only
 
 
-def test_count_invoked_without_cost_counts_started_but_uncharged_skills():
+def test_skill_breakdown_counts_started_but_uncharged_skills():
     turns = [
         _turn("tiered-review", 4.0, skill_names={"tiered-review": 1}),  # charged + started
         _turn(None, 0.0, skill_names={"brainstorming": 2}),            # started, no charge
         _turn("simplify", 0.9),                                         # charged, not started
     ]
     # Only brainstorming was started without any cost billed to it.
-    assert count_invoked_without_cost(turns) == {"skills": 1, "uses": 2}
+    assert build_skill_breakdown(turns)["invoked_no_cost"] == {"skills": 1, "uses": 2}
     # No invocations at all -> zeros.
-    assert count_invoked_without_cost([_turn("simplify", 0.9)]) == {"skills": 0, "uses": 0}
+    assert build_skill_breakdown([_turn("simplify", 0.9)])["invoked_no_cost"] == {
+        "skills": 0, "uses": 0,
+    }

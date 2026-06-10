@@ -180,11 +180,7 @@ def _attribute_cost(
     """
     turn_cost = cost_for_turn(model, usage)
 
-    input_token_pool = (
-        usage.input_tokens
-        + usage.cache_read_input_tokens
-        + usage.cache_creation_input_tokens
-    )
+    input_token_pool = usage.input_token_pool
     input_cost_pool = (
         turn_cost.input_usd + turn_cost.cache_read_usd + turn_cost.cache_creation_usd
     )

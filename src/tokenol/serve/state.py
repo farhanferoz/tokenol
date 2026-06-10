@@ -1398,11 +1398,7 @@ def _recompute_excl_cache_read(
     here.
     """
     usage = turn.usage
-    input_token_pool = (
-        usage.input_tokens
-        + usage.cache_read_input_tokens
-        + usage.cache_creation_input_tokens
-    )
+    input_token_pool = usage.input_token_pool
     output_token_count = usage.output_tokens
     if turn_cost is None:
         turn_cost = cost_for_turn(turn.model, usage)
@@ -1541,9 +1537,9 @@ def _rank_skill_costs(
 def build_skill_breakdown(turns: list[Turn], top_n: int = 10) -> dict:
     """Full GET /api/breakdown/skills payload in a single pair of turn walks.
 
-    Calling ``build_breakdown_skills`` + ``count_invoked_without_cost`` + three
-    separate cost/token sums back-to-back walks ``turns`` five times and
-    accumulates skills twice. This does one ``_accumulate_skill_costs`` pass
+    Ranking the rows, tallying the invoked-but-uncharged skills, and summing
+    cost/billable tokens separately would walk ``turns`` five times and
+    accumulate skills twice. This does one ``_accumulate_skill_costs`` pass
     (reused for the ranked rows and the invoked-without-cost tally) plus one
     sweep for the spend/billable-token totals, then derives everything else in
     O(skills). Returns ``{skills, total_cost, total_billable_tokens,
@@ -1636,10 +1632,11 @@ def model_price_status(model: str | None) -> str:
     """How confident we are in a model's price, for surfacing on Model Mix.
 
     - ``"known"`` — the model is in the price list; its cost is exact.
-    - ``"estimated"`` — an unrecognised Claude model; cost is computed from a
-      similar model's price (tagged ``UNKNOWN_MODEL_FALLBACK`` by the registry).
-    - ``"unpriced"`` — no model, the ``(unknown)`` bucket, or a non-Claude
-      provider we have no price for; its cost shows as $0.
+    - ``"estimated"`` — an unrecognised model that the registry priced from a
+      similar one (tagged ``UNKNOWN_MODEL_FALLBACK``); typically an unknown
+      Claude version, but any string that falls through to the fallback.
+    - ``"unpriced"`` — no model, the ``(unknown)`` bucket, or a provider the
+      registry has no price for (e.g. gemini/gpt); its cost shows as $0.
     """
     if not model or model == "(unknown)":
         return "unpriced"
@@ -1659,6 +1656,10 @@ def billable_token_totals(turns: list[Turn]) -> tuple[float, float]:
     directly. The stored ``unattributed_input_tokens`` is a share of the *input +
     cache* pool, so we recover the non-tool input *fraction* and apply it to the
     billable input alone — keeping the token share off the (huge) cache pool.
+
+    The pool divisor here must be the exact one the parser multiplied by when it
+    stored ``unattributed_input_tokens``; both go through ``Usage.input_token_pool``
+    so the round-trip can't drift.
     """
     total = 0.0
     non_tool = 0.0
@@ -1668,32 +1669,24 @@ def billable_token_totals(turns: list[Turn]) -> tuple[float, float]:
         bill_in = t.usage.input_tokens
         bill_out = t.usage.output_tokens
         total += bill_in + bill_out
-        input_pool = (
-            bill_in
-            + t.usage.cache_read_input_tokens
-            + t.usage.cache_creation_input_tokens
-        )
+        input_pool = t.usage.input_token_pool
         nontool_in_share = (t.unattributed_input_tokens / input_pool) if input_pool > 0 else 0.0
         non_tool += nontool_in_share * bill_in + t.unattributed_output_tokens
     return non_tool, total
 
 
-def count_invoked_without_cost(turns: list[Turn]) -> dict:
+def _invoked_without_cost(
+    cost_by_skill: dict[str, float], inv_by_skill: dict[str, int],
+) -> dict:
     """Skills that were started but had no cost billed specifically to them.
 
     Returns ``{"skills": <distinct count>, "uses": <total invocations>}`` for
     skills that show up as a Skill-tool invocation but never as an attributed
     cost. The Skill Mix ranks by cost, so these would otherwise vanish; the
     panel shows "+N started with no separate cost" instead of dropping them.
+    Works off the already-accumulated dicts so the combined breakdown builder
+    doesn't have to walk the turns again.
     """
-    cost_by_skill, inv_by_skill, _ = _accumulate_skill_costs(turns)
-    return _invoked_without_cost(cost_by_skill, inv_by_skill)
-
-
-def _invoked_without_cost(
-    cost_by_skill: dict[str, float], inv_by_skill: dict[str, int],
-) -> dict:
-    """Invoked-but-uncharged tally from pre-accumulated skill dicts."""
     no_cost = {n: c for n, c in inv_by_skill.items() if c > 0 and n not in cost_by_skill}
     return {"skills": len(no_cost), "uses": sum(no_cost.values())}
 

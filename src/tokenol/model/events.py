@@ -34,6 +34,21 @@ class Usage:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
 
+    @property
+    def input_token_pool(self) -> int:
+        """Input-side tokens the model reads: plain input + cache read + creation.
+
+        The single definition of the "tokens the model sees on input" pool. Cost
+        and token shares are split across this pool, so every producer and
+        consumer of those shares must agree on it byte-for-byte — keep it here,
+        not re-summed inline.
+        """
+        return (
+            self.input_tokens
+            + self.cache_read_input_tokens
+            + self.cache_creation_input_tokens
+        )
+
 
 @dataclass(slots=True)
 class ToolCost:
