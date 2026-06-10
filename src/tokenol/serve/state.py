@@ -1506,9 +1506,16 @@ def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
     # detail pages use, so the Skill Mix panel can't drift from them.
     cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(turns)
 
+    # Skill Mix ranks by cost, so a skill that was triggered but accrued no
+    # attributed cost (invocations only) intentionally doesn't get a row. The
+    # `other` tally therefore sums invocations of the collapsed *cost-bearing*
+    # tail only — not those orphan invocation-only skills, which would otherwise
+    # inflate the "other" count with skills that have no bar.
     ranked = _rank_dict_with_others(cost_by_skill, top_n=top_n)
     head_names = {r["name"] for r in ranked if r["name"] != "other"}
-    tail_inv_sum = sum(c for n, c in inv_by_skill.items() if n not in head_names)
+    tail_inv_sum = sum(
+        inv_by_skill.get(n, 0) for n in cost_by_skill if n not in head_names
+    )
     for row in ranked:
         name = row["name"]
         if name == "other":
@@ -1536,6 +1543,8 @@ def _accumulate_tool_costs(
     last: dict[str, datetime] = {}
     for t in turns:
         for name, tc in t.tool_costs.items():
+            if name == SKILL_TOOL:
+                continue  # owned by the Skill dimension; /tool/Skill 404s
             if name == UNKNOWN_TOOL:
                 cost[UNATTRIBUTED_TOOL] += tc.cost_usd
             else:
@@ -1545,6 +1554,8 @@ def _accumulate_tool_costs(
             ):
                 last[name] = t.timestamp
         for name, count in t.tool_names.items():
+            if name == SKILL_TOOL:
+                continue
             invs[name] += count
             if with_last_active and (name not in last or t.timestamp > last[name]):
                 last[name] = t.timestamp

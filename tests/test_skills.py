@@ -10,6 +10,7 @@ from tokenol.metrics.rollups import build_skill_cost_daily
 from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost, Turn, Usage
 from tokenol.serve.state import (
     _accumulate_skill_costs,
+    _accumulate_tool_costs,
     build_breakdown_skills,
     build_breakdown_tools,
     build_skill_detail,
@@ -255,3 +256,21 @@ def test_build_skill_cost_daily_windowing():
                                   days=30, today=today)
     assert len(rows) == 30
     assert sum(r.cost_usd for r in rows) == 2.0  # only the in-window simplify turn
+
+
+def test_accumulate_tool_costs_excludes_skill_row():
+    # The literal "Skill" tool must not surface in model/project "Cost by tool"
+    # (it 404s on click — it's owned by the Skill dimension).
+    t = Turn(
+        dedup_key="k", timestamp=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
+        session_id="s", model="claude-opus-4-8",
+        usage=Usage(input_tokens=1000, output_tokens=100),
+        is_sidechain=False, stop_reason="tool_use",
+    )
+    t.tool_names = Counter({"Skill": 1, "Read": 2})
+    t.tool_costs = {"Skill": ToolCost("Skill", cost_usd=0.02),
+                    "Read": ToolCost("Read", cost_usd=0.05)}
+    cost, invs, _last = _accumulate_tool_costs([t])
+    assert "Skill" not in cost
+    assert "Skill" not in invs
+    assert cost["Read"] == 0.05 and invs["Read"] == 2
