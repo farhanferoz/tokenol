@@ -9,6 +9,9 @@ All notable changes to tokenol are documented here. The format follows
 ### Added
 
 - **Skills cost dimension.** New first-class Skill dimension parallel to Tools/Models/Projects, driven by Claude Code's `attributionSkill` log tag. A "Skill Mix" panel sits alongside the Tool/Model/Project mixes in the Breakdown page's Breakdowns section, ranking skills by cost (incl. their sub-agent fan-out); a Skill detail page (`/skill/{name}`) shows scorecards, a 30-day daily-cost chart, cost-by-model / cost-by-project, and an **inline vs sub-agent** cost split. Model and Project detail pages gain a Cost-by-skill bar. The previously-misleading single "Skill" row in Tool Mix (trigger cost only) is dropped in favour of the real per-skill numbers.
+- **Plain-language caveat notes on every Breakdown panel.** Each panel (and the Billable-tokens scorecard) gains a small ⓘ with a jargon-free explanation of what it does and doesn't measure — that per-tool and (unrecognised) model costs are estimates, that Skill Mix excludes un-skilled work and won't sum to the total, that cache re-use is money saved rather than spent.
+- **Honest pricing on Model Mix.** Models whose price isn't in the table are flagged in the subheading — "estimated price" for an unrecognised Claude model (matched to a similar one) or "shown as $0" for a provider with no price — instead of silently understating cost.
+- **Skill Mix shows started-but-uncharged skills.** Skills that ran without any cost billed to them are summarised ("+N started with no separate cost") rather than vanishing from the cost-ranked list.
 
 ## 0.6.1 — 2026-05-16
 

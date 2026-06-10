@@ -42,8 +42,10 @@ from tokenol.serve.state import (
     build_skill_detail,
     build_snapshot_full,
     build_tool_detail,
+    count_invoked_without_cost,
     decode_cwd,
     encode_cwd,
+    model_price_status,
     range_since,
 )
 from tokenol.serve.streaming import SnapshotBroadcaster
@@ -710,6 +712,9 @@ def create_app(
                 "share": billable / total_billable,
                 "cost_usd": cost_usd,
                 "cost_share": (cost_usd / total_cost) if total_cost > 0 else 0,
+                # "known" | "estimated" | "unpriced" — lets the UI flag models
+                # whose cost is a fallback estimate or shown as $0 (no price).
+                "price_status": model_price_status(name),
             })
         models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
         return JSONResponse({"range": range, "models": models})
@@ -753,6 +758,12 @@ def create_app(
             if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
         ]
         skills = build_breakdown_skills(filtered)
-        return JSONResponse({"range": range, "skills": skills})
+        return JSONResponse({
+            "range": range,
+            "skills": skills,
+            # Skills that ran but had no cost billed specifically to them, so the
+            # panel can show "+N started with no separate cost" rather than drop them.
+            "invoked_no_cost": count_invoked_without_cost(filtered),
+        })
 
     return app

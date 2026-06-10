@@ -53,7 +53,7 @@
       <div class="sc-sub"     id="sc-activity-sub">—</div>
     </article>
     <article class="scorecard-card" id="sc-tokens">
-      <div class="sc-label">Billable tokens</div>
+      <div class="sc-label">Billable tokens <span class="info-dot" tabindex="0" role="note" aria-label="The text you send and receive. Cached context is shown in the Cache box — it's charged too, just much cheaper for its size." title="The text you send and receive. Cached context is shown in the Cache box — it's charged too, just much cheaper for its size.">i</span></div>
       <div class="sc-primary" id="sc-tokens-primary">—</div>
       <div class="sc-sub"     id="sc-tokens-sub">—</div>
     </article>
@@ -75,7 +75,7 @@
   <div class="breakdown-grid breakdown-grid--2">
     <section class="breakdown-panel" aria-labelledby="bp-daily-work-title">
       <div class="breakdown-panel-heading">
-        <h3 id="bp-daily-work-title">Daily Billable Tokens</h3>
+        <h3 id="bp-daily-work-title">Daily Billable Tokens <span class="info-dot" tabindex="0" role="note" aria-label="Your usage per day. It's made of the text you send, the text Claude writes back, and context saved to and re-read from memory. All of it is charged — the memory part is just far cheaper for its size. Use the toggle to switch between counts and dollars." title="Your usage per day. It's made of the text you send, the text Claude writes back, and context saved to and re-read from memory. All of it is charged — the memory part is just far cheaper for its size. Use the toggle to switch between counts and dollars.">i</span></h3>
         <span class="pill-row" id="bd-time-unit-pills" role="group" aria-label="Unit">
           <span data-bdunit="tokens" class="on">Tokens</span>
           <span data-bdunit="cost">$</span>
@@ -86,7 +86,7 @@
     </section>
     <section class="breakdown-panel" aria-labelledby="bp-daily-cache-title">
       <div class="breakdown-panel-heading">
-        <h3 id="bp-daily-cache-title">Daily Cache Re-use</h3>
+        <h3 id="bp-daily-cache-title">Daily Cache Re-use <span class="info-dot" tabindex="0" role="note" aria-label="This is money saved, not money spent. To keep going, Claude re-reads earlier context it kept in memory instead of paying to send it all again. Re-reading costs roughly a tenth as much — so a tall bar here is a good thing." title="This is money saved, not money spent. To keep going, Claude re-reads earlier context it kept in memory instead of paying to send it all again. Re-reading costs roughly a tenth as much — so a tall bar here is a good thing.">i</span></h3>
         <span class="chart-subheading" id="bp-daily-cache-sub"></span>
       </div>
       <div class="breakdown-chart"><canvas id="chart-daily-cache" height="200"></canvas></div>
@@ -99,7 +99,7 @@
   <div class="breakdown-grid breakdown-grid--2-1">
     <section class="breakdown-panel" aria-labelledby="bp-by-project-title">
       <div class="breakdown-panel-heading">
-        <h3 id="bp-by-project-title">Tokens by Project</h3>
+        <h3 id="bp-by-project-title">Tokens by Project <span class="info-dot" tabindex="0" role="note" aria-label="Usage grouped by the project folder you were working in. Background helpers Claude starts on its own count toward the same project that launched them. We list your biggest projects; the smaller ones are added together as a single remainder." title="Usage grouped by the project folder you were working in. Background helpers Claude starts on its own count toward the same project that launched them. We list your biggest projects; the smaller ones are added together as a single remainder.">i</span></h3>
         <span class="pill-row" id="bd-project-period-pills" role="group" aria-label="Period">
           <span data-range="7d">7D</span>
           <span data-range="30d" class="on">30D</span>
@@ -117,7 +117,7 @@
     </section>
     <section class="breakdown-panel" aria-labelledby="bp-by-model-title">
       <div class="breakdown-panel-heading">
-        <h3 id="bp-by-model-title">Model Mix</h3>
+        <h3 id="bp-by-model-title">Model Mix <span class="info-dot" tabindex="0" role="note" aria-label="Which version of Claude did the work (for example Opus vs Sonnet). In the count view, each slice is its share of usage. Switch to dollars and the slices become share of cost — a pricier version can cost a lot even when it didn't do the most work." title="Which version of Claude did the work (for example Opus vs Sonnet). In the count view, each slice is its share of usage. Switch to dollars and the slices become share of cost — a pricier version can cost a lot even when it didn't do the most work.">i</span></h3>
         <span class="pill-row" id="bd-model-period-pills" role="group" aria-label="Period">
           <span data-range="7d">7D</span>
           <span data-range="30d" class="on">30D</span>
@@ -137,7 +137,7 @@
   <div class="breakdown-grid breakdown-grid--1">
     <section class="breakdown-panel" aria-labelledby="bp-tools-title">
       <div class="breakdown-panel-heading">
-        <h3 id="bp-tools-title">Tool Mix</h3>
+        <h3 id="bp-tools-title">Tool Mix <span class="info-dot" tabindex="0" role="note" aria-label="These are estimates. Your Claude bill comes as one total each time it replies — it never says how much each tool cost on its own. So we split each reply's cost across the tools it used, in proportion to how much each one read and wrote. Good for spotting which tools are expensive; not exact to the penny." title="These are estimates. Your Claude bill comes as one total each time it replies — it never says how much each tool cost on its own. So we split each reply's cost across the tools it used, in proportion to how much each one read and wrote. Good for spotting which tools are expensive; not exact to the penny.">i</span></h3>
         <span class="pill-row" id="bd-tools-period-pills" role="group" aria-label="Period">
           <span data-range="7d">7D</span>
           <span data-range="30d" class="on">30D</span>
@@ -163,7 +163,7 @@
   <div class="breakdown-grid breakdown-grid--1">
     <section class="breakdown-panel" aria-labelledby="bp-skills-title">
       <div class="breakdown-panel-heading">
-        <h3 id="bp-skills-title">Skill Mix</h3>
+        <h3 id="bp-skills-title">Skill Mix <span class="info-dot" tabindex="0" role="note" aria-label="What your skills cost — the workflows you start with a slash command, like /commit. This counts only the work done while a skill was running, so it won't add up to your full bill — ordinary back-and-forth chatting isn't part of any skill. It includes any background helpers a skill starts on its own. If one skill calls another, the whole cost stays with the one you launched. Skills you used before Claude began labelling them won't appear here." title="What your skills cost — the workflows you start with a slash command, like /commit. This counts only the work done while a skill was running, so it won't add up to your full bill — ordinary back-and-forth chatting isn't part of any skill. It includes any background helpers a skill starts on its own. If one skill calls another, the whole cost stays with the one you launched. Skills you used before Claude began labelling them won't appear here.">i</span></h3>
         <span class="pill-row" id="bd-skills-period-pills" role="group" aria-label="Period">
           <span data-range="7d">7D</span>
           <span data-range="30d" class="on">30D</span>
@@ -177,6 +177,7 @@
         <span class="chart-subheading" id="bp-skills-sub"></span>
       </div>
       <div class="breakdown-chart breakdown-chart--tall" id="bp-skills-bars"></div>
+      <div class="breakdown-foot" id="bp-skills-foot" hidden></div>
     </section>
   </div>
 

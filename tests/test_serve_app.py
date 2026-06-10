@@ -1571,6 +1571,48 @@ async def test_api_breakdown_skills_populated_end_to_end(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_api_breakdown_by_model_carries_price_status(tmp_path: Path) -> None:
+    """Each model row reports how confident we are in its price."""
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/by-model?range=all")
+
+    assert resp.status_code == 200
+    models = resp.json()["models"]
+    assert models  # fixture has model usage
+    for m in models:
+        assert m["price_status"] in {"known", "estimated", "unpriced"}
+
+
+@pytest.mark.asyncio
+async def test_api_breakdown_skills_reports_invoked_no_cost(tmp_path: Path) -> None:
+    """The skills envelope reports skills that ran with no separate cost."""
+    dst = tmp_path / "projects" / "sk.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "skills.jsonl").read_bytes())
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/breakdown/skills?range=all")
+
+    body = resp.json()
+    assert "invoked_no_cost" in body
+    assert set(body["invoked_no_cost"]) == {"skills", "uses"}
+    assert isinstance(body["invoked_no_cost"]["skills"], int)
+    assert isinstance(body["invoked_no_cost"]["uses"], int)
+
+
+@pytest.mark.asyncio
 async def test_api_breakdown_skills_bad_range_400(tmp_path: Path) -> None:
     from httpx import ASGITransport, AsyncClient
 

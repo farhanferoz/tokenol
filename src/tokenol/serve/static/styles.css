@@ -948,6 +948,52 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
   font-size: 11px;
   color: var(--mute);
 }
+
+/* Small "i" affordance next to a panel/scorecard title; native hover tooltip
+   carries a plain-language note about what the panel does and doesn't show. */
+.info-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  border: 1px solid var(--rule-2);
+  border-radius: 50%;
+  color: var(--mute);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+  user-select: none;
+}
+.info-dot:hover,
+.info-dot:focus-visible {
+  color: var(--fg);
+  border-color: var(--mute);
+  outline: none;
+}
+
+/* Inline flag in the Model Mix subheading when a version's price is estimated
+   or missing; hover explains. */
+.price-flag {
+  color: var(--amber);
+  cursor: help;
+  border-bottom: 1px dotted var(--rule-2);
+}
+
+/* Muted footnote under a breakdown panel (e.g. skills that ran with no cost). */
+.breakdown-foot {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--mute);
+}
+.breakdown-foot[hidden] { display: none; }
+
 .breakdown-chart { position: relative; min-height: 200px; }
 .breakdown-chart--tall { min-height: 320px; }
 
@@ -989,6 +1035,18 @@ body[data-page="breakdown"] .topbar-controls .pill-group { display: none; }
 .ranked-bars .rb-label {
   text-align: right;
   color: var(--fg);
+}
+/* Long names (e.g. plugin-namespaced skills like
+   superpowers:subagent-driven-development) cap at two lines with an ellipsis
+   instead of wrapping to three+; the full name stays available on hover. */
+.ranked-bars .rb-label-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
 }
 .ranked-bars .rb-sublabel {
   opacity: 0.45;

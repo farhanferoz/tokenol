@@ -29,6 +29,7 @@ from tokenol.ingest.parser import (
     dedup_key,
     parse_file,
 )
+from tokenol.model import registry
 
 if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
@@ -1586,6 +1587,38 @@ def _accumulate_skill_costs(
         if with_last_active and (skill not in last or t.timestamp > last[skill]):
             last[skill] = t.timestamp
     return cost, invs, last
+
+
+def model_price_status(model: str | None) -> str:
+    """How confident we are in a model's price, for surfacing on Model Mix.
+
+    - ``"known"`` — the model is in the price list; its cost is exact.
+    - ``"estimated"`` — an unrecognised Claude model; cost is computed from a
+      similar model's price (tagged ``UNKNOWN_MODEL_FALLBACK`` by the registry).
+    - ``"unpriced"`` — no model, the ``(unknown)`` bucket, or a non-Claude
+      provider we have no price for; its cost shows as $0.
+    """
+    if not model or model == "(unknown)":
+        return "unpriced"
+    entry, tags = registry.resolve(model)
+    if entry is None:
+        return "unpriced"
+    if AssumptionTag.UNKNOWN_MODEL_FALLBACK in tags:
+        return "estimated"
+    return "known"
+
+
+def count_invoked_without_cost(turns: list[Turn]) -> dict:
+    """Skills that were started but had no cost billed specifically to them.
+
+    Returns ``{"skills": <distinct count>, "uses": <total invocations>}`` for
+    skills that show up as a Skill-tool invocation but never as an attributed
+    cost. The Skill Mix ranks by cost, so these would otherwise vanish; the
+    panel shows "+N started with no separate cost" instead of dropping them.
+    """
+    cost_by_skill, inv_by_skill, _ = _accumulate_skill_costs(turns)
+    no_cost = {n: c for n, c in inv_by_skill.items() if c > 0 and n not in cost_by_skill}
+    return {"skills": len(no_cost), "uses": sum(no_cost.values())}
 
 
 def build_tool_detail(

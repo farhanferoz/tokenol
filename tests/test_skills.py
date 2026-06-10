@@ -14,7 +14,9 @@ from tokenol.serve.state import (
     build_breakdown_skills,
     build_breakdown_tools,
     build_skill_detail,
+    count_invoked_without_cost,
     derive_delta_turns,
+    model_price_status,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -274,3 +276,29 @@ def test_accumulate_tool_costs_excludes_skill_row():
     assert "Skill" not in cost
     assert "Skill" not in invs
     assert cost["Read"] == 0.05 and invs["Read"] == 2
+
+
+def test_model_price_status_classifies_pricing_confidence():
+    from tokenol.model.registry import CLAUDE_MODELS
+
+    # A model that is actually in the price list resolves as exact.
+    a_known_model = next(iter(CLAUDE_MODELS))
+    assert model_price_status(a_known_model) == "known"
+    # An unrecognised Claude model falls back to a similar model's price.
+    assert model_price_status("claude-not-a-real-model-99") == "estimated"
+    # No price at all -> shown as $0.
+    assert model_price_status("gemini-2.5-pro") == "unpriced"  # non-Claude provider
+    assert model_price_status(None) == "unpriced"
+    assert model_price_status("(unknown)") == "unpriced"
+
+
+def test_count_invoked_without_cost_counts_started_but_uncharged_skills():
+    turns = [
+        _turn("tiered-review", 4.0, skill_names={"tiered-review": 1}),  # charged + started
+        _turn(None, 0.0, skill_names={"brainstorming": 2}),            # started, no charge
+        _turn("simplify", 0.9),                                         # charged, not started
+    ]
+    # Only brainstorming was started without any cost billed to it.
+    assert count_invoked_without_cost(turns) == {"skills": 1, "uses": 2}
+    # No invocations at all -> zeros.
+    assert count_invoked_without_cost([_turn("simplify", 0.9)]) == {"skills": 0, "uses": 0}

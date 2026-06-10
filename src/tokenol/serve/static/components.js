@@ -196,7 +196,11 @@ export function renderRankedBars(container, rows, opts = {}) {
 
     const label = document.createElement("div");
     label.classList.add("rb-label");
-    label.textContent = r.label;
+    label.title = r.label; // full name on hover, since long ones get clamped
+    const labelText = document.createElement("div");
+    labelText.classList.add("rb-label-text");
+    labelText.textContent = r.label;
+    label.appendChild(labelText);
     if (r.sublabel) {
       const sub = document.createElement("div");
       sub.classList.add("rb-sublabel");

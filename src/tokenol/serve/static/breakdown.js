@@ -372,8 +372,22 @@ function renderByModel(data) {
   const colors = collapsed.map((_, i) => pal[i % pal.length]);
   const names = collapsed.map(c => (c.isOthers ? null : c.name));
 
-  document.getElementById('bp-by-model-sub').textContent =
-    `${d.models.length} model${d.models.length === 1 ? '' : 's'}`;
+  const modelSubEl = document.getElementById('bp-by-model-sub');
+  const nModels = d.models.length;
+  const baseSub = `${nModels} model${nModels === 1 ? '' : 's'}`;
+  const nEstimated = d.models.filter(m => m.price_status === 'estimated').length;
+  const nUnpriced = d.models.filter(m => m.price_status === 'unpriced').length;
+  const priceNotes = [];
+  if (nEstimated) priceNotes.push(`${nEstimated} estimated price`);
+  if (nUnpriced) priceNotes.push(`${nUnpriced} shown as $0`);
+  if (priceNotes.length) {
+    const tip = 'Some versions are not in our price list yet. An estimated price is '
+      + 'matched to a similar Claude version; shown as $0 means we have no price for it at all.';
+    modelSubEl.innerHTML =
+      `${baseSub} · <span class="price-flag" tabindex="0" role="note" title="${tip}" aria-label="${tip}">${priceNotes.join(' · ')}</span>`;
+  } else {
+    modelSubEl.textContent = baseSub;
+  }
 
   const canvas = document.getElementById('chart-by-model');
 
@@ -543,6 +557,20 @@ function renderSkillMix(data) {
   });
   const fmt = useCost ? fmtUSD : (n) => fmtInt(n) + ' uses';
   renderRankedBars(document.getElementById('bp-skills-bars'), rows, { valueFormat: fmt });
+
+  const foot = document.getElementById('bp-skills-foot');
+  if (foot) {
+    const nc = d.invoked_no_cost;
+    if (nc && nc.skills > 0) {
+      foot.textContent =
+        `+ ${nc.skills} skill${nc.skills === 1 ? '' : 's'} started with no separate cost`;
+      foot.title = 'These ran, but no work was billed specifically to them.';
+      foot.hidden = false;
+    } else {
+      foot.textContent = '';
+      foot.hidden = true;
+    }
+  }
 }
 
 async function refreshSkills() {
