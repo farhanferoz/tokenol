@@ -81,7 +81,6 @@ class ProjectRollup:
     cost_per_kw_val: float | None = None
     ctx_used_latest: float | None = None
     model_mix: dict[str, float] = field(default_factory=dict)
-    dual_session_conflict: bool = False
 
 
 @dataclass(slots=True)
@@ -227,10 +226,8 @@ def build_session_rollup(session: Session) -> SessionRollup:
 
 def build_project_rollups(
     session_rollups: list[SessionRollup],
-    conflicted_cwds: set[str] | None = None,
 ) -> list[ProjectRollup]:
     """Aggregate SessionRollups by cwd."""
-    conflicted = conflicted_cwds or set()
     buckets: dict[str, list[SessionRollup]] = {}
 
     for sr in session_rollups:
@@ -311,7 +308,6 @@ def build_project_rollups(
                 cost_per_kw_val=cpk,
                 ctx_used_latest=cul,
                 model_mix=model_mix,
-                dual_session_conflict=(cwd in conflicted),
             )
         )
 

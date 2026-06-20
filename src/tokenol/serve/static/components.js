@@ -60,8 +60,7 @@ export const GLOSSARY = [
   { term: 'Cache reuse',              def: 'cache_read / cache_creation, as N:1 — reads per fresh creation. Low = cache thrashing.' },
   { term: 'Ctx used',                 def: "Latest turn's visible context (input + cache_read + cache_creation) ÷ model's context window. How close the session is to the ceiling." },
   { term: '7-day median',             def: 'Median of the last 7 days (today excluded) for a metric — "your normal". Falls back to shorter windows when history is thin; no delta with < 3 days of data.' },
-  { term: 'DUAL_SESSION_CONFLICT',    def: 'Detected when ≥ 2 sessions in the same project ran concurrently inside one 5-hour window and cache reuse dropped below 20:1.' },
-  { term: 'Verdict',                  def: 'OK · CONTEXT_CREEP · RUNAWAY_WINDOW · TOOL_ERROR_STORM · SIDECHAIN_HEAVY · DUAL_SESSION_CONFLICT.' },
+  { term: 'Verdict',                  def: 'OK · CONTEXT_CREEP · RUNAWAY_WINDOW · TOOL_ERROR_STORM · SIDECHAIN_HEAVY.' },
   { term: 'Cost per turn',            def: 'Dollars billed for each turn, split into the four price components: input, output, cache_read (0.1× input rate), cache_creation (1.25× input rate).' },
 ];
 
@@ -95,7 +94,6 @@ const VERDICT_DEFS = {
   RUNAWAY_WINDOW:    'Some 5-hour window cost ≥ $50 — a spending spike compressed into a short period.',
   TOOL_ERROR_STORM:  '≥ 10 tool uses with > 30% error rate — a failing tool is likely stuck in a retry loop.',
   SIDECHAIN_HEAVY:   'Sidechain / task-agent session costing more than $5 — delegated sub-agent work dominated the bill.',
-  DUAL_SESSION_CONFLICT: 'Two concurrent sessions in the same project within one 5-hour window dropped cache reuse below 20:1 — sessions were thrashing each other\'s cache.',
 };
 
 /** Render a verdict distribution list. */
