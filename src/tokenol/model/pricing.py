@@ -1,9 +1,15 @@
 """Flat per-model pricing (USD per 1M tokens) and context windows.
 
-Rates from Anthropic docs (Fable 5 added 2026-06-10). All current Claude
-models price flat at all context sizes — no 1M-tier surcharge. Cache-write
-is 1.25x input (5-minute TTL) and cache-read is 0.1x input throughout.
-Unknown models fall back to nearest family sibling via ModelRegistry.
+Rates from Anthropic docs (Fable 5 added 2026-06-10; Sonnet 5 added
+2026-07-13). All current Claude models price flat at all context sizes —
+no 1M-tier surcharge. Cache-write is 1.25x input (5-minute TTL) and
+cache-read is 0.1x input throughout. Unknown models fall back to nearest
+family sibling via ModelRegistry.
+
+Sonnet 5 is at introductory pricing ($2/$10, cache-read $0.20) through
+2026-08-31; standard pricing ($3/$15, cache-read $0.30 — same as Sonnet
+4.6) takes effect 2026-09-01. This table has no dated tiers, so the
+entry below will need a manual update to the standard rate on that date.
 """
 
 from typing import TypedDict
@@ -52,6 +58,15 @@ CLAUDE_MODELS: dict[str, ModelEntry] = {
         "output": 25.00,
         "cache_write": 6.25,
         "cache_read": 0.50,
+    },
+    # Sonnet 5 (introductory pricing through 2026-08-31 — see module docstring)
+    "claude-sonnet-5": {
+        "family": "sonnet",
+        "context": 1_000_000,
+        "input": 2.00,
+        "output": 10.00,
+        "cache_write": 2.50,
+        "cache_read": 0.20,
     },
     # Sonnet 4.x
     "claude-sonnet-4-6": {
@@ -126,6 +141,6 @@ def context_window(model: str) -> int | None:
 FAMILY_FALLBACKS: dict[str, list[str]] = {
     "fable": ["claude-fable-5"],
     "opus": ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
-    "sonnet": ["claude-sonnet-4-6", "claude-sonnet-3-7-20250219"],
+    "sonnet": ["claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-3-7-20250219"],
     "haiku": ["claude-haiku-4-5-20251001", "claude-haiku-3-5-20241022"],
 }

@@ -14,6 +14,7 @@ from tokenol.model.events import Session, Turn, Usage
 FIXTURES = Path(__file__).parent / "fixtures"
 
 _M = 1_000_000
+_COST_EPS = 1e-9
 
 
 def test_cost_opus_47():
@@ -25,7 +26,7 @@ def test_cost_opus_47():
     # cache_read: 500 * 0.50 / 1M = 0.00025
     # cache_write: 100 * 6.25 / 1M = 0.000625
     expected = (1000 * 5.00 + 200 * 25.00 + 500 * 0.50 + 100 * 6.25) / _M
-    assert abs(tc.total_usd - expected) < 1e-9
+    assert abs(tc.total_usd - expected) < _COST_EPS
     assert tc.assumptions == []
 
 
@@ -34,7 +35,7 @@ def test_cost_haiku_45():
                   cache_creation_input_tokens=0)
     tc = cost_for_turn("claude-haiku-4-5-20251001", usage)
     expected = (10_000 * 1.00 + 500 * 5.00) / _M
-    assert abs(tc.total_usd - expected) < 1e-9
+    assert abs(tc.total_usd - expected) < _COST_EPS
 
 
 def test_cost_fable_5():
@@ -46,7 +47,7 @@ def test_cost_fable_5():
     # cache_read: 500 * 1.00 / 1M = 0.0005
     # cache_write: 100 * 12.50 / 1M = 0.00125
     expected = (1000 * 10.00 + 200 * 50.00 + 500 * 1.00 + 100 * 12.50) / _M
-    assert abs(tc.total_usd - expected) < 1e-9
+    assert abs(tc.total_usd - expected) < _COST_EPS
     assert tc.assumptions == []
 
 
@@ -91,6 +92,26 @@ def test_opus_48_priced_and_suffix_clean():
 
     entry, tags = resolve("claude-opus-4-8[1m]")
     assert entry == CLAUDE_MODELS["claude-opus-4-8"]
+    assert tags == []
+
+
+def test_cost_sonnet_5():
+    # Sonnet 5 introductory pricing (through 2026-08-31) must not fall back
+    # to Sonnet 4.6's rate, which is 1.5x more expensive.
+    usage = Usage(input_tokens=1000, output_tokens=200,
+                  cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    tc = cost_for_turn("claude-sonnet-5", usage)
+    expected = (1000 * 2.00 + 200 * 10.00 + 500 * 0.20 + 100 * 2.50) / _M
+    assert abs(tc.total_usd - expected) < _COST_EPS
+    assert tc.assumptions == []
+
+
+def test_sonnet_5_priced_and_suffix_clean():
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-sonnet-5[1m]")
+    assert entry == CLAUDE_MODELS["claude-sonnet-5"]
     assert tags == []
 
 
@@ -154,7 +175,7 @@ def test_sidechain_cost():
     assert t.is_sidechain is True
     # haiku: input 300 * 1.00 + output 50 * 5.00 + cache_read 200 * 0.10 / 1M
     expected = (300 * 1.00 + 50 * 5.00 + 200 * 0.10) / _M
-    assert abs(t.cost_usd - expected) < 1e-9
+    assert abs(t.cost_usd - expected) < _COST_EPS
 
 
 # ---- cache_saved_usd --------------------------------------------------------
