@@ -4,6 +4,15 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.1 — 2026-07-13
+
+### Fixed
+- **`claude-sonnet-5` pricing.** Added the missing pricing-table entry for `claude-sonnet-5` ($2.00 input / $10.00 output per 1M tokens, intro rate through 2026-08-31; cache $2.50 write / $0.20 read; 1M context). Previously unpriced Sonnet-5 turns silently fell back to `claude-sonnet-4-6` rates via family fallback instead of surfacing as a priced or flagged model. Also updates the `sonnet` family's newest-model fallback to Sonnet 5.
+
+### Internal
+- Removed dead `DUAL_SESSION_CONFLICT` verdict plumbing (verified unreachable — its only possible producer, `detect_dual_session_conflict`, was never wired in).
+- Fixed a test time-bomb: `test_daily_insufficient_history` compared a fixture's hardcoded 2026-04-14 timestamp against real `date.today()`, which stopped triggering the intended fallback once 90 real days had passed. The test now builds its event data relative to `date.today()` instead of a fixed-date fixture.
+
 ## 0.7.0 — 2026-06-10
 
 ### Added
