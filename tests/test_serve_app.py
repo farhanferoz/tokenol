@@ -187,9 +187,33 @@ async def test_daily_endpoint_happy_path(tmp_path: Path) -> None:
 async def test_daily_insufficient_history(tmp_path: Path) -> None:
     """GET /api/daily?range=90d with only a few days of data → 200 with fallback note,
     not 400 — clients shouldn't have to special-case a well-formed request."""
+    # Timestamps relative to today (not a fixed fixture date) so the "only a few days
+    # of history" premise holds no matter when this test runs against the 90d window.
+    import json
+    from datetime import date, timedelta
+
+    ts = (date.today() - timedelta(days=5)).isoformat() + "T10:00:00Z"
+    events = [
+        {
+            "type": "assistant", "timestamp": ts, "sessionId": "sess-001",
+            "requestId": "req-aaa", "uuid": "evt-001", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {"id": "msg-aaa", "role": "assistant", "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 1000, "output_tokens": 200,
+                                  "cache_read_input_tokens": 500, "cache_creation_input_tokens": 100}},
+        },
+        {
+            "type": "assistant", "timestamp": ts, "sessionId": "sess-001",
+            "requestId": "req-bbb", "uuid": "evt-002", "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {"id": "msg-bbb", "role": "assistant", "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 2000, "output_tokens": 300,
+                                  "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 0}},
+        },
+    ]
     dst = tmp_path / "projects" / "sess-001.jsonl"
     dst.parent.mkdir(parents=True)
-    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+    dst.write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
     from httpx import ASGITransport, AsyncClient
 
