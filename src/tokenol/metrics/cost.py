@@ -39,7 +39,17 @@ def cost_for_turn(model: str | None, usage: Usage) -> TurnCost:
     input_usd = usage.input_tokens * entry["input"] / _M
     output_usd = usage.output_tokens * entry["output"] / _M
     cache_read_usd = usage.cache_read_input_tokens * entry["cache_read"] / _M
-    cache_creation_usd = usage.cache_creation_input_tokens * entry["cache_write"] / _M
+
+    # Cache-creation tokens split by TTL tier: 1-hour writes bill at 2x input,
+    # 5-minute writes at 1.25x. Clamp the 1h share to the total as a defensive
+    # guard against malformed external log data (this is untrusted file input,
+    # not an internal invariant) — Anthropic's own payloads never violate it.
+    cache_1h_tokens = min(usage.cache_creation_1h_input_tokens, usage.cache_creation_input_tokens)
+    cache_5m_tokens = usage.cache_creation_input_tokens - cache_1h_tokens
+    cache_creation_usd = (
+        cache_5m_tokens * entry["cache_write"] / _M
+        + cache_1h_tokens * entry["cache_write_1h"] / _M
+    )
     total = input_usd + output_usd + cache_read_usd + cache_creation_usd
 
     return TurnCost(input_usd, output_usd, cache_read_usd, cache_creation_usd, total, tags)

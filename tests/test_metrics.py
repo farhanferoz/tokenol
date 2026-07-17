@@ -115,6 +115,77 @@ def test_sonnet_5_priced_and_suffix_clean():
     assert tags == []
 
 
+def test_cache_write_all_1h_tier():
+    """Regression for the confirmed bug: cache-creation tokens entirely on the
+    1-hour tier must price at 2x input, not the 5-minute tier's 1.25x."""
+    usage = Usage(input_tokens=6, output_tokens=6, cache_read_input_tokens=16153,
+                  cache_creation_input_tokens=17618, cache_creation_1h_input_tokens=17618)
+    tc = cost_for_turn("claude-opus-4-7", usage)
+    expected = (6 * 5.00 + 6 * 25.00 + 16153 * 0.50 + 17618 * 10.00) / _M
+    assert abs(tc.total_usd - expected) < _COST_EPS
+    # The old (wrong) 5-minute-only formula would have given a lower total —
+    # assert against it explicitly so a regression back to that formula fails.
+    old_wrong_total = (6 * 5.00 + 6 * 25.00 + 16153 * 0.50 + 17618 * 6.25) / _M
+    assert tc.total_usd > old_wrong_total
+
+
+def test_cache_write_split_5m_and_1h():
+    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
+                  cache_creation_input_tokens=1000, cache_creation_1h_input_tokens=300)
+    tc = cost_for_turn("claude-opus-4-7", usage)
+    # 700 tokens @ 5m rate (6.25) + 300 tokens @ 1h rate (10.00)
+    expected = (700 * 6.25 + 300 * 10.00) / _M
+    assert abs(tc.cache_creation_usd - expected) < _COST_EPS
+
+
+def test_cache_write_1h_clamped_to_total():
+    """Defensive guard: malformed external log data claiming more 1h tokens
+    than the total cache-creation count must not go negative on the 5m side."""
+    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
+                  cache_creation_input_tokens=100, cache_creation_1h_input_tokens=500)
+    tc = cost_for_turn("claude-opus-4-7", usage)
+    # Clamped: all 100 tokens treated as 1h tier, none go negative.
+    expected = 100 * 10.00 / _M
+    assert abs(tc.cache_creation_usd - expected) < _COST_EPS
+
+
+def test_sonnet_45_resolves_to_own_entry_not_sonnet_5_intro_rate():
+    """claude-sonnet-4-5 is a distinct, currently-active model priced at
+    standard $3/$15 — it must not silently fall back to Sonnet 5's cheaper
+    $2/$10 introductory rate via family fallback."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    for model_id in ("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"):
+        entry, tags = resolve(model_id)
+        assert entry == CLAUDE_MODELS[model_id]
+        assert entry["input"] == 3.00
+        assert tags == []
+
+
+def test_opus_45_resolves_to_own_entry():
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    for model_id in ("claude-opus-4-5", "claude-opus-4-5-20251101"):
+        entry, tags = resolve(model_id)
+        assert entry == CLAUDE_MODELS[model_id]
+        assert tags == []
+
+
+def test_opus_41_resolves_to_own_entry_not_opus_48_rate():
+    """Opus 4.1 is 3x Opus 4.8's price ($15/$75 vs $5/$25) — misrouting it
+    through family fallback would badly underprice it."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    for model_id in ("claude-opus-4-1", "claude-opus-4-1-20250805"):
+        entry, tags = resolve(model_id)
+        assert entry == CLAUDE_MODELS[model_id]
+        assert entry["input"] == 15.00
+        assert tags == []
+
+
 def test_cost_gemini_unpriced():
     usage = Usage(input_tokens=1000, output_tokens=100, cache_read_input_tokens=0,
                   cache_creation_input_tokens=0)

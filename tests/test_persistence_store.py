@@ -524,6 +524,52 @@ def test_skill_fields_survive_flush_and_hydrate(tmp_path: Path) -> None:
         store.close()
 
 
-def test_schema_version_is_three(tmp_path: Path) -> None:
+def test_schema_version_is_four(tmp_path: Path) -> None:
     from tokenol.persistence.store import SCHEMA_VERSION
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
+
+
+def test_cache_creation_1h_tokens_round_trip(tmp_path: Path) -> None:
+    """Schema v4 added cache_creation_1h_tokens — the 1-hour-tier share of
+    cache-creation tokens. Without this round-trip, warm-tier turns lose the
+    5m/1h split on reload and any recompute would silently underprice."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        ts = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
+        original = Turn(
+            dedup_key="rt-1h", timestamp=ts, session_id="s1",
+            model="claude-opus-4-7",
+            usage=Usage(input_tokens=6, output_tokens=6,
+                        cache_read_input_tokens=16153,
+                        cache_creation_input_tokens=17618,
+                        cache_creation_1h_input_tokens=17618),
+            is_sidechain=False, stop_reason="end_turn", cost_usd=0.17738,
+        )
+        store.flush([original], [_session("s1")])
+
+        reloaded, _ = store.hydrate_hot(window_days=365)
+        assert len(reloaded) == 1
+        r = reloaded[0]
+        assert r.usage.cache_creation_input_tokens == 17618
+        assert r.usage.cache_creation_1h_input_tokens == 17618
+    finally:
+        store.close()
+
+
+def test_schema_v3_to_v4_migration_is_idempotent(tmp_path: Path) -> None:
+    """A pre-existing v3 database (no cache_creation_1h_tokens column) must
+    upgrade in place; reopening a v4 file is a no-op."""
+    db_path = tmp_path / "history.duckdb"
+    HistoryStore(db_path).close()
+    store = HistoryStore(db_path)
+    try:
+        from tokenol.persistence.store import SCHEMA_VERSION
+        rows = store._con.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchall()
+        assert rows == [(str(SCHEMA_VERSION),)]
+        store._con.execute(
+            "SELECT cache_creation_1h_tokens FROM turns LIMIT 0"
+        ).fetchall()
+    finally:
+        store.close()

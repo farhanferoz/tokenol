@@ -4,6 +4,15 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- **1-hour cache-write tokens were priced at the 5-minute rate.** Anthropic bills prompt-cache writes at 1.25x input for a 5-minute TTL or 2x input for a 1-hour TTL, reported via a nested `usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens` breakdown. tokenol only read the flat `cache_creation_input_tokens` total and priced all of it at the 5-minute rate — understating cache-write cost by up to 37.5% on any turn using 1-hour caching (measured: ~28% understated across a 40-file real-session sample, where 66% of cache-creation tokens were actually 1-hour tier). `Usage` gains `cache_creation_1h_input_tokens`; the parser now extracts the breakdown; `cost_for_turn` prices the two tiers separately. Every `ModelEntry` gains a `cache_write_1h` rate (verified against Anthropic's pricing page). **Existing `~/.tokenol/history.duckdb` rows retain their pre-fix (understated) `cost_usd`** — the raw 5m/1h split was never persisted for those turns, so a `forget` (clear history) + re-ingest from source JSONL is required to recompute them correctly; new flushes are unaffected going forward.
+- **Unmapped-but-active models silently mispriced via family fallback.** `claude-sonnet-4-5`, `claude-opus-4-5`, and `claude-opus-4-1` (all still active per Anthropic's pricing page) had no table entry, so any turn on them fell back to the newest sibling in their family — e.g. Sonnet 4.5 ($3/$15) priced as Sonnet 5's introductory rate ($2/$10), or Opus 4.1 ($15/$75) priced as Opus 4.8's rate ($5/$25), a 3x underprice. Added explicit entries for `claude-sonnet-4-5(-20250929)`, `claude-opus-4-5(-20251101)`, `claude-opus-4-1(-20250805)`, plus the older `claude-opus-4(-0)(-20250514)`, `claude-sonnet-4(-0)(-20250514)`, and `claude-3-haiku-20240307` for historical-log coverage.
+
+### Internal
+- `FAMILY_FALLBACKS` simplified from `dict[str, list[str]]` to `dict[str, str]` — the list form's entries past index 0 were dead code (`registry.resolve` only ever read `[0]`).
+
 ## 0.7.1 — 2026-07-13
 
 ### Fixed

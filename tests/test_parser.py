@@ -43,6 +43,69 @@ def test_parse_interrupted():
     assert events[0].stop_reason is None
 
 
+def test_parse_usage_extracts_1h_cache_breakdown(tmp_path):
+    """Real Claude Code logs nest a cache_creation.ephemeral_1h_input_tokens /
+    ephemeral_5m_input_tokens breakdown alongside the flat
+    cache_creation_input_tokens total. Only the 1h share needs to be pulled
+    out — cost.py prices it at the 1-hour rate instead of the 5-minute one."""
+    p = tmp_path / "hour_cache.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "req-1", "uuid": "evt-1",
+        "isSidechain": False, "model": "claude-opus-4-7",
+        "message": {
+            "id": "msg-1", "role": "assistant", "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 6, "output_tokens": 6,
+                "cache_read_input_tokens": 16153,
+                "cache_creation_input_tokens": 17618,
+                "cache_creation": {
+                    "ephemeral_1h_input_tokens": 17618,
+                    "ephemeral_5m_input_tokens": 0,
+                },
+            },
+        },
+    }) + "\n")
+    events = list(parse_file(p))
+    assert len(events) == 1
+    usage = events[0].usage
+    assert usage.cache_creation_input_tokens == 17618
+    assert usage.cache_creation_1h_input_tokens == 17618
+
+
+def test_parse_usage_mixed_cache_tiers(tmp_path):
+    p = tmp_path / "mixed_cache.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
+        "sessionId": "s1", "requestId": "req-1", "uuid": "evt-1",
+        "isSidechain": False, "model": "claude-opus-4-7",
+        "message": {
+            "id": "msg-1", "role": "assistant", "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 6, "output_tokens": 6,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 1000,
+                "cache_creation": {
+                    "ephemeral_1h_input_tokens": 300,
+                    "ephemeral_5m_input_tokens": 700,
+                },
+            },
+        },
+    }) + "\n")
+    usage = list(parse_file(p))[0].usage
+    assert usage.cache_creation_input_tokens == 1000
+    assert usage.cache_creation_1h_input_tokens == 300
+
+
+def test_parse_usage_missing_cache_breakdown_defaults_to_zero_1h():
+    """Older logs (predating 1-hour caching) carry no nested cache_creation
+    breakdown. These must parse as entirely 5-minute tier, matching how they
+    were actually billed — not silently treated as 1-hour."""
+    events = list(parse_file(FIXTURES / "basic.jsonl"))
+    assert events[0].usage.cache_creation_input_tokens == 100
+    assert events[0].usage.cache_creation_1h_input_tokens == 0
+
+
 def test_parse_sidechain():
     events = list(parse_file(FIXTURES / "sidechain.jsonl"))
     assert len(events) == 1

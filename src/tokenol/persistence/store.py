@@ -27,7 +27,7 @@ from tokenol.model.events import Session, ToolCost, Turn, Usage
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
@@ -96,6 +96,17 @@ ALTER TABLE turns ADD COLUMN IF NOT EXISTS attribution_skill VARCHAR;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS skill_names JSON;
 """
 
+# v4: add the 1-hour cache-write tier split, so pricing (2x input, vs 1.25x
+# for the 5-minute tier) can be recomputed correctly for warm-tier rows on a
+# future flush. Rows written before v4 hydrate with 0 — i.e. entirely
+# 5-minute tier — which understates cost for any turn that actually used
+# 1-hour caching; those rows' cost_usd was already computed (and persisted)
+# under the old formula and does not self-correct. Re-ingest from source
+# JSONL (after a `forget`) to recompute affected historical turns.
+_MIGRATION_V4 = """
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_creation_1h_tokens BIGINT DEFAULT 0;
+"""
+
 
 def default_path() -> Path:
     """Resolve `TOKENOL_HISTORY_PATH` env var or fall back to ``~/.tokenol/history.duckdb``."""
@@ -123,6 +134,7 @@ def _turn_row(t: Turn) -> tuple:
         int(t.usage.output_tokens),
         int(t.usage.cache_read_input_tokens),
         int(t.usage.cache_creation_input_tokens),
+        int(t.usage.cache_creation_1h_input_tokens),
         float(t.cost_usd),
         bool(t.is_sidechain),
         bool(t.is_interrupted),
@@ -162,7 +174,7 @@ def _row_to_turn(r: tuple) -> Turn:
     """
     from tokenol.enums import AssumptionTag
 
-    (dedup_key, ts, sid, model, inp, out, cr, cc, cost, sidechain, interrupted,
+    (dedup_key, ts, sid, model, inp, out, cr, cc, cc_1h, cost, sidechain, interrupted,
      stop_reason, tu, te, tool_names_json, assumptions_json,
      tool_costs_json, unattr_in, unattr_out, unattr_cost,
      attribution_skill, skill_names_json) = r
@@ -189,6 +201,7 @@ def _row_to_turn(r: tuple) -> Turn:
         usage=Usage(
             input_tokens=inp, output_tokens=out,
             cache_read_input_tokens=cr, cache_creation_input_tokens=cc,
+            cache_creation_1h_input_tokens=cc_1h or 0,
         ),
         is_sidechain=bool(sidechain),
         stop_reason=stop_reason,
@@ -244,6 +257,7 @@ class HistoryStore:
         self._con.execute(_SCHEMA_V1)
         self._con.execute(_MIGRATION_V2)
         self._con.execute(_MIGRATION_V3)
+        self._con.execute(_MIGRATION_V4)
         # Upsert schema_version. Existing v1/v2 files get bumped here.
         self._con.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
@@ -289,12 +303,13 @@ class HistoryStore:
                 INSERT INTO turns (
                     dedup_key, ts, session_id, model,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    cache_creation_1h_tokens,
                     cost_usd, is_sidechain, is_interrupted, stop_reason,
                     tool_use_count, tool_error_count, tool_names, assumptions,
                     tool_costs, unattributed_input_tokens,
                     unattributed_output_tokens, unattributed_cost_usd,
                     attribution_skill, skill_names
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT (dedup_key) DO NOTHING
             """
             for i in range(0, len(turns), FLUSH_CHUNK_SIZE):
@@ -350,6 +365,7 @@ class HistoryStore:
             """
             SELECT dedup_key, ts, session_id, model,
                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                   cache_creation_1h_tokens,
                    cost_usd, is_sidechain, is_interrupted, stop_reason,
                    tool_use_count, tool_error_count, tool_names, assumptions,
                    tool_costs, unattributed_input_tokens,
@@ -431,7 +447,8 @@ class HistoryStore:
         sql = f"""
             SELECT turns.dedup_key, turns.ts, turns.session_id, turns.model,
                    turns.input_tokens, turns.output_tokens, turns.cache_read_tokens,
-                   turns.cache_creation_tokens, turns.cost_usd, turns.is_sidechain,
+                   turns.cache_creation_tokens, turns.cache_creation_1h_tokens,
+                   turns.cost_usd, turns.is_sidechain,
                    turns.is_interrupted, turns.stop_reason, turns.tool_use_count,
                    turns.tool_error_count, turns.tool_names, turns.assumptions,
                    turns.tool_costs, turns.unattributed_input_tokens,
@@ -458,6 +475,7 @@ class HistoryStore:
             """
             SELECT dedup_key, ts, session_id, model,
                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                   cache_creation_1h_tokens,
                    cost_usd, is_sidechain, is_interrupted, stop_reason,
                    tool_use_count, tool_error_count, tool_names, assumptions,
                    tool_costs, unattributed_input_tokens,

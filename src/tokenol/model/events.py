@@ -33,6 +33,12 @@ class Usage:
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    # Subset of cache_creation_input_tokens billed at the 1-hour TTL rate (2x
+    # input) rather than the 5-minute rate (1.25x input). Anthropic reports
+    # this split in the nested `usage.cache_creation` object; older logs (or
+    # models that predate 1-hour caching) carry no breakdown, which parses to
+    # 0 here — i.e. entirely 5-minute tier, matching their actual billing.
+    cache_creation_1h_input_tokens: int = 0
 
     @property
     def input_token_pool(self) -> int:

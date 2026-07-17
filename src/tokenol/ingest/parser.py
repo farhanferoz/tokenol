@@ -26,6 +26,8 @@ UNKNOWN_TOOL = "__unknown__"
 # owned by the dedicated Skill dimension, so the Tools dimension excludes it.
 SKILL_TOOL = "Skill"
 COMPACTION_DROP_RATIO = 0.2
+# Minimum length of a Windows drive-letter path prefix, e.g. "C:".
+_WINDOWS_DRIVE_PREFIX_LEN = 2
 
 
 def _parse_timestamp(ts: str) -> datetime:
@@ -42,11 +44,21 @@ def _parse_usage(msg: dict) -> Usage | None:
     u = msg.get("usage")
     if not u or "input_tokens" not in u:
         return None
+    # Anthropic splits cache-creation tokens by TTL tier in a nested object
+    # (`cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`).
+    # The flat `cache_creation_input_tokens` field is their sum and remains the
+    # authoritative total; only the 1h share needs to be pulled out separately
+    # so cost.py can price it at the 1-hour rate instead of the 5-minute one.
+    breakdown = u.get("cache_creation")
+    cache_creation_1h = (
+        breakdown.get("ephemeral_1h_input_tokens", 0) if isinstance(breakdown, dict) else 0
+    )
     return Usage(
         input_tokens=u.get("input_tokens", 0),
         output_tokens=u.get("output_tokens", 0),
         cache_read_input_tokens=u.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=u.get("cache_creation_input_tokens", 0),
+        cache_creation_1h_input_tokens=cache_creation_1h,
     )
 
 
@@ -278,7 +290,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
             cwd: str | None = ev.get("cwd") or None
             if cwd and (
-                (len(cwd) >= 2 and cwd[1] == ":" and cwd[0].isalpha())  # Windows drive letter
+                (len(cwd) >= _WINDOWS_DRIVE_PREFIX_LEN and cwd[1] == ":" and cwd[0].isalpha())  # Windows drive letter
                 or cwd.startswith("\\\\")  # UNC path
             ):
                 # Normalize Windows-style separators so downstream path logic

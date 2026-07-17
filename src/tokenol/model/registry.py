@@ -48,7 +48,7 @@ class ModelRegistry:
         # Unknown Claude model — family fallback.
         for family in _FAMILY_KEYWORDS:
             if family in lower:
-                fallback_key = FAMILY_FALLBACKS[family][0]
+                fallback_key = FAMILY_FALLBACKS[family]
                 tags.append(AssumptionTag.UNKNOWN_MODEL_FALLBACK)
                 return CLAUDE_MODELS[fallback_key], tags
 
