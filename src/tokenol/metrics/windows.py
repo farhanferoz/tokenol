@@ -17,8 +17,8 @@ WINDOW_DURATION = timedelta(hours=5)
 class Window:
     """One 5-hour wall-clock rate-limit window."""
 
-    start: datetime              # first event timestamp
-    end: datetime                # start + 5h (half-open: [start, end))
+    start: datetime  # first event timestamp
+    end: datetime  # start + 5h (half-open: [start, end))
     turns: list[Turn] = field(default_factory=list)
 
     @property
@@ -87,9 +87,7 @@ def project_window(active: Window, now: datetime, lookback: timedelta) -> dict:
     lookback_hours = lookback.total_seconds() / 3600
     burn_rate_usd_per_hour = recent_cost / lookback_hours if lookback_hours > 0 else 0.0
 
-    projected_window_cost = (
-        active.cost_usd + burn_rate_usd_per_hour * remaining.total_seconds() / 3600
-    )
+    projected_window_cost = active.cost_usd + burn_rate_usd_per_hour * remaining.total_seconds() / 3600
 
     over_reference = projected_window_cost > 50.0
 

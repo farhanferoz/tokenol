@@ -80,6 +80,7 @@ def _bucket_turns(
     fields.
     """
     from tokenol.metrics.cost import cost_for_turn
+
     buckets: dict[str, dict[str, float]] = {}
     for s in sessions:
         for t in s.turns:
@@ -88,12 +89,20 @@ def _bucket_turns(
             if t.is_interrupted:
                 continue
             key = key_fn(s, t)
-            b = buckets.setdefault(key, {
-                "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
-                "input_cost": 0.0, "output_cost": 0.0,
-                "cache_read_cost": 0.0, "cache_creation_cost": 0.0,
-                "total_cost": 0.0,
-            })
+            b = buckets.setdefault(
+                key,
+                {
+                    "input": 0,
+                    "output": 0,
+                    "cache_read": 0,
+                    "cache_creation": 0,
+                    "input_cost": 0.0,
+                    "output_cost": 0.0,
+                    "cache_read_cost": 0.0,
+                    "cache_creation_cost": 0.0,
+                    "total_cost": 0.0,
+                },
+            )
             b["input"] += t.usage.input_tokens
             b["output"] += t.usage.output_tokens
             b["cache_read"] += t.usage.cache_read_input_tokens
@@ -111,6 +120,7 @@ def _is_compare_form(param: str) -> bool:
     """Whether a project/model filter value produces multiple series."""
     return param == "compare" or "," in param
 
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -124,10 +134,7 @@ def _warn_if_orphan_store_exists() -> None:
         size_mb = store_path.stat().st_size / (1024 * 1024)
     except OSError:
         return
-    Console(stderr=True).print(
-        f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).\n"
-        f"Persistence is OFF — pass --persist to use it.[/yellow]"
-    )
+    Console(stderr=True).print(f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).\nPersistence is OFF — pass --persist to use it.[/yellow]")
 
 
 @dataclass
@@ -328,9 +335,7 @@ def create_app(
             )
             if warm_turns:
                 existing_keys = {t.dedup_key for t in result.turns}
-                merged_turns = list(result.turns) + [
-                    t for t in warm_turns if t.dedup_key not in existing_keys
-                ]
+                merged_turns = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
                 merged_turns.sort(key=lambda t: t.timestamp)
 
                 # Build a superset of sessions: existing + warm-tier sessions for this cwd.
@@ -434,9 +439,7 @@ def create_app(
             )
             if warm_turns:
                 existing_keys = {t.dedup_key for t in result.turns}
-                merged = list(result.turns) + [
-                    t for t in warm_turns if t.dedup_key not in existing_keys
-                ]
+                merged = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
                 merged.sort(key=lambda t: t.timestamp)
                 result = replace(result, turns=merged)
         # Fall back silently to the longest available window when the requested range
@@ -454,10 +457,7 @@ def create_app(
                 if earliest > since:
                     have_days = (today - earliest).days + 1
                     effective_range = "all"
-                    note = (
-                        f"Only {have_days} days of history available — "
-                        f"showing all data instead of {range}."
-                    )
+                    note = f"Only {have_days} days of history available — showing all data instead of {range}."
         panel = build_daily_panel(result.turns, result.sessions, effective_range, metric, project, model)
         if note is not None:
             panel["requested_range"] = range
@@ -478,9 +478,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"window must be one of: {list(_WINDOW_MINUTES)}")
         result = _current_snapshot_result(request)
         now = datetime.now(tz=timezone.utc)
-        return JSONResponse(build_recent_activity_panel(
-            result.turns, result.sessions, now, _WINDOW_MINUTES[window]
-        ))
+        return JSONResponse(build_recent_activity_panel(result.turns, result.sessions, now, _WINDOW_MINUTES[window]))
 
     def _validate_tool_or_model_name(name: str) -> str:
         # MCP tools have names like `mcp__server__tool`; future Claude Code
@@ -588,22 +586,21 @@ def create_app(
             sessions = list(result.sessions)
         else:
             turns = [t for t in result.turns if t.timestamp.date() >= since]
-            sessions = [
-                s for s in result.sessions
-                if any(t.timestamp.date() >= since for t in s.turns)
-            ]
+            sessions = [s for s in result.sessions if any(t.timestamp.date() >= since for t in s.turns)]
 
-        return JSONResponse({
-            "range": range,
-            "sessions": len(sessions),
-            "turns": len(turns),
-            "input_tokens": sum(t.usage.input_tokens for t in turns),
-            "output_tokens": sum(t.usage.output_tokens for t in turns),
-            "cache_read_tokens": sum(t.usage.cache_read_input_tokens for t in turns),
-            "cache_creation_tokens": sum(t.usage.cache_creation_input_tokens for t in turns),
-            "cost_usd": sum(t.cost_usd for t in turns),
-            "cache_saved_usd": cache_saved_usd(turns),
-        })
+        return JSONResponse(
+            {
+                "range": range,
+                "sessions": len(sessions),
+                "turns": len(turns),
+                "input_tokens": sum(t.usage.input_tokens for t in turns),
+                "output_tokens": sum(t.usage.output_tokens for t in turns),
+                "cache_read_tokens": sum(t.usage.cache_read_input_tokens for t in turns),
+                "cache_creation_tokens": sum(t.usage.cache_creation_input_tokens for t in turns),
+                "cost_usd": sum(t.cost_usd for t in turns),
+                "cache_saved_usd": cache_saved_usd(turns),
+            }
+        )
 
     @app.get("/api/breakdown/daily-tokens")
     async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
@@ -621,13 +618,15 @@ def create_app(
         # in $ mode sums to cost_usd (cache_read is the largest cost component
         # on heavy-cache days and would otherwise be silently missing).
         from tokenol.metrics.cost import cost_for_turn
+
         cost_by_date: dict = {}
         for t in turns:
             if t.is_interrupted:
                 continue
             d = t.timestamp.date()
             slot = cost_by_date.setdefault(
-                d, {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0},
+                d,
+                {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0},
             )
             tc = cost_for_turn(t.model, t.usage)
             slot["input"] += tc.input_usd
@@ -636,24 +635,26 @@ def create_app(
             slot["cache_read"] += tc.cache_read_usd
 
         _empty_cost = {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0}
-        return JSONResponse({
-            "range": range,
-            "days": [
-                {
-                    "date": r.date.isoformat(),
-                    "input": r.input_tokens,
-                    "output": r.output_tokens,
-                    "cache_creation": r.cache_creation_tokens,
-                    "cache_read": r.cache_read_tokens,
-                    "cost_usd": r.cost_usd,
-                    "input_cost":          cost_by_date.get(r.date, _empty_cost)["input"],
-                    "output_cost":         cost_by_date.get(r.date, _empty_cost)["output"],
-                    "cache_creation_cost": cost_by_date.get(r.date, _empty_cost)["cache_creation"],
-                    "cache_read_cost":     cost_by_date.get(r.date, _empty_cost)["cache_read"],
-                }
-                for r in rollups
-            ],
-        })
+        return JSONResponse(
+            {
+                "range": range,
+                "days": [
+                    {
+                        "date": r.date.isoformat(),
+                        "input": r.input_tokens,
+                        "output": r.output_tokens,
+                        "cache_creation": r.cache_creation_tokens,
+                        "cache_read": r.cache_read_tokens,
+                        "cost_usd": r.cost_usd,
+                        "input_cost": cost_by_date.get(r.date, _empty_cost)["input"],
+                        "output_cost": cost_by_date.get(r.date, _empty_cost)["output"],
+                        "cache_creation_cost": cost_by_date.get(r.date, _empty_cost)["cache_creation"],
+                        "cache_read_cost": cost_by_date.get(r.date, _empty_cost)["cache_read"],
+                    }
+                    for r in rollups
+                ],
+            }
+        )
 
     @app.get("/api/breakdown/by-project")
     async def api_breakdown_by_project(request: Request, range: str = "30d"):
@@ -664,7 +665,8 @@ def create_app(
         cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
 
         buckets = _bucket_turns(
-            result.sessions, since,
+            result.sessions,
+            since,
             key_fn=lambda s, _t: cwd_by_sid.get(s.session_id, "(unknown)"),
         )
 
@@ -672,19 +674,21 @@ def create_app(
         for cwd, b in buckets.items():
             denom = b["cache_read"] + b["cache_creation"] + b["input"]
             hit_rate = (b["cache_read"] / denom) if denom > 0 else None
-            projects.append({
-                "project": Path(cwd).name if cwd != "(unknown)" else "(unknown)",
-                "cwd": cwd,
-                "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
-                "input": b["input"],
-                "output": b["output"],
-                "cache_creation": b["cache_creation"],
-                "input_cost": b["input_cost"],
-                "output_cost": b["output_cost"],
-                "cache_creation_cost": b["cache_creation_cost"],
-                "cache_read_cost": b["cache_read_cost"],
-                "cache_hit_rate": hit_rate,
-            })
+            projects.append(
+                {
+                    "project": Path(cwd).name if cwd != "(unknown)" else "(unknown)",
+                    "cwd": cwd,
+                    "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
+                    "input": b["input"],
+                    "output": b["output"],
+                    "cache_creation": b["cache_creation"],
+                    "input_cost": b["input_cost"],
+                    "output_cost": b["output_cost"],
+                    "cache_creation_cost": b["cache_creation_cost"],
+                    "cache_read_cost": b["cache_read_cost"],
+                    "cache_hit_rate": hit_rate,
+                }
+            )
         projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
         return JSONResponse({"range": range, "projects": projects})
 
@@ -695,7 +699,8 @@ def create_app(
         since = range_since(range, date.today()) if range != "all" else None
 
         buckets = _bucket_turns(
-            result.sessions, since,
+            result.sessions,
+            since,
             key_fn=lambda _s, t: t.model or "(unknown)",
         )
 
@@ -705,17 +710,19 @@ def create_app(
         for name, b in buckets.items():
             billable = b["input"] + b["output"]
             cost_usd = b["total_cost"]
-            models.append({
-                "model": name,
-                "input": b["input"],
-                "output": b["output"],
-                "share": billable / total_billable,
-                "cost_usd": cost_usd,
-                "cost_share": (cost_usd / total_cost) if total_cost > 0 else 0,
-                # "known" | "estimated" | "unpriced" — lets the UI flag models
-                # whose cost is a fallback estimate or shown as $0 (no price).
-                "price_status": model_price_status(name),
-            })
+            models.append(
+                {
+                    "model": name,
+                    "input": b["input"],
+                    "output": b["output"],
+                    "share": billable / total_billable,
+                    "cost_usd": cost_usd,
+                    "cost_share": (cost_usd / total_cost) if total_cost > 0 else 0,
+                    # "known" | "estimated" | "unpriced" — lets the UI flag models
+                    # whose cost is a fallback estimate or shown as $0 (no price).
+                    "price_status": model_price_status(name),
+                }
+            )
         models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
         return JSONResponse({"range": range, "models": models})
 
@@ -732,41 +739,29 @@ def create_app(
         if mode not in _ATTRIBUTION_MODES:
             mode = AttributionMode.PRORATA.value
         result = _current_snapshot_result(request)
-        since = (
-            range_since(range, datetime.now(tz=timezone.utc).date())
-            if range != "all"
-            else None
-        )
-        filtered = [
-            t for t in result.turns
-            if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
-        ]
+        since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
+        filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
         tools = build_breakdown_tools(filtered, mode=mode)
         # Billable-token totals so the Tokens view can show what fraction of all
         # tokens ran through tool calls — a different number than the cost share,
         # since $/token varies by model and cache.
         nontool_billable, total_billable = billable_token_totals(filtered)
-        return JSONResponse({
-            "range": range,
-            "mode": mode,
-            "tools": tools,
-            "total_billable_tokens": total_billable,
-            "nontool_billable_tokens": nontool_billable,
-        })
+        return JSONResponse(
+            {
+                "range": range,
+                "mode": mode,
+                "tools": tools,
+                "total_billable_tokens": total_billable,
+                "nontool_billable_tokens": nontool_billable,
+            }
+        )
 
     @app.get("/api/breakdown/skills")
     async def api_breakdown_skills(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         result = _current_snapshot_result(request)
-        since = (
-            range_since(range, datetime.now(tz=timezone.utc).date())
-            if range != "all"
-            else None
-        )
-        filtered = [
-            t for t in result.turns
-            if not t.is_interrupted and (since is None or t.timestamp.date() >= since)
-        ]
+        since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
+        filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
         # One combined builder (two turn walks) instead of calling the ranked
         # list, the invoked-without-cost tally, and three cost/token sums
         # separately — which would walk `filtered` five times.

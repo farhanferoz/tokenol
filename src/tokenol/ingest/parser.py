@@ -50,9 +50,7 @@ def _parse_usage(msg: dict) -> Usage | None:
     # authoritative total; only the 1h share needs to be pulled out separately
     # so cost.py can price it at the 1-hour rate instead of the 5-minute one.
     breakdown = u.get("cache_creation")
-    cache_creation_1h = (
-        breakdown.get("ephemeral_1h_input_tokens", 0) if isinstance(breakdown, dict) else 0
-    )
+    cache_creation_1h = breakdown.get("ephemeral_1h_input_tokens", 0) if isinstance(breakdown, dict) else 0
     return Usage(
         input_tokens=u.get("input_tokens", 0),
         output_tokens=u.get("output_tokens", 0),
@@ -69,11 +67,7 @@ def _is_real_tool_name(name: object) -> bool:
     hide its share of cost under `__unattributed__` / `__unknown__` or
     masquerade as the collapsed tail.
     """
-    return (
-        isinstance(name, str)
-        and bool(name)
-        and name not in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, "other")
-    )
+    return isinstance(name, str) and bool(name) and name not in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, "other")
 
 
 def _is_real_skill_name(name: object) -> bool:
@@ -193,9 +187,7 @@ def _attribute_cost(
     turn_cost = cost_for_turn(model, usage)
 
     input_token_pool = usage.input_token_pool
-    input_cost_pool = (
-        turn_cost.input_usd + turn_cost.cache_read_usd + turn_cost.cache_creation_usd
-    )
+    input_cost_pool = turn_cost.input_usd + turn_cost.cache_read_usd + turn_cost.cache_creation_usd
 
     names = set(output_shares.keys()) | set(input_shares.keys())
     tool_costs: dict[str, ToolCost] = {}
@@ -308,11 +300,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
             block_sizes = [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
 
             if event_type == "assistant" and usage is not None:
-                input_pool = (
-                    usage.input_tokens
-                    + usage.cache_read_input_tokens
-                    + usage.cache_creation_input_tokens
-                )
+                input_pool = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
                 if peak_input_tokens > 0 and input_pool < COMPACTION_DROP_RATIO * peak_input_tokens:
                     tool_use_id_to_name.clear()
                     bytes_in_context_by_tool.clear()
@@ -327,16 +315,8 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
 
                 output_shares, _ = _output_byte_shares(block_sizes)
                 total_ctx_bytes = sum(bytes_in_context_by_tool.values()) + non_tool_bytes_in_context
-                if total_ctx_bytes > 0:
-                    input_shares = {
-                        name: b / total_ctx_bytes
-                        for name, b in bytes_in_context_by_tool.items()
-                    }
-                else:
-                    input_shares = {}
-                tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(
-                    model, usage, output_shares, input_shares
-                )
+                input_shares = {name: b / total_ctx_bytes for name, b in bytes_in_context_by_tool.items()} if total_ctx_bytes > 0 else {}
+                tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(model, usage, output_shares, input_shares)
 
             # Fold this line's content into the running tallies so the next
             # assistant turn can attribute its input side against them.
@@ -347,17 +327,13 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                     bid = block.get("id")
                     if _is_real_tool_name(name) and isinstance(bid, str) and bid:
                         tool_use_id_to_name[bid] = name
-                        bytes_in_context_by_tool[name] = (
-                            bytes_in_context_by_tool.get(name, 0) + b
-                        )
+                        bytes_in_context_by_tool[name] = bytes_in_context_by_tool.get(name, 0) + b
                     else:
                         non_tool_bytes_in_context += b
                 elif btype == "tool_result":
                     bid = block.get("tool_use_id")
                     name = tool_use_id_to_name.pop(bid, UNKNOWN_TOOL) if bid else UNKNOWN_TOOL
-                    bytes_in_context_by_tool[name] = (
-                        bytes_in_context_by_tool.get(name, 0) + b
-                    )
+                    bytes_in_context_by_tool[name] = bytes_in_context_by_tool.get(name, 0) + b
                 else:
                     non_tool_bytes_in_context += b
 

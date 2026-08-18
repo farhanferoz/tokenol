@@ -136,6 +136,7 @@ async def test_subscribe_subsequent_message_is_diff(tmp_path: Path) -> None:
     messages: list[dict] = []
     with _mock_dirs(tmp_path):
         import tokenol.serve.streaming as _stream_mod
+
         _stream_mod.build_snapshot_full = patched_build
         try:
             agen = bc.subscribe("today").__aiter__()
@@ -184,6 +185,7 @@ async def test_two_subscribers_share_one_producer(tmp_path: Path) -> None:
 
     with _mock_dirs(tmp_path):
         import tokenol.serve.streaming as _stream_mod
+
         _stream_mod.build_snapshot_full = counting_build
         try:
             agen1 = bc.subscribe("today").__aiter__()
@@ -258,6 +260,7 @@ async def test_gate_skips_rebuild_when_files_unchanged(tmp_path: Path) -> None:
 
     with _mock_dirs(tmp_path):
         import tokenol.serve.streaming as _stream_mod
+
         _stream_mod.build_snapshot_full = counting_build
         try:
             agen = bc.subscribe("today").__aiter__()
@@ -269,9 +272,7 @@ async def test_gate_skips_rebuild_when_files_unchanged(tmp_path: Path) -> None:
                 await asyncio.sleep(0.2)
                 # No file changed and heartbeat is far in the future, so build_calls
                 # must not have grown past the initial bootstrap.
-                assert build_calls == 1, (
-                    f"Expected gate to skip rebuilds, saw {build_calls} builds"
-                )
+                assert build_calls == 1, f"Expected gate to skip rebuilds, saw {build_calls} builds"
             finally:
                 await agen.aclose()
         finally:
@@ -306,6 +307,7 @@ async def test_gate_rebuilds_when_file_mtime_changes(tmp_path: Path) -> None:
 
     with _mock_dirs(tmp_path):
         import tokenol.serve.streaming as _stream_mod
+
         _stream_mod.build_snapshot_full = counting_build
         try:
             agen = bc.subscribe("today").__aiter__()
@@ -314,10 +316,7 @@ async def test_gate_rebuilds_when_file_mtime_changes(tmp_path: Path) -> None:
                 assert build_calls == 1
 
                 # Append to the file → new mtime/size → gate should fire.
-                dst.write_bytes(
-                    dst.read_bytes()
-                    + b'\n{"type":"system","timestamp":"2026-04-14T10:10:00Z","sessionId":"x","cwd":"/tmp"}\n'
-                )
+                dst.write_bytes(dst.read_bytes() + b'\n{"type":"system","timestamp":"2026-04-14T10:10:00Z","sessionId":"x","cwd":"/tmp"}\n')
                 # Allow several gate-check iterations to detect the change.
                 for _ in range(50):
                     if build_calls > 1:
@@ -376,15 +375,22 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
             timestamp=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
             session_id="sess-X",
             model="claude-sonnet-4-6",
-            usage=Usage(input_tokens=100, output_tokens=50,
-                        cache_read_input_tokens=20, cache_creation_input_tokens=10),
-            is_sidechain=False, stop_reason="end_turn", cost_usd=0.01,
-            is_interrupted=False, tool_use_count=0, tool_error_count=0,
-            tool_names=Counter(), assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
+            usage=Usage(input_tokens=100, output_tokens=50, cache_read_input_tokens=20, cache_creation_input_tokens=10),
+            is_sidechain=False,
+            stop_reason="end_turn",
+            cost_usd=0.01,
+            is_interrupted=False,
+            tool_use_count=0,
+            tool_error_count=0,
+            tool_names=Counter(),
+            assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
         )
         pre_existing_session = Session(
-            session_id="sess-X", source_file="/tmp/x.jsonl",
-            is_sidechain=False, cwd="/tmp/proj", turns=[],
+            session_id="sess-X",
+            source_file="/tmp/x.jsonl",
+            is_sidechain=False,
+            cwd="/tmp/proj",
+            turns=[],
         )
         store.flush([pre_existing_turn], [pre_existing_session])
 
@@ -411,17 +417,18 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
                 flush_queue=flush_queue,
             )
 
-            submit_forget_request(ForgetRequest(
-                kind="session", value="sess-X",
-                submitted_at=datetime.now(tz=timezone.utc),
-            ))
+            submit_forget_request(
+                ForgetRequest(
+                    kind="session",
+                    value="sess-X",
+                    submitted_at=datetime.now(tz=timezone.utc),
+                )
+            )
 
             await broadcaster.process_pending_forget()
 
             # Store row gone.
-            rows = store._con.execute(
-                "SELECT COUNT(*) FROM sessions WHERE session_id = 'sess-X'"
-            ).fetchone()
+            rows = store._con.execute("SELECT COUNT(*) FROM sessions WHERE session_id = 'sess-X'").fetchone()
             assert rows == (0,)
             # In-memory hot tier evicted.
             assert "sess-X" not in parse_cache._hot_sessions_by_id
@@ -455,12 +462,17 @@ async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypa
 
         def _t(key, sid, ts):
             return Turn(
-                dedup_key=key, timestamp=ts, session_id=sid,
+                dedup_key=key,
+                timestamp=ts,
+                session_id=sid,
                 model="claude-sonnet-4-6",
-                usage=Usage(input_tokens=10, output_tokens=5,
-                            cache_read_input_tokens=0, cache_creation_input_tokens=0),
-                is_sidechain=False, stop_reason="end_turn", cost_usd=0.001,
-                is_interrupted=False, tool_use_count=0, tool_error_count=0,
+                usage=Usage(input_tokens=10, output_tokens=5, cache_read_input_tokens=0, cache_creation_input_tokens=0),
+                is_sidechain=False,
+                stop_reason="end_turn",
+                cost_usd=0.001,
+                is_interrupted=False,
+                tool_use_count=0,
+                tool_error_count=0,
                 tool_names=Counter(),
                 assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
             )
@@ -486,16 +498,22 @@ async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypa
         await flush_queue.start()
         try:
             broadcaster = SnapshotBroadcaster(
-                parse_cache=cache, all_projects=False,
-                get_reference_usd=lambda: 50.0, get_tick_seconds=lambda: 1,
+                parse_cache=cache,
+                all_projects=False,
+                get_reference_usd=lambda: 50.0,
+                get_tick_seconds=lambda: 1,
                 get_thresholds=lambda: {},
-                history_store=store, flush_queue=flush_queue,
+                history_store=store,
+                flush_queue=flush_queue,
             )
             cutoff = datetime(2026, 4, 1, tzinfo=timezone.utc)
-            submit_forget_request(ForgetRequest(
-                kind="older_than", value=cutoff.isoformat(),
-                submitted_at=datetime.now(tz=timezone.utc),
-            ))
+            submit_forget_request(
+                ForgetRequest(
+                    kind="older_than",
+                    value=cutoff.isoformat(),
+                    submitted_at=datetime.now(tz=timezone.utc),
+                )
+            )
 
             await broadcaster.process_pending_forget()
 

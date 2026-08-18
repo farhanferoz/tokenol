@@ -29,27 +29,51 @@ from tokenol.serve.state import (
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 _P5_TOP_LEVEL_KEYS = {
-    "generated_at", "config", "thresholds", "period",
-    "topbar_summary", "tiles", "anomaly",
-    "hourly_today", "daily", "models", "recent_activity",
+    "generated_at",
+    "config",
+    "thresholds",
+    "period",
+    "topbar_summary",
+    "tiles",
+    "anomaly",
+    "hourly_today",
+    "daily",
+    "models",
+    "recent_activity",
     "assumptions_summary",
 }
 
 
 def _write_session(proj_dir: Path, sid: str, cwd: str, model: str, ts_iso: str, uid: str) -> None:
     import json
-    sys_ev = json.dumps({
-        "type": "system", "timestamp": ts_iso, "sessionId": sid,
-        "uuid": f"sys-{uid}", "isSidechain": False, "cwd": cwd,
-    })
-    asst_ev = json.dumps({
-        "type": "assistant", "timestamp": ts_iso, "sessionId": sid,
-        "requestId": f"req-{uid}", "uuid": f"evt-{uid}", "isSidechain": False,
-        "model": model,
-        "message": {"id": f"msg-{uid}", "role": "assistant", "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 100, "output_tokens": 50,
-                              "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}},
-    })
+
+    sys_ev = json.dumps(
+        {
+            "type": "system",
+            "timestamp": ts_iso,
+            "sessionId": sid,
+            "uuid": f"sys-{uid}",
+            "isSidechain": False,
+            "cwd": cwd,
+        }
+    )
+    asst_ev = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": ts_iso,
+            "sessionId": sid,
+            "requestId": f"req-{uid}",
+            "uuid": f"evt-{uid}",
+            "isSidechain": False,
+            "model": model,
+            "message": {
+                "id": f"msg-{uid}",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+            },
+        }
+    )
     (proj_dir / f"{sid}.jsonl").write_text(sys_ev + "\n" + asst_ev + "\n")
 
 
@@ -135,6 +159,7 @@ def test_parse_cache_get_derived_memoizes(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         from tokenol.serve.state import _build_turns_and_sessions
+
         return _build_turns_and_sessions(events)
 
     keys = frozenset({key})
@@ -167,6 +192,7 @@ def test_parse_cache_invalidates_derived_on_new_file(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         from tokenol.serve.state import _build_turns_and_sessions
+
         return _build_turns_and_sessions(events)
 
     cache.get_derived(frozenset({key1}), builder)
@@ -212,8 +238,8 @@ def test_snapshot_daily_active_projects_alphabetical(tmp_path: Path) -> None:
     proj = tmp_path / "projects"
     proj.mkdir(parents=True)
     # Insertion order is z, a, M — correct sort is a, M, z (case-insensitive).
-    _write_session(proj, "sess-z", "/home/u/zeta",  "claude-opus-4-7",   base_ts, "z")
-    _write_session(proj, "sess-a", "/home/u/alpha", "claude-opus-4-7",   base_ts, "a")
+    _write_session(proj, "sess-z", "/home/u/zeta", "claude-opus-4-7", base_ts, "z")
+    _write_session(proj, "sess-a", "/home/u/alpha", "claude-opus-4-7", base_ts, "a")
     _write_session(proj, "sess-m", "/home/u/Middle", "claude-sonnet-4-6", base_ts, "m")
 
     with _mock_dirs(tmp_path):
@@ -237,15 +263,15 @@ def test_snapshot_daily_active_projects_disambiguates_collisions(tmp_path: Path)
     proj.mkdir(parents=True)
     # Two cwds share basename 'task_a', one lives under mercor/, the other plain.
     _write_session(proj, "sess-1", "/home/u/dev/mercor/task_a", "claude-opus-4-7", base_ts, "1")
-    _write_session(proj, "sess-2", "/home/u/dev/task_a",        "claude-opus-4-7", base_ts, "2")
-    _write_session(proj, "sess-3", "/home/u/dev/unique",        "claude-opus-4-7", base_ts, "3")
+    _write_session(proj, "sess-2", "/home/u/dev/task_a", "claude-opus-4-7", base_ts, "2")
+    _write_session(proj, "sess-3", "/home/u/dev/unique", "claude-opus-4-7", base_ts, "3")
 
     with _mock_dirs(tmp_path):
         result = build_snapshot_full(ParseCache(), all_projects=False)
 
     by_value = {p["value"]: p["label"] for p in result.payload["daily"]["active_projects"]}
     assert by_value["/home/u/dev/mercor/task_a"] == "mercor/task_a"
-    assert by_value["/home/u/dev/task_a"]        == "dev/task_a"
+    assert by_value["/home/u/dev/task_a"] == "dev/task_a"
     # Non-colliding cwd keeps its plain basename.
     assert by_value["/home/u/dev/unique"] == "unique"
 
@@ -256,11 +282,11 @@ def test_snapshot_daily_active_projects_excludes_old(tmp_path: Path) -> None:
 
     now = datetime.now(tz=timezone.utc)
     fresh_ts = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    old_ts   = (now - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old_ts = (now - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
     proj = tmp_path / "projects"
     proj.mkdir(parents=True)
     _write_session(proj, "sess-fresh", "/home/u/fresh", "claude-opus-4-7", fresh_ts, "f")
-    _write_session(proj, "sess-old",   "/home/u/old",   "claude-opus-4-7", old_ts,   "o")
+    _write_session(proj, "sess-old", "/home/u/old", "claude-opus-4-7", old_ts, "o")
 
     with _mock_dirs(tmp_path):
         result = build_snapshot_full(ParseCache(), all_projects=False)
@@ -328,8 +354,11 @@ def test_assumptions_summary_has_all_tags(tmp_path: Path) -> None:
         result = build_snapshot_full(ParseCache())
     summary = result.payload["assumptions_summary"]
     expected = {
-        "window_boundary_heuristic", "unknown_model_fallback",
-        "dedup_passthrough", "interrupted_turn_skipped", "gemini_unpriced",
+        "window_boundary_heuristic",
+        "unknown_model_fallback",
+        "dedup_passthrough",
+        "interrupted_turn_skipped",
+        "gemini_unpriced",
     }
     assert set(summary.keys()) == expected
 
@@ -388,6 +417,7 @@ def test_snapshot_period_param(tmp_path: Path) -> None:
 
 # ---- build_project_detail tests ------------------------------------------
 
+
 def _build_project_sessions(tmp_path: Path, cwd: str, entries: list[tuple[str, str, str]]):
     """Build a list of Session objects for project tests.
 
@@ -403,22 +433,37 @@ def _build_project_sessions(tmp_path: Path, cwd: str, entries: list[tuple[str, s
     for suffix, ts_iso, uid in entries:
         sid = f"sess-{suffix}"
         path = proj_dir / f"{sid}.jsonl"
-        user_ev = json.dumps({
-            "type": "user", "timestamp": ts_iso, "sessionId": sid, "cwd": cwd,
-            "message": {"role": "user", "content": "hi"},
-        })
-        asst_ev = json.dumps({
-            "type": "assistant", "timestamp": ts_iso, "sessionId": sid,
-            "requestId": f"req-{uid}", "uuid": f"evt-{uid}", "isSidechain": False,
-            "model": "claude-opus-4-7",
-            "message": {"id": f"msg-{uid}", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 1000, "output_tokens": 200,
-                                  "cache_read_input_tokens": 800, "cache_creation_input_tokens": 100}},
-        })
+        user_ev = json.dumps(
+            {
+                "type": "user",
+                "timestamp": ts_iso,
+                "sessionId": sid,
+                "cwd": cwd,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        asst_ev = json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": ts_iso,
+                "sessionId": sid,
+                "requestId": f"req-{uid}",
+                "uuid": f"evt-{uid}",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": f"msg-{uid}",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 800, "cache_creation_input_tokens": 100},
+                },
+            }
+        )
         path.write_text(user_ev + "\n" + asst_ev + "\n")
         all_paths.append(path)
 
     from tokenol.ingest.builder import build_turns
+
     turns = build_turns(all_paths)
     sessions = build_sessions(turns, paths=all_paths)
     return sessions
@@ -427,14 +472,19 @@ def _build_project_sessions(tmp_path: Path, cwd: str, entries: list[tuple[str, s
 def test_project_detail_default_range_14d(tmp_path: Path) -> None:
     """Default range=14d includes sessions within last 14 days."""
     from datetime import date, timedelta
+
     today = date.today()
     recent = (today - timedelta(days=5)).isoformat() + "T10:00:00Z"
     old = (today - timedelta(days=20)).isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
-    sessions = _build_project_sessions(tmp_path, cwd, [
-        ("recent", recent, "r1"),
-        ("old", old, "o1"),
-    ])
+    sessions = _build_project_sessions(
+        tmp_path,
+        cwd,
+        [
+            ("recent", recent, "r1"),
+            ("old", old, "o1"),
+        ],
+    )
     result = build_project_detail(cwd, sessions, range_key="14d")
     assert result is not None
     assert result["session_count"] == 1
@@ -444,14 +494,19 @@ def test_project_detail_default_range_14d(tmp_path: Path) -> None:
 def test_project_detail_range_all_includes_old_sessions(tmp_path: Path) -> None:
     """range=all includes sessions regardless of age."""
     from datetime import date, timedelta
+
     today = date.today()
     recent = (today - timedelta(days=5)).isoformat() + "T10:00:00Z"
     old = (today - timedelta(days=20)).isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
-    sessions = _build_project_sessions(tmp_path, cwd, [
-        ("recent", recent, "r1"),
-        ("old", old, "o1"),
-    ])
+    sessions = _build_project_sessions(
+        tmp_path,
+        cwd,
+        [
+            ("recent", recent, "r1"),
+            ("old", old, "o1"),
+        ],
+    )
     result = build_project_detail(cwd, sessions, range_key="all")
     assert result is not None
     assert result["session_count"] == 2
@@ -460,14 +515,19 @@ def test_project_detail_range_all_includes_old_sessions(tmp_path: Path) -> None:
 def test_project_detail_range_1d_scopes_to_today(tmp_path: Path) -> None:
     """range=1d only includes sessions with last_ts today."""
     from datetime import date, timedelta
+
     today = date.today()
     today_ts = today.isoformat() + "T10:00:00Z"
     yesterday_ts = (today - timedelta(days=1)).isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
-    sessions = _build_project_sessions(tmp_path, cwd, [
-        ("today", today_ts, "t1"),
-        ("yest", yesterday_ts, "y1"),
-    ])
+    sessions = _build_project_sessions(
+        tmp_path,
+        cwd,
+        [
+            ("today", today_ts, "t1"),
+            ("yest", yesterday_ts, "y1"),
+        ],
+    )
     result = build_project_detail(cwd, sessions, range_key="1d")
     assert result is not None
     assert result["session_count"] == 1
@@ -476,6 +536,7 @@ def test_project_detail_range_1d_scopes_to_today(tmp_path: Path) -> None:
 def test_project_detail_range_no_activity_returns_none(tmp_path: Path) -> None:
     """When no sessions fall in the selected range, returns None."""
     from datetime import date, timedelta
+
     old = (date.today() - timedelta(days=60)).isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("old", old, "o1")])
@@ -486,6 +547,7 @@ def test_project_detail_range_no_activity_returns_none(tmp_path: Path) -> None:
 def test_project_detail_invalid_range_raises(tmp_path: Path) -> None:
     """Unknown range key raises ValueError."""
     import pytest
+
     cwd = "/repo/myproject"
     with pytest.raises(ValueError, match="Unknown range"):
         build_project_detail(cwd, [], range_key="bogus")
@@ -494,6 +556,7 @@ def test_project_detail_invalid_range_raises(tmp_path: Path) -> None:
 def test_project_detail_top_turns_have_efficiency_metrics(tmp_path: Path) -> None:
     """top_turns_by_cost entries include hit_rate, cost_per_kw, ctx_ratio."""
     from datetime import date
+
     ts = date.today().isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("s1", ts, "u1")])
@@ -512,6 +575,7 @@ def test_project_detail_top_turns_have_efficiency_metrics(tmp_path: Path) -> Non
 def test_project_detail_sessions_have_cost_per_kw_and_ctx(tmp_path: Path) -> None:
     """sessions dicts include cost_per_kw and ctx_ratio."""
     from datetime import date
+
     ts = date.today().isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("s1", ts, "u1")])
@@ -525,6 +589,7 @@ def test_project_detail_sessions_have_cost_per_kw_and_ctx(tmp_path: Path) -> Non
 def test_project_detail_cache_trend_key(tmp_path: Path) -> None:
     """Payload uses 'cache_trend' (not 'cache_trend_14d')."""
     from datetime import date
+
     ts = date.today().isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("s1", ts, "u1")])
@@ -594,11 +659,17 @@ def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None
 def test_build_tool_detail_returns_payload():
     def _turn(sid, ts, model, tools, cost=0.0, err_count=0):
         return Turn(
-            dedup_key=f"k-{ts.isoformat()}", timestamp=ts, session_id=sid,
-            model=model, usage=Usage(input_tokens=1, output_tokens=1),
-            is_sidechain=False, stop_reason="tool_use",
-            cost_usd=cost, tool_use_count=sum(tools.values()),
-            tool_error_count=err_count, tool_names=Counter(tools),
+            dedup_key=f"k-{ts.isoformat()}",
+            timestamp=ts,
+            session_id=sid,
+            model=model,
+            usage=Usage(input_tokens=1, output_tokens=1),
+            is_sidechain=False,
+            stop_reason="tool_use",
+            cost_usd=cost,
+            tool_use_count=sum(tools.values()),
+            tool_error_count=err_count,
+            tool_names=Counter(tools),
         )
 
     t0 = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
@@ -606,9 +677,9 @@ def test_build_tool_detail_returns_payload():
     t2 = datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc)
 
     turns = [
-        _turn("sA", t0, "claude-opus-4-7",    {"Read": 2, "Edit": 1}),
-        _turn("sB", t1, "claude-opus-4-7",    {"Read": 1, "Bash": 3}, err_count=1),
-        _turn("sC", t2, "claude-sonnet-4-6",  {"Grep": 1}),
+        _turn("sA", t0, "claude-opus-4-7", {"Read": 2, "Edit": 1}),
+        _turn("sB", t1, "claude-opus-4-7", {"Read": 1, "Bash": 3}, err_count=1),
+        _turn("sC", t2, "claude-sonnet-4-6", {"Grep": 1}),
     ]
     sessions = [
         Session(session_id="sA", source_file="a.jsonl", is_sidechain=False, cwd="/p/projA", turns=[turns[0]]),
@@ -647,9 +718,16 @@ def test_build_tool_detail_excludes_interrupted():
     but we exclude them from counts to match /api/breakdown/tools."""
     ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
     interrupted = Turn(
-        dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
-        usage=Usage(), is_sidechain=False, stop_reason=None,
-        is_interrupted=True, tool_use_count=1, tool_names=Counter({"Read": 1}),
+        dedup_key="k",
+        timestamp=ts,
+        session_id="s1",
+        model="claude-opus-4-7",
+        usage=Usage(),
+        is_sidechain=False,
+        stop_reason=None,
+        is_interrupted=True,
+        tool_use_count=1,
+        tool_names=Counter({"Read": 1}),
     )
     sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p", turns=[interrupted])]
     assert build_tool_detail("Read", [interrupted], sessions) is None
@@ -662,23 +740,36 @@ def test_build_tool_detail_includes_linger_only_turns():
     `tool_turns` previously filtered to tool_names-only turns and dropped
     linger-only attribution."""
     from tokenol.model.events import ToolCost
+
     t0 = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
     t1 = datetime(2026, 4, 14, 11, 0, tzinfo=timezone.utc)
 
     # Turn 0: invokes Read (cost + names).
     invoke = Turn(
-        dedup_key="k0", timestamp=t0, session_id="s1", model="claude-opus-4-7",
-        usage=Usage(input_tokens=10, output_tokens=10), is_sidechain=False,
-        stop_reason="tool_use", cost_usd=0.05, tool_use_count=1,
+        dedup_key="k0",
+        timestamp=t0,
+        session_id="s1",
+        model="claude-opus-4-7",
+        usage=Usage(input_tokens=10, output_tokens=10),
+        is_sidechain=False,
+        stop_reason="tool_use",
+        cost_usd=0.05,
+        tool_use_count=1,
         tool_names=Counter({"Read": 1}),
         tool_costs={"Read": ToolCost(tool_name="Read", output_tokens=10, cost_usd=0.05)},
     )
     # Turn 1: no fresh invocation, but Read result lingers in input bytes →
     # cost attributed to Read with no entry in tool_names.
     linger = Turn(
-        dedup_key="k1", timestamp=t1, session_id="s1", model="claude-opus-4-7",
-        usage=Usage(input_tokens=50, output_tokens=5), is_sidechain=False,
-        stop_reason="end_turn", cost_usd=0.04, tool_use_count=0,
+        dedup_key="k1",
+        timestamp=t1,
+        session_id="s1",
+        model="claude-opus-4-7",
+        usage=Usage(input_tokens=50, output_tokens=5),
+        is_sidechain=False,
+        stop_reason="end_turn",
+        cost_usd=0.04,
+        tool_use_count=0,
         tool_names=Counter(),
         tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40, cost_usd=0.03)},
     )
@@ -697,6 +788,7 @@ def test_build_tool_detail_rejects_sentinels():
     rather than render a bogus page (which would have happened before the
     sentinel rejection was added at the entry point)."""
     from tokenol.serve.state import build_tool_detail as _build
+
     assert _build("__unattributed__", [], []) is None
     assert _build("__unknown__", [], []) is None
 
@@ -707,11 +799,17 @@ def test_accumulate_tool_costs_union_includes_linger_only():
     rollups silently drop linger-only attribution."""
     from tokenol.model.events import ToolCost
     from tokenol.serve.state import _accumulate_tool_costs
+
     ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
     linger = Turn(
-        dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
-        usage=Usage(input_tokens=50, output_tokens=5), is_sidechain=False,
-        stop_reason="end_turn", cost_usd=0.04,
+        dedup_key="k",
+        timestamp=ts,
+        session_id="s1",
+        model="claude-opus-4-7",
+        usage=Usage(input_tokens=50, output_tokens=5),
+        is_sidechain=False,
+        stop_reason="end_turn",
+        cost_usd=0.04,
         tool_names=Counter(),
         tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40, cost_usd=0.03)},
     )
@@ -730,11 +828,17 @@ def test_accumulate_tool_costs_folds_unknown_into_unattributed():
     drops it from project/model by_tool rollups."""
     from tokenol.model.events import ToolCost
     from tokenol.serve.state import _accumulate_tool_costs
+
     ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
     turn = Turn(
-        dedup_key="k", timestamp=ts, session_id="s1", model="claude-opus-4-7",
-        usage=Usage(input_tokens=50, output_tokens=5), is_sidechain=False,
-        stop_reason="end_turn", cost_usd=0.02,
+        dedup_key="k",
+        timestamp=ts,
+        session_id="s1",
+        model="claude-opus-4-7",
+        usage=Usage(input_tokens=50, output_tokens=5),
+        is_sidechain=False,
+        stop_reason="end_turn",
+        cost_usd=0.02,
         tool_names=Counter(),
         tool_costs={"__unknown__": ToolCost(tool_name="__unknown__", input_tokens=20, cost_usd=0.02)},
     )
@@ -845,7 +949,7 @@ def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
     proj = tmp_path / "claude" / "projects" / "p1"
     proj.mkdir(parents=True)
     _write_session(proj, "sid-A", "/proj/a", "claude-sonnet-4-6", "2026-05-01T12:00:00Z", "1")
-    _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7",   "2026-05-01T13:00:00Z", "2")
+    _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7", "2026-05-01T13:00:00Z", "2")
 
     store = HistoryStore(tmp_path / "h.duckdb")
     # Use a wide hot window so both turns hydrate into memory in run 2.
@@ -881,9 +985,7 @@ def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
 # ---- _recompute_excl_cache_read tests ---------------------------------
 
 
-def _turn_with_costs(usage: Usage, model: str, tool_costs: dict[str, ToolCost],
-                     *, unattr_input=0.0, unattr_output=0.0, unattr_cost=0.0,
-                     ts: datetime | None = None) -> Turn:
+def _turn_with_costs(usage: Usage, model: str, tool_costs: dict[str, ToolCost], *, unattr_input=0.0, unattr_output=0.0, unattr_cost=0.0, ts: datetime | None = None) -> Turn:
     ts = ts or datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc)
     return Turn(
         dedup_key=f"k-{ts.isoformat()}",
@@ -913,29 +1015,23 @@ def test_recompute_excl_cache_read_drops_cache_read_from_input_pool():
     # Pool = 1_000_000; 60% tool input share => 600_000 input_tokens stored.
     # 40% tool output share => 4_000 output_tokens stored.
     tool_costs = {
-        "Read": ToolCost(tool_name="Read", input_tokens=600_000.0,
-                         output_tokens=4_000.0, cost_usd=0.0),
+        "Read": ToolCost(tool_name="Read", input_tokens=600_000.0, output_tokens=4_000.0, cost_usd=0.0),
     }
     turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
     turn_cost = cost_for_turn("claude-opus-4-7", usage)
 
     result = _recompute_excl_cache_read(turn)
 
-    expected_read = (
-        0.6 * (turn_cost.input_usd + turn_cost.cache_creation_usd)
-        + 0.4 * turn_cost.output_usd
-    )
+    expected_read = 0.6 * (turn_cost.input_usd + turn_cost.cache_creation_usd) + 0.4 * turn_cost.output_usd
     assert result.keys() == {"Read"}
     assert result["Read"] == pytest.approx(expected_read, rel=1e-9)
 
 
 def test_recompute_excl_cache_read_handles_zero_input_pool():
     """input_token_pool == 0 should not raise; in_share is 0."""
-    usage = Usage(input_tokens=0, output_tokens=100,
-                  cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=0, output_tokens=100, cache_read_input_tokens=0, cache_creation_input_tokens=0)
     tool_costs = {
-        "Edit": ToolCost(tool_name="Edit", input_tokens=0.0,
-                         output_tokens=80.0, cost_usd=0.0),
+        "Edit": ToolCost(tool_name="Edit", input_tokens=0.0, output_tokens=80.0, cost_usd=0.0),
     }
     turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
     turn_cost = cost_for_turn("claude-opus-4-7", usage)
@@ -948,11 +1044,9 @@ def test_recompute_excl_cache_read_handles_zero_input_pool():
 
 def test_recompute_excl_cache_read_handles_zero_output_tokens():
     """output_tokens == 0 (rare but possible) should not raise; out_share is 0."""
-    usage = Usage(input_tokens=1_000, output_tokens=0,
-                  cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=1_000, output_tokens=0, cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
     tool_costs = {
-        "Read": ToolCost(tool_name="Read", input_tokens=5_000.0,
-                         output_tokens=0.0, cost_usd=0.0),
+        "Read": ToolCost(tool_name="Read", input_tokens=5_000.0, output_tokens=0.0, cost_usd=0.0),
     }
     turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
     turn_cost = cost_for_turn("claude-opus-4-7", usage)
@@ -964,8 +1058,7 @@ def test_recompute_excl_cache_read_handles_zero_output_tokens():
 
 
 def test_recompute_excl_cache_read_empty_tool_costs():
-    usage = Usage(input_tokens=1_000, output_tokens=1_000,
-                  cache_read_input_tokens=5_000, cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=1_000, output_tokens=1_000, cache_read_input_tokens=5_000, cache_creation_input_tokens=0)
     turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs={})
     assert _recompute_excl_cache_read(turn) == {}
 
@@ -973,11 +1066,9 @@ def test_recompute_excl_cache_read_empty_tool_costs():
 def test_recompute_excl_cache_read_linger_only_tool():
     """Tool with positive input share but zero output share (lingered from
     a prior turn) gets a non-zero cost on the input side alone."""
-    usage = Usage(input_tokens=0, output_tokens=100,
-                  cache_read_input_tokens=7_000, cache_creation_input_tokens=3_000)
+    usage = Usage(input_tokens=0, output_tokens=100, cache_read_input_tokens=7_000, cache_creation_input_tokens=3_000)
     tool_costs = {
-        "Read": ToolCost(tool_name="Read", input_tokens=3_000.0,
-                         output_tokens=0.0, cost_usd=0.0),
+        "Read": ToolCost(tool_name="Read", input_tokens=3_000.0, output_tokens=0.0, cost_usd=0.0),
     }
     turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
     turn_cost = cost_for_turn("claude-opus-4-7", usage)
@@ -990,7 +1081,7 @@ def test_recompute_excl_cache_read_linger_only_tool():
     # cost = 0.3 * (input_usd + cache_creation_usd) + 0 * output_usd
     expected = 0.3 * (turn_cost.input_usd + turn_cost.cache_creation_usd)
     assert result["Read"] == pytest.approx(expected, rel=1e-9)
-    assert result["Read"] > 0.0   # non-zero — the whole point of this case
+    assert result["Read"] > 0.0  # non-zero — the whole point of this case
 
 
 # ---- build_breakdown_tools tests --------------------------------------
@@ -1005,48 +1096,60 @@ def _btt_turns_fixture() -> list[Turn]:
     t2 = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
 
     def _u(inp, out, cr, cc):
-        return Usage(input_tokens=inp, output_tokens=out,
-                     cache_read_input_tokens=cr, cache_creation_input_tokens=cc)
+        return Usage(input_tokens=inp, output_tokens=out, cache_read_input_tokens=cr, cache_creation_input_tokens=cc)
 
     return [
         Turn(
-            dedup_key="k0", timestamp=t0, session_id="s1",
-            model="claude-opus-4-7", usage=_u(100, 200, 800, 0),
-            is_sidechain=False, stop_reason="tool_use",
-            tool_use_count=2, tool_names=Counter({"Read": 1, "Bash": 1}),
+            dedup_key="k0",
+            timestamp=t0,
+            session_id="s1",
+            model="claude-opus-4-7",
+            usage=_u(100, 200, 800, 0),
+            is_sidechain=False,
+            stop_reason="tool_use",
+            tool_use_count=2,
+            tool_names=Counter({"Read": 1, "Bash": 1}),
             tool_costs={
-                "Read": ToolCost(tool_name="Read", input_tokens=500.0,
-                                 output_tokens=80.0, cost_usd=2.50),
-                "Bash": ToolCost(tool_name="Bash", input_tokens=300.0,
-                                 output_tokens=40.0, cost_usd=1.25),
+                "Read": ToolCost(tool_name="Read", input_tokens=500.0, output_tokens=80.0, cost_usd=2.50),
+                "Bash": ToolCost(tool_name="Bash", input_tokens=300.0, output_tokens=40.0, cost_usd=1.25),
             },
-            unattributed_input_tokens=100.0, unattributed_output_tokens=80.0,
+            unattributed_input_tokens=100.0,
+            unattributed_output_tokens=80.0,
             unattributed_cost_usd=0.75,
         ),
         Turn(
-            dedup_key="k1", timestamp=t1, session_id="s1",
-            model="claude-opus-4-7", usage=_u(50, 300, 1000, 500),
-            is_sidechain=False, stop_reason="end_turn",
-            tool_use_count=1, tool_names=Counter({"Read": 1}),
+            dedup_key="k1",
+            timestamp=t1,
+            session_id="s1",
+            model="claude-opus-4-7",
+            usage=_u(50, 300, 1000, 500),
+            is_sidechain=False,
+            stop_reason="end_turn",
+            tool_use_count=1,
+            tool_names=Counter({"Read": 1}),
             tool_costs={
-                "Read": ToolCost(tool_name="Read", input_tokens=900.0,
-                                 output_tokens=180.0, cost_usd=3.10),
+                "Read": ToolCost(tool_name="Read", input_tokens=900.0, output_tokens=180.0, cost_usd=3.10),
             },
-            unattributed_input_tokens=650.0, unattributed_output_tokens=120.0,
+            unattributed_input_tokens=650.0,
+            unattributed_output_tokens=120.0,
             unattributed_cost_usd=1.05,
         ),
         Turn(
-            dedup_key="k2", timestamp=t2, session_id="s2",
-            model="claude-sonnet-4-6", usage=_u(20, 80, 200, 0),
-            is_sidechain=False, stop_reason="end_turn",
-            tool_use_count=0, tool_names=Counter(),
+            dedup_key="k2",
+            timestamp=t2,
+            session_id="s2",
+            model="claude-sonnet-4-6",
+            usage=_u(20, 80, 200, 0),
+            is_sidechain=False,
+            stop_reason="end_turn",
+            tool_use_count=0,
+            tool_names=Counter(),
             tool_costs={
                 # __unknown__: unmatched tool_result bytes; folds into unattributed.
-                "__unknown__": ToolCost(tool_name="__unknown__",
-                                        input_tokens=100.0, output_tokens=0.0,
-                                        cost_usd=0.40),
+                "__unknown__": ToolCost(tool_name="__unknown__", input_tokens=100.0, output_tokens=0.0, cost_usd=0.40),
             },
-            unattributed_input_tokens=120.0, unattributed_output_tokens=80.0,
+            unattributed_input_tokens=120.0,
+            unattributed_output_tokens=80.0,
             unattributed_cost_usd=0.55,
         ),
     ]
@@ -1063,6 +1166,7 @@ def test_build_breakdown_tools_prorata_matches_legacy_inline_loop():
 
     from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
     from tokenol.metrics.rollups import _rank_dict_with_others
+
     cost_by_tool: dict[str, float] = {}
     tokens_by_tool: _C[str] = _C()
     unattr_cost = 0.0
@@ -1100,9 +1204,7 @@ def test_build_breakdown_tools_excl_cache_read_total_invariant():
     mode='excl_cache_read' must equal sum of cost_for_turn().total_usd
     across the non-interrupted turns (total cost is mode-invariant)."""
     turns = _btt_turns_fixture()
-    expected_total = sum(
-        cost_for_turn(t.model, t.usage).total_usd for t in turns if not t.is_interrupted
-    )
+    expected_total = sum(cost_for_turn(t.model, t.usage).total_usd for t in turns if not t.is_interrupted)
 
     got = build_breakdown_tools(turns, mode="excl_cache_read")
     got_total = sum(row["cost_usd"] for row in got)
@@ -1116,8 +1218,7 @@ def test_build_breakdown_tools_excl_cache_read_shifts_cache_read_to_unattributed
     # Build a realistic fixture where tool_costs track token shares correctly
     # and include pre-computed costs as they would be in real operation.
     t0 = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
-    usage = Usage(input_tokens=1_000, output_tokens=100,
-                  cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=1_000, output_tokens=100, cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
     turn_cost = cost_for_turn("claude-opus-4-7", usage)
     # Tool uses 50% of input pool (5_000 / 10_000), 40% of output (40 / 100).
     # In prorata, tool cost = 0.5 * (input_usd + cache_read_usd + 0) + 0.4 * output_usd
@@ -1128,15 +1229,20 @@ def test_build_breakdown_tools_excl_cache_read_shifts_cache_read_to_unattributed
 
     turns = [
         Turn(
-            dedup_key="k0", timestamp=t0, session_id="s1",
-            model="claude-opus-4-7", usage=usage,
-            is_sidechain=False, stop_reason="tool_use",
-            tool_use_count=1, tool_names=Counter({"Read": 1}),
+            dedup_key="k0",
+            timestamp=t0,
+            session_id="s1",
+            model="claude-opus-4-7",
+            usage=usage,
+            is_sidechain=False,
+            stop_reason="tool_use",
+            tool_use_count=1,
+            tool_names=Counter({"Read": 1}),
             tool_costs={
-                "Read": ToolCost(tool_name="Read", input_tokens=5_000.0,
-                                 output_tokens=40.0, cost_usd=tool_cost_prorata),
+                "Read": ToolCost(tool_name="Read", input_tokens=5_000.0, output_tokens=40.0, cost_usd=tool_cost_prorata),
             },
-            unattributed_input_tokens=5_000.0, unattributed_output_tokens=60.0,
+            unattributed_input_tokens=5_000.0,
+            unattributed_output_tokens=60.0,
             unattributed_cost_usd=unattr_cost_prorata,
         ),
     ]
@@ -1154,10 +1260,8 @@ def test_build_breakdown_tools_excl_cache_read_shifts_cache_read_to_unattributed
     # Multi-tool guard: on _btt_turns_fixture, every real tool's bucket must
     # shrink (or stay equal) under excl_cache_read — the cache_read share that
     # flowed to them in prorata moves entirely to the residual.
-    pro_mt = {r["name"]: r["cost_usd"]
-              for r in build_breakdown_tools(_btt_turns_fixture(), mode="prorata")}
-    exc_mt = {r["name"]: r["cost_usd"]
-              for r in build_breakdown_tools(_btt_turns_fixture(), mode="excl_cache_read")}
+    pro_mt = {r["name"]: r["cost_usd"] for r in build_breakdown_tools(_btt_turns_fixture(), mode="prorata")}
+    exc_mt = {r["name"]: r["cost_usd"] for r in build_breakdown_tools(_btt_turns_fixture(), mode="excl_cache_read")}
     for name in ("Read", "Bash"):
         if name in pro_mt and name in exc_mt:
             assert exc_mt[name] <= pro_mt[name] + 1e-12, f"{name} grew under excl mode"
@@ -1183,9 +1287,14 @@ def test_build_breakdown_tools_excludes_interrupted_turns():
     t_interrupt = Turn(
         dedup_key="k-int",
         timestamp=datetime(2026, 5, 14, 13, 0, tzinfo=timezone.utc),
-        session_id="s1", model="claude-opus-4-7", usage=Usage(),
-        is_sidechain=False, stop_reason=None, is_interrupted=True,
-        tool_use_count=1, tool_names=Counter({"Read": 1}),
+        session_id="s1",
+        model="claude-opus-4-7",
+        usage=Usage(),
+        is_sidechain=False,
+        stop_reason=None,
+        is_interrupted=True,
+        tool_use_count=1,
+        tool_names=Counter({"Read": 1}),
     )
     got_pro = build_breakdown_tools([t_ok, t_interrupt], mode="prorata")
     got_exc = build_breakdown_tools([t_ok, t_interrupt], mode="excl_cache_read")
@@ -1249,21 +1358,21 @@ def test_recompute_excl_cache_read_uses_passed_turn_cost():
     per turn instead of two)."""
     from tokenol.metrics.cost import TurnCost
 
-    usage = Usage(input_tokens=1_000, output_tokens=100,
-                  cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=1_000, output_tokens=100, cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
     tool_costs = {
-        "Read": ToolCost(tool_name="Read", input_tokens=5_000.0,
-                         output_tokens=50.0, cost_usd=0.0),
+        "Read": ToolCost(tool_name="Read", input_tokens=5_000.0, output_tokens=50.0, cost_usd=0.0),
     }
     turn = _turn_with_costs(usage, "claude-opus-4-7", tool_costs)
     # Rigged pricing that's clearly different from anything the real registry
     # would yield. If the helper ignored the pass-through, the result would
     # reflect the real pricing instead.
     rigged = TurnCost(
-        input_usd=100.0, output_usd=10.0,
-        cache_read_usd=999.0,         # would dominate if not excluded
+        input_usd=100.0,
+        output_usd=10.0,
+        cache_read_usd=999.0,  # would dominate if not excluded
         cache_creation_usd=5.0,
-        total_usd=1114.0, assumptions=[],
+        total_usd=1114.0,
+        assumptions=[],
     )
     result = _recompute_excl_cache_read(turn, rigged)
     # in_share  = 5000 / 10_000 = 0.5

@@ -17,22 +17,38 @@ from tokenol.serve.state import ParseCache, build_snapshot_full
 
 
 def _write_session(proj_dir: Path, sid: str, cwd: str, model: str, ts_iso: str, uid: str) -> None:
-    sys_ev = json.dumps({
-        "type": "system", "timestamp": ts_iso, "sessionId": sid,
-        "uuid": f"sys-{uid}", "isSidechain": False, "cwd": cwd,
-    })
-    asst_ev = json.dumps({
-        "type": "assistant", "timestamp": ts_iso, "sessionId": sid,
-        "requestId": f"req-{uid}", "uuid": f"evt-{uid}", "isSidechain": False,
-        "model": model,
-        "message": {
-            "id": f"msg-{uid}", "role": "assistant", "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 100, "output_tokens": 50,
-                "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5,
+    sys_ev = json.dumps(
+        {
+            "type": "system",
+            "timestamp": ts_iso,
+            "sessionId": sid,
+            "uuid": f"sys-{uid}",
+            "isSidechain": False,
+            "cwd": cwd,
+        }
+    )
+    asst_ev = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": ts_iso,
+            "sessionId": sid,
+            "requestId": f"req-{uid}",
+            "uuid": f"evt-{uid}",
+            "isSidechain": False,
+            "model": model,
+            "message": {
+                "id": f"msg-{uid}",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 10,
+                    "cache_creation_input_tokens": 5,
+                },
             },
-        },
-    })
+        }
+    )
     (proj_dir / f"{sid}.jsonl").write_text(sys_ev + "\n" + asst_ev + "\n")
 
 
@@ -60,7 +76,7 @@ def test_jsonl_deletion_preserves_snapshot(tmp_path: Path) -> None:
     proj = claude_root / "projects" / "p1"
     proj.mkdir(parents=True)
     _write_session(proj, "sid-A", "/proj/a", "claude-sonnet-4-6", "2026-05-01T12:00:00Z", "1")
-    _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7",   "2026-05-01T13:00:00Z", "2")
+    _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7", "2026-05-01T13:00:00Z", "2")
 
     store = HistoryStore(tmp_path / "h.duckdb")
     # Wide hot window so both turns hydrate into memory after deletion.

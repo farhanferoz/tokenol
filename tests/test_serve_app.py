@@ -195,20 +195,34 @@ async def test_daily_insufficient_history(tmp_path: Path) -> None:
     ts = (date.today() - timedelta(days=5)).isoformat() + "T10:00:00Z"
     events = [
         {
-            "type": "assistant", "timestamp": ts, "sessionId": "sess-001",
-            "requestId": "req-aaa", "uuid": "evt-001", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": "sess-001",
+            "requestId": "req-aaa",
+            "uuid": "evt-001",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
-            "message": {"id": "msg-aaa", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 1000, "output_tokens": 200,
-                                  "cache_read_input_tokens": 500, "cache_creation_input_tokens": 100}},
+            "message": {
+                "id": "msg-aaa",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 100},
+            },
         },
         {
-            "type": "assistant", "timestamp": ts, "sessionId": "sess-001",
-            "requestId": "req-bbb", "uuid": "evt-002", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": "sess-001",
+            "requestId": "req-bbb",
+            "uuid": "evt-002",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
-            "message": {"id": "msg-bbb", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 2000, "output_tokens": 300,
-                                  "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 0}},
+            "message": {
+                "id": "msg-bbb",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 2000, "output_tokens": 300, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 0},
+            },
         },
     ]
     dst = tmp_path / "projects" / "sess-001.jsonl"
@@ -255,31 +269,56 @@ async def test_hourly_active_projects_scoped_to_target_date(tmp_path: Path) -> N
     yesterday = today - timedelta(days=1)
 
     def _event(sid: str, cwd: str, model: str, ts: datetime, uid: str) -> str:
-        sys_ev = json.dumps({
-            "type": "system", "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sessionId": sid, "uuid": f"sys-{uid}", "isSidechain": False, "cwd": cwd,
-        })
-        asst_ev = json.dumps({
-            "type": "assistant", "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sessionId": sid, "requestId": f"req-{uid}", "uuid": f"evt-{uid}",
-            "isSidechain": False, "model": model,
-            "message": {"id": f"msg-{uid}", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 100, "output_tokens": 50,
-                                  "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}},
-        })
+        sys_ev = json.dumps(
+            {
+                "type": "system",
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sessionId": sid,
+                "uuid": f"sys-{uid}",
+                "isSidechain": False,
+                "cwd": cwd,
+            }
+        )
+        asst_ev = json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sessionId": sid,
+                "requestId": f"req-{uid}",
+                "uuid": f"evt-{uid}",
+                "isSidechain": False,
+                "model": model,
+                "message": {
+                    "id": f"msg-{uid}",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+                },
+            }
+        )
         return sys_ev + "\n" + asst_ev + "\n"
 
     proj = tmp_path / "projects"
     proj.mkdir(parents=True)
     # projA active today; projB active only yesterday.
-    (proj / "sess-a.jsonl").write_text(_event(
-        "sess-a", "/home/u/projA", "claude-opus-4-7",
-        now.replace(hour=10, minute=0, second=0, microsecond=0), "a",
-    ))
-    (proj / "sess-b.jsonl").write_text(_event(
-        "sess-b", "/home/u/projB", "claude-opus-4-7",
-        (now - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0), "b",
-    ))
+    (proj / "sess-a.jsonl").write_text(
+        _event(
+            "sess-a",
+            "/home/u/projA",
+            "claude-opus-4-7",
+            now.replace(hour=10, minute=0, second=0, microsecond=0),
+            "a",
+        )
+    )
+    (proj / "sess-b.jsonl").write_text(
+        _event(
+            "sess-b",
+            "/home/u/projB",
+            "claude-opus-4-7",
+            (now - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0),
+            "b",
+        )
+    )
 
     from httpx import ASGITransport, AsyncClient
 
@@ -287,7 +326,7 @@ async def test_hourly_active_projects_scoped_to_target_date(tmp_path: Path) -> N
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             today_resp = await client.get(f"/api/hourly/{today.isoformat()}")
-            yest_resp  = await client.get(f"/api/hourly/{yesterday.isoformat()}")
+            yest_resp = await client.get(f"/api/hourly/{yesterday.isoformat()}")
 
     assert today_resp.status_code == 200
     today_projects = [p["value"] for p in today_resp.json()["active_projects"]]
@@ -307,38 +346,56 @@ async def test_daily_active_projects_scoped_to_range(tmp_path: Path) -> None:
     now = datetime.now(tz=timezone.utc)
 
     def _event(sid: str, cwd: str, ts: datetime, uid: str) -> str:
-        sys_ev = json.dumps({
-            "type": "system", "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sessionId": sid, "uuid": f"sys-{uid}", "isSidechain": False, "cwd": cwd,
-        })
-        asst_ev = json.dumps({
-            "type": "assistant", "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sessionId": sid, "requestId": f"req-{uid}", "uuid": f"evt-{uid}",
-            "isSidechain": False, "model": "claude-opus-4-7",
-            "message": {"id": f"msg-{uid}", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 100, "output_tokens": 50,
-                                  "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}},
-        })
+        sys_ev = json.dumps(
+            {
+                "type": "system",
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sessionId": sid,
+                "uuid": f"sys-{uid}",
+                "isSidechain": False,
+                "cwd": cwd,
+            }
+        )
+        asst_ev = json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sessionId": sid,
+                "requestId": f"req-{uid}",
+                "uuid": f"evt-{uid}",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": f"msg-{uid}",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+                },
+            }
+        )
         return sys_ev + "\n" + asst_ev + "\n"
 
     proj = tmp_path / "projects"
     proj.mkdir(parents=True)
     # Spread turns across 10 days to satisfy the 7d range history check.
     for i in range(10):
-        (proj / f"sess-recent-{i}.jsonl").write_text(
-            _event(f"sess-recent-{i}", "/home/u/recent", now - timedelta(days=i), f"r{i}")
-        )
+        (proj / f"sess-recent-{i}.jsonl").write_text(_event(f"sess-recent-{i}", "/home/u/recent", now - timedelta(days=i), f"r{i}"))
     # Old cwd only has a turn 15 days ago — should not appear for range=7d.
-    (proj / "sess-old.jsonl").write_text(_event(
-        "sess-old", "/home/u/oldproj", now - timedelta(days=15), "old",
-    ))
+    (proj / "sess-old.jsonl").write_text(
+        _event(
+            "sess-old",
+            "/home/u/oldproj",
+            now - timedelta(days=15),
+            "old",
+        )
+    )
 
     from httpx import ASGITransport, AsyncClient
 
     with _mock_dirs(tmp_path):
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp_7d  = await client.get("/api/daily?range=7d&metric=cost")
+            resp_7d = await client.get("/api/daily?range=7d&metric=cost")
             resp_all = await client.get("/api/daily?range=all&metric=cost")
 
     assert resp_7d.status_code == 200
@@ -361,18 +418,33 @@ async def test_daily_explicit_project_list(tmp_path: Path) -> None:
 
     def _events(sid: str, cwd: str, model: str, ts: datetime, uid: str) -> str:
         # A system event carries cwd; the assistant event carries the billable turn.
-        sys_ev = json.dumps({
-            "type": "system", "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sessionId": sid, "uuid": f"sys-{uid}", "isSidechain": False, "cwd": cwd,
-        })
-        asst_ev = json.dumps({
-            "type": "assistant", "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sessionId": sid, "requestId": f"req-{uid}", "uuid": f"evt-{uid}",
-            "isSidechain": False, "model": model,
-            "message": {"id": f"msg-{uid}", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 100, "output_tokens": 50,
-                                  "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}},
-        })
+        sys_ev = json.dumps(
+            {
+                "type": "system",
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sessionId": sid,
+                "uuid": f"sys-{uid}",
+                "isSidechain": False,
+                "cwd": cwd,
+            }
+        )
+        asst_ev = json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sessionId": sid,
+                "requestId": f"req-{uid}",
+                "uuid": f"evt-{uid}",
+                "isSidechain": False,
+                "model": model,
+                "message": {
+                    "id": f"msg-{uid}",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+                },
+            }
+        )
         return sys_ev + "\n" + asst_ev + "\n"
 
     proj = tmp_path / "projects"
@@ -477,19 +549,34 @@ async def test_api_project_invalid_range_returns_400(tmp_path: Path) -> None:
     proj_dir = tmp_path / "projects" / "-repo-proj"
     proj_dir.mkdir(parents=True)
     import datetime
+
     ts = datetime.date.today().isoformat() + "T10:00:00Z"
-    ev = json.dumps({
-        "type": "user", "timestamp": ts, "sessionId": "s1", "cwd": "/repo/proj",
-        "message": {"role": "user", "content": "hi"},
-    })
-    asst = json.dumps({
-        "type": "assistant", "timestamp": ts, "sessionId": "s1",
-        "requestId": "req-x", "uuid": "evt-x", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {"id": "msg-x", "role": "assistant", "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 100, "output_tokens": 50,
-                              "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}},
-    })
+    ev = json.dumps(
+        {
+            "type": "user",
+            "timestamp": ts,
+            "sessionId": "s1",
+            "cwd": "/repo/proj",
+            "message": {"role": "user", "content": "hi"},
+        }
+    )
+    asst = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": "s1",
+            "requestId": "req-x",
+            "uuid": "evt-x",
+            "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "msg-x",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+            },
+        }
+    )
     (proj_dir / "s1.jsonl").write_text(ev + "\n" + asst + "\n")
 
     b64 = encode_cwd("/repo/proj")
@@ -513,19 +600,34 @@ async def test_api_project_range_param_passthrough(tmp_path: Path) -> None:
     proj_dir = tmp_path / "projects" / "-repo-proj"
     proj_dir.mkdir(parents=True)
     import datetime
+
     ts = datetime.date.today().isoformat() + "T10:00:00Z"
-    ev = json.dumps({
-        "type": "user", "timestamp": ts, "sessionId": "s2", "cwd": "/repo/proj",
-        "message": {"role": "user", "content": "hi"},
-    })
-    asst = json.dumps({
-        "type": "assistant", "timestamp": ts, "sessionId": "s2",
-        "requestId": "req-y", "uuid": "evt-y", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {"id": "msg-y", "role": "assistant", "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 100, "output_tokens": 50,
-                              "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}},
-    })
+    ev = json.dumps(
+        {
+            "type": "user",
+            "timestamp": ts,
+            "sessionId": "s2",
+            "cwd": "/repo/proj",
+            "message": {"role": "user", "content": "hi"},
+        }
+    )
+    asst = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": "s2",
+            "requestId": "req-y",
+            "uuid": "evt-y",
+            "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "msg-y",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+            },
+        }
+    )
     (proj_dir / "s2.jsonl").write_text(ev + "\n" + asst + "\n")
 
     b64 = encode_cwd("/repo/proj")
@@ -599,14 +701,23 @@ async def test_recent_rows_have_latest_session_id(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 
     now_iso = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    line = json.dumps({
-        "type": "assistant", "timestamp": now_iso, "sessionId": "sess-fresh",
-        "requestId": "req-fresh", "uuid": "evt-fresh", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {"id": "msg-fresh", "role": "assistant", "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 100, "output_tokens": 50,
-                              "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
-    })
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": now_iso,
+            "sessionId": "sess-fresh",
+            "requestId": "req-fresh",
+            "uuid": "evt-fresh",
+            "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "msg-fresh",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            },
+        }
+    )
     dst = tmp_path / "projects" / "sess-fresh.jsonl"
     dst.parent.mkdir(parents=True)
     dst.write_text(line + "\n")
@@ -649,22 +760,35 @@ async def test_model_detail_projects_have_cwd_b64(tmp_path: Path) -> None:
 def _write_session_with_text(path: Path, sid: str) -> None:
     """Write a JSONL with user + assistant events containing text content."""
     import json as _json
-    user_ev = _json.dumps({
-        "type": "user", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": sid, "uuid": "u1", "isSidechain": False,
-        "message": {"role": "user", "content": [{"type": "text", "text": "x" * 600}]},
-    })
-    asst_ev = _json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": sid, "requestId": "req-t1", "uuid": "a1", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {
-            "id": "msg-t1", "role": "assistant", "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "assistant reply"}],
-            "usage": {"input_tokens": 100, "output_tokens": 50,
-                      "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
-        },
-    })
+
+    user_ev = _json.dumps(
+        {
+            "type": "user",
+            "timestamp": "2026-04-14T10:00:00Z",
+            "sessionId": sid,
+            "uuid": "u1",
+            "isSidechain": False,
+            "message": {"role": "user", "content": [{"type": "text", "text": "x" * 600}]},
+        }
+    )
+    asst_ev = _json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": "2026-04-14T10:00:00Z",
+            "sessionId": sid,
+            "requestId": "req-t1",
+            "uuid": "a1",
+            "isSidechain": False,
+            "model": "claude-opus-4-7",
+            "message": {
+                "id": "msg-t1",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "assistant reply"}],
+                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5},
+            },
+        }
+    )
     path.write_text(user_ev + "\n" + asst_ev + "\n")
 
 
@@ -685,9 +809,21 @@ async def test_turn_detail_happy_path(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     data = resp.json()
-    for key in ("session_id", "turn_idx", "ts", "model", "stop_reason", "is_sidechain",
-                "cost_components", "token_counts", "tool_calls",
-                "user_prompt", "assistant_preview", "source_file", "source_line"):
+    for key in (
+        "session_id",
+        "turn_idx",
+        "ts",
+        "model",
+        "stop_reason",
+        "is_sidechain",
+        "cost_components",
+        "token_counts",
+        "tool_calls",
+        "user_prompt",
+        "assistant_preview",
+        "source_file",
+        "source_line",
+    ):
         assert key in data, f"Missing key: {key}"
     assert set(data["cost_components"]) == {"input", "output", "cache_read", "cache_creation"}
     assert set(data["token_counts"]) == {"input", "output", "cache_read", "cache_creation", "total_visible"}
@@ -781,10 +917,15 @@ async def test_breakdown_summary_returns_scorecard_fields(tmp_path: Path) -> Non
     assert resp.status_code == 200
     data = resp.json()
     for key in [
-        "range", "sessions", "turns",
-        "input_tokens", "output_tokens",
-        "cache_read_tokens", "cache_creation_tokens",
-        "cost_usd", "cache_saved_usd",
+        "range",
+        "sessions",
+        "turns",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "cost_usd",
+        "cache_saved_usd",
     ]:
         assert key in data, f"Missing field: {key}"
     assert data["range"] == "all"
@@ -877,9 +1018,14 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     assert len(data["projects"]) >= 1
     p = data["projects"][0]
     for key in [
-        "project", "cwd", "cwd_b64",
-        "input", "output", "cache_hit_rate",
-        "input_cost", "output_cost",
+        "project",
+        "cwd",
+        "cwd_b64",
+        "input",
+        "output",
+        "cache_hit_rate",
+        "input_cost",
+        "output_cost",
     ]:
         assert key in p, f"Missing field: {key}"
     # Billable-token sort is descending.
@@ -894,32 +1040,17 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     # Oracle cross-check: per-project token sums match raw snapshot totals.
     snap = app.state.snapshot_result
     assert snap is not None, "snapshot should be cached after the endpoint call"
-    expected_input = sum(
-        t.usage.input_tokens
-        for s in snap.sessions for t in s.turns
-        if not t.is_interrupted
-    )
-    expected_output = sum(
-        t.usage.output_tokens
-        for s in snap.sessions for t in s.turns
-        if not t.is_interrupted
-    )
+    expected_input = sum(t.usage.input_tokens for s in snap.sessions for t in s.turns if not t.is_interrupted)
+    expected_output = sum(t.usage.output_tokens for s in snap.sessions for t in s.turns if not t.is_interrupted)
     assert sum(p["input"] for p in data["projects"]) == expected_input
     assert sum(p["output"] for p in data["projects"]) == expected_output
 
     # Cost oracle: per-project input_cost + output_cost sums match
     # cost_for_turn() applied to each non-interrupted turn.
     from tokenol.metrics.cost import cost_for_turn
-    expected_input_cost = sum(
-        cost_for_turn(t.model, t.usage).input_usd
-        for s in snap.sessions for t in s.turns
-        if not t.is_interrupted
-    )
-    expected_output_cost = sum(
-        cost_for_turn(t.model, t.usage).output_usd
-        for s in snap.sessions for t in s.turns
-        if not t.is_interrupted
-    )
+
+    expected_input_cost = sum(cost_for_turn(t.model, t.usage).input_usd for s in snap.sessions for t in s.turns if not t.is_interrupted)
+    expected_output_cost = sum(cost_for_turn(t.model, t.usage).output_usd for s in snap.sessions for t in s.turns if not t.is_interrupted)
     assert abs(sum(p["input_cost"] for p in data["projects"]) - expected_input_cost) < 1e-9
     assert abs(sum(p["output_cost"] for p in data["projects"]) - expected_output_cost) < 1e-9
 
@@ -974,22 +1105,16 @@ async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
         # Oracle cross-check: sums of per-model input/output match raw totals.
         snap = app.state.snapshot_result
         assert snap is not None
-        expected_input = sum(
-            t.usage.input_tokens for t in snap.turns if not t.is_interrupted
-        )
-        expected_output = sum(
-            t.usage.output_tokens for t in snap.turns if not t.is_interrupted
-        )
+        expected_input = sum(t.usage.input_tokens for t in snap.turns if not t.is_interrupted)
+        expected_output = sum(t.usage.output_tokens for t in snap.turns if not t.is_interrupted)
         assert sum(mm["input"] for mm in data["models"]) == expected_input
         assert sum(mm["output"] for mm in data["models"]) == expected_output
 
         # Cost oracle: per-model cost_usd sum matches cost_for_turn() applied
         # to each non-interrupted turn.
         from tokenol.metrics.cost import cost_for_turn
-        expected_cost = sum(
-            cost_for_turn(t.model, t.usage).total_usd
-            for t in snap.turns if not t.is_interrupted
-        )
+
+        expected_cost = sum(cost_for_turn(t.model, t.usage).total_usd for t in snap.turns if not t.is_interrupted)
         assert abs(cost_total - expected_cost) < 1e-9
 
 
@@ -1079,6 +1204,7 @@ async def test_breakdown_tools_excludes_interrupted(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_tool_page_returns_html(tmp_path: Path) -> None:
     from httpx import ASGITransport, AsyncClient
+
     with _mock_dirs(tmp_path):
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1094,6 +1220,7 @@ async def test_api_tool_detail_returns_payload(tmp_path: Path) -> None:
     dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
 
     from httpx import ASGITransport, AsyncClient
+
     with _mock_dirs(tmp_path):
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1114,6 +1241,7 @@ async def test_api_tool_detail_returns_payload(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_api_tool_detail_404_on_unknown(tmp_path: Path) -> None:
     from httpx import ASGITransport, AsyncClient
+
     with _mock_dirs(tmp_path):
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1160,57 +1288,35 @@ async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None
         try:
             await asyncio.wait_for(agen.__anext__(), timeout=5.0)
 
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
-                resp = await client.get(
-                    f"/api/hourly/{target_date}?metric=cost_per_kw"
-                )
-                turns_before = sum(
-                    p["turns"] for s in resp.json()["series"] for p in s["points"]
-                )
-                assert turns_before == 2, (
-                    f"fixture has 2 assistant turns, /api/hourly saw {turns_before}"
-                )
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.get(f"/api/hourly/{target_date}?metric=cost_per_kw")
+                turns_before = sum(p["turns"] for s in resp.json()["series"] for p in s["points"])
+                assert turns_before == 2, f"fixture has 2 assistant turns, /api/hourly saw {turns_before}"
 
             sess_path.write_bytes(sess_path.read_bytes() + _turn_line("evt-003", 10, 30))
 
             # Poll /api/snapshot as the sync barrier — it exercises the same fast-path
             # the fix targets, without reaching into broadcaster internals.
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 snapshot_turns = 0
                 for _ in range(200):
                     resp = await client.get("/api/snapshot?period=today")
-                    snapshot_turns = sum(
-                        s["turns"]
-                        for s in resp.json()["hourly_today"]["series"]
-                    )
+                    snapshot_turns = sum(s["turns"] for s in resp.json()["hourly_today"]["series"])
                     if snapshot_turns >= 3:
                         break
                     await asyncio.sleep(0.02)
-                assert snapshot_turns == 3, (
-                    "broadcaster did not pick up appended turn within 4 s "
-                    f"(snapshot still reports {snapshot_turns} turns)"
-                )
+                assert snapshot_turns == 3, f"broadcaster did not pick up appended turn within 4 s (snapshot still reports {snapshot_turns} turns)"
 
-                resp = await client.get(
-                    f"/api/hourly/{target_date}?metric=cost_per_kw"
-                )
-                turns_after = sum(
-                    p["turns"] for s in resp.json()["series"] for p in s["points"]
-                )
-                assert turns_after == 3, (
-                    "/api/hourly returned stale turns "
-                    f"({turns_after}); expected 3 after appending one turn"
-                )
+                resp = await client.get(f"/api/hourly/{target_date}?metric=cost_per_kw")
+                turns_after = sum(p["turns"] for s in resp.json()["series"] for p in s["points"])
+                assert turns_after == 3, f"/api/hourly returned stale turns ({turns_after}); expected 3 after appending one turn"
         finally:
             await agen.aclose()
 
 
 def test_session_dataclass_has_archived_field() -> None:
     from tokenol.model.events import Session
+
     s = Session(session_id="x", source_file="", is_sidechain=False)
     assert s.archived is False
 
@@ -1237,15 +1343,23 @@ def test_daily_range_all_uses_warm_tier(tmp_path, monkeypatch) -> None:
     # Insert one turn well outside any reasonable hot window.
     old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.flush(
-        [Turn(
-            dedup_key="old", timestamp=old_ts, session_id="s1",
-            model="claude-sonnet-4-6",
-            usage=Usage(input_tokens=10, output_tokens=5,
-                        cache_read_input_tokens=0, cache_creation_input_tokens=0),
-            is_sidechain=False, stop_reason="end_turn", cost_usd=0.001,
-            is_interrupted=False, tool_use_count=0, tool_error_count=0,
-            tool_names=Counter(), assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
-        )],
+        [
+            Turn(
+                dedup_key="old",
+                timestamp=old_ts,
+                session_id="s1",
+                model="claude-sonnet-4-6",
+                usage=Usage(input_tokens=10, output_tokens=5, cache_read_input_tokens=0, cache_creation_input_tokens=0),
+                is_sidechain=False,
+                stop_reason="end_turn",
+                cost_usd=0.001,
+                is_interrupted=False,
+                tool_use_count=0,
+                tool_error_count=0,
+                tool_names=Counter(),
+                assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
+            )
+        ],
         [Session(session_id="s1", source_file="", is_sidechain=False, cwd="/proj/old")],
     )
 
@@ -1274,6 +1388,7 @@ def test_create_app_attaches_store_and_writes_pidfile(tmp_path, monkeypatch) -> 
 def test_lifespan_starts_and_stops_flusher(tmp_path, monkeypatch) -> None:
     """The lifespan startup writes the pidfile; shutdown clears it."""
     import asyncio
+
     monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
     monkeypatch.setenv("TOKENOL_HISTORY_PATH", str(tmp_path / "h.duckdb"))
 
@@ -1354,6 +1469,7 @@ async def test_tool_detail_includes_scorecards_and_breakdowns(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_project_detail_includes_by_tool(tmp_path: Path) -> None:
     import base64
+
     dst = tmp_path / "projects" / "sess-pt.jsonl"
     dst.parent.mkdir(parents=True)
     dst.write_bytes((FIXTURES_DIR / "per_tool_basic.jsonl").read_bytes())
@@ -1558,12 +1674,12 @@ async def test_skills_is_a_breakdown_panel_not_a_tab(tmp_path: Path) -> None:
     # The dedicated landing route never shipped — it now 404s.
     assert skills_route.status_code == 404
     # No "Skills" nav tab on either page.
-    assert '>Skills</a>' not in overview.text
-    assert '>Skills</a>' not in breakdown.text
+    assert ">Skills</a>" not in overview.text
+    assert ">Skills</a>" not in breakdown.text
     assert 'href="/skills"' not in overview.text
     assert 'href="/skills"' not in breakdown.text
     # The Skill Mix panel still lives on the Breakdown page.
-    assert 'bp-skills-bars' in breakdown.text
+    assert "bp-skills-bars" in breakdown.text
     # Click-through to a per-skill detail page is unchanged.
     assert detail.status_code == 200
     assert "text/html" in detail.headers["content-type"]

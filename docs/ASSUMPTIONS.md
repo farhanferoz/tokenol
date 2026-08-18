@@ -17,7 +17,8 @@ These surface in three places:
 | `UNKNOWN_MODEL_FALLBACK` | Unknown Claude model inherits pricing + context from nearest-known family sibling | No machine-readable pricing feed; new models appear before we update | Warned per model; slight mispricing until registry updated |
 | `DEDUP_PASSTHROUGH` | Events with `null` `message.id` or `null` `requestId` pass through dedup (matches ccusage behavior) | Cannot form the compound hash key | Rare; logged per event |
 | `INTERRUPTED_TURN_SKIPPED` | Assistant messages with no `usage` fields (stop_reason=NONE) excluded from cost | Request never completed; no billing data | None — correctly excludes |
-| `GEMINI_UNPRICED` | Non-Claude models (gemini-*) parsed but not priced | Multi-provider pricing is post-v1 | Cost rows show `—` for these models |
+| `GEMINI_UNPRICED` | Non-Claude models (DeepSeek, Qwen, GLM, Kimi, MiniMax, Gemini, GPT, etc.) excluded or unpriced | Non-Claude models do not consume Anthropic rate limits or follow Claude KV cache pricing | Cost shows as $0 or turns are excluded from Claude rollups |
+
 
 ---
 

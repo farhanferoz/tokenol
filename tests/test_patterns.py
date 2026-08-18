@@ -44,6 +44,7 @@ def _turn(
 
 # ── idle_expiry ────────────────────────────────────────────────────────────────
 
+
 class TestIdleExpiry:
     def test_positive_single_gap(self):
         turns = [
@@ -76,15 +77,16 @@ class TestIdleExpiry:
         # 4 turns with 3 big gaps → 3 hits → red
         turns = [
             _turn(offset_h=0),
-            _turn(offset_h=2,  input_t=100, cache_creation=9000, cache_read=0),
-            _turn(offset_h=4,  input_t=100, cache_creation=9000, cache_read=0),
-            _turn(offset_h=6,  input_t=100, cache_creation=9000, cache_read=0),
+            _turn(offset_h=2, input_t=100, cache_creation=9000, cache_read=0),
+            _turn(offset_h=4, input_t=100, cache_creation=9000, cache_read=0),
+            _turn(offset_h=6, input_t=100, cache_creation=9000, cache_read=0),
         ]
         hits = [h for h in detect_patterns(turns) if h.kind == "idle_expiry"]
         assert all(h.severity == "red" for h in hits)
 
 
 # ── compaction_reinflation ────────────────────────────────────────────────────
+
 
 class TestCompactionReinflation:
     def _build_cycle_turns(self, n_cycles: int = 1) -> list[Turn]:
@@ -114,9 +116,9 @@ class TestCompactionReinflation:
         # Drop but never re-inflate
         turns = [
             _turn(input_t=50_000, offset_h=0),
-            _turn(input_t=5_000,  offset_h=0.1),
-            _turn(input_t=5_000,  offset_h=0.2),
-            _turn(input_t=5_000,  offset_h=0.3),
+            _turn(input_t=5_000, offset_h=0.1),
+            _turn(input_t=5_000, offset_h=0.2),
+            _turn(input_t=5_000, offset_h=0.3),
         ]
         hits = detect_patterns(turns)
         assert not any(h.kind == "compaction_reinflation" for h in hits)
@@ -124,24 +126,24 @@ class TestCompactionReinflation:
 
 # ── context_ceiling_plateau ───────────────────────────────────────────────────
 
+
 class TestContextCeilingPlateau:
     def test_positive_long_plateau(self):
         # 25 turns near the haiku 200k ceiling
         cw = 200_000
-        turns = [_turn(model="claude-haiku-4-5", input_t=int(cw * 0.95), cache_read=0, cache_creation=0, offset_h=i * 0.1)
-                 for i in range(25)]
+        turns = [_turn(model="claude-haiku-4-5", input_t=int(cw * 0.95), cache_read=0, cache_creation=0, offset_h=i * 0.1) for i in range(25)]
         hits = detect_patterns(turns, {"context_plateau_min_turns": 20})
         assert any(h.kind == "context_ceiling_plateau" for h in hits)
 
     def test_negative_short_plateau(self):
         cw = 200_000
-        turns = [_turn(model="claude-haiku-4-5", input_t=int(cw * 0.95), cache_read=0, cache_creation=0, offset_h=i * 0.1)
-                 for i in range(10)]
+        turns = [_turn(model="claude-haiku-4-5", input_t=int(cw * 0.95), cache_read=0, cache_creation=0, offset_h=i * 0.1) for i in range(10)]
         hits = detect_patterns(turns, {"context_plateau_min_turns": 20})
         assert not any(h.kind == "context_ceiling_plateau" for h in hits)
 
 
 # ── sidechain_explosion ───────────────────────────────────────────────────────
+
 
 class TestSidechainExplosion:
     def test_positive_high_sidechain_share(self):
@@ -173,20 +175,15 @@ class TestSidechainExplosion:
 
 # ── tool_error_storm ──────────────────────────────────────────────────────────
 
+
 class TestToolErrorStorm:
     def test_positive_high_error_rate(self):
-        turns = [
-            _turn(tool_use_count=2, tool_error_count=1, offset_h=i * 0.1)
-            for i in range(10)
-        ]  # 50% error rate over 10-turn window
+        turns = [_turn(tool_use_count=2, tool_error_count=1, offset_h=i * 0.1) for i in range(10)]  # 50% error rate over 10-turn window
         hits = detect_patterns(turns)
         assert any(h.kind == "tool_error_storm" for h in hits)
 
     def test_negative_low_error_rate(self):
-        turns = [
-            _turn(tool_use_count=10, tool_error_count=1, offset_h=i * 0.1)
-            for i in range(10)
-        ]  # 10% → below default 20% threshold
+        turns = [_turn(tool_use_count=10, tool_error_count=1, offset_h=i * 0.1) for i in range(10)]  # 10% → below default 20% threshold
         hits = detect_patterns(turns)
         assert not any(h.kind == "tool_error_storm" for h in hits)
 
@@ -197,6 +194,7 @@ class TestToolErrorStorm:
 
 
 # ── edge cases ────────────────────────────────────────────────────────────────
+
 
 class TestEdgeCases:
     def test_empty_turns_returns_empty(self):
@@ -209,6 +207,7 @@ class TestEdgeCases:
 
 # ── integration: all 5 patterns in one synthetic session ──────────────────────
 
+
 class TestAllPatternsIntegration:
     def test_all_five_patterns_triggered(self):
         """Synthetic 200-turn session that triggers every detector."""
@@ -217,10 +216,14 @@ class TestAllPatternsIntegration:
         # 1. idle_expiry: 3 large idle gaps (each 2h) with high cache_creation
         for gap in range(3):
             turns.append(_turn(offset_h=gap * 3.0))
-            turns.append(_turn(
-                offset_h=gap * 3.0 + 2.0,
-                input_t=100, cache_creation=9000, cache_read=0,
-            ))
+            turns.append(
+                _turn(
+                    offset_h=gap * 3.0 + 2.0,
+                    input_t=100,
+                    cache_creation=9000,
+                    cache_read=0,
+                )
+            )
 
         # 2. compaction_reinflation: 3 cycles (triggers red)
         base = len(turns) * 0.1
@@ -248,8 +251,11 @@ class TestAllPatternsIntegration:
         hits = detect_patterns(turns, {"context_plateau_min_turns": 20})
         kinds_found = {h.kind for h in hits}
         expected = {
-            "idle_expiry", "compaction_reinflation", "context_ceiling_plateau",
-            "sidechain_explosion", "tool_error_storm",
+            "idle_expiry",
+            "compaction_reinflation",
+            "context_ceiling_plateau",
+            "sidechain_explosion",
+            "tool_error_storm",
         }
         assert expected <= kinds_found, f"Missing patterns: {expected - kinds_found}"
         assert len(hits) >= 5

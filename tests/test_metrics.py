@@ -18,8 +18,7 @@ _COST_EPS = 1e-9
 
 
 def test_cost_opus_47():
-    usage = Usage(input_tokens=1000, output_tokens=200,
-                  cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
     tc = cost_for_turn("claude-opus-4-7", usage)
     # input: 1000 * 5.00 / 1M = 0.005
     # output: 200 * 25.00 / 1M = 0.005
@@ -31,16 +30,14 @@ def test_cost_opus_47():
 
 
 def test_cost_haiku_45():
-    usage = Usage(input_tokens=10_000, output_tokens=500, cache_read_input_tokens=0,
-                  cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=10_000, output_tokens=500, cache_read_input_tokens=0, cache_creation_input_tokens=0)
     tc = cost_for_turn("claude-haiku-4-5-20251001", usage)
     expected = (10_000 * 1.00 + 500 * 5.00) / _M
     assert abs(tc.total_usd - expected) < _COST_EPS
 
 
 def test_cost_fable_5():
-    usage = Usage(input_tokens=1000, output_tokens=200,
-                  cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
     tc = cost_for_turn("claude-fable-5", usage)
     # input: 1000 * 10.00 / 1M = 0.010
     # output: 200 * 50.00 / 1M = 0.010
@@ -98,8 +95,7 @@ def test_opus_48_priced_and_suffix_clean():
 def test_cost_sonnet_5():
     # Sonnet 5 introductory pricing (through 2026-08-31) must not fall back
     # to Sonnet 4.6's rate, which is 1.5x more expensive.
-    usage = Usage(input_tokens=1000, output_tokens=200,
-                  cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
     tc = cost_for_turn("claude-sonnet-5", usage)
     expected = (1000 * 2.00 + 200 * 10.00 + 500 * 0.20 + 100 * 2.50) / _M
     assert abs(tc.total_usd - expected) < _COST_EPS
@@ -118,8 +114,7 @@ def test_sonnet_5_priced_and_suffix_clean():
 def test_cache_write_all_1h_tier():
     """Regression for the confirmed bug: cache-creation tokens entirely on the
     1-hour tier must price at 2x input, not the 5-minute tier's 1.25x."""
-    usage = Usage(input_tokens=6, output_tokens=6, cache_read_input_tokens=16153,
-                  cache_creation_input_tokens=17618, cache_creation_1h_input_tokens=17618)
+    usage = Usage(input_tokens=6, output_tokens=6, cache_read_input_tokens=16153, cache_creation_input_tokens=17618, cache_creation_1h_input_tokens=17618)
     tc = cost_for_turn("claude-opus-4-7", usage)
     expected = (6 * 5.00 + 6 * 25.00 + 16153 * 0.50 + 17618 * 10.00) / _M
     assert abs(tc.total_usd - expected) < _COST_EPS
@@ -130,8 +125,7 @@ def test_cache_write_all_1h_tier():
 
 
 def test_cache_write_split_5m_and_1h():
-    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
-                  cache_creation_input_tokens=1000, cache_creation_1h_input_tokens=300)
+    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=1000, cache_creation_1h_input_tokens=300)
     tc = cost_for_turn("claude-opus-4-7", usage)
     # 700 tokens @ 5m rate (6.25) + 300 tokens @ 1h rate (10.00)
     expected = (700 * 6.25 + 300 * 10.00) / _M
@@ -141,8 +135,7 @@ def test_cache_write_split_5m_and_1h():
 def test_cache_write_1h_clamped_to_total():
     """Defensive guard: malformed external log data claiming more 1h tokens
     than the total cache-creation count must not go negative on the 5m side."""
-    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
-                  cache_creation_input_tokens=100, cache_creation_1h_input_tokens=500)
+    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=100, cache_creation_1h_input_tokens=500)
     tc = cost_for_turn("claude-opus-4-7", usage)
     # Clamped: all 100 tokens treated as 1h tier, none go negative.
     expected = 100 * 10.00 / _M
@@ -187,21 +180,47 @@ def test_opus_41_resolves_to_own_entry_not_opus_48_rate():
 
 
 def test_cost_gemini_unpriced():
-    usage = Usage(input_tokens=1000, output_tokens=100, cache_read_input_tokens=0,
-                  cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=1000, output_tokens=100, cache_read_input_tokens=0, cache_creation_input_tokens=0)
     tc = cost_for_turn("gemini-3-flash", usage)
     assert tc.total_usd == 0.0
     from tokenol.enums import AssumptionTag
+
     assert AssumptionTag.GEMINI_UNPRICED in tc.assumptions
 
 
+def test_cost_opencode_unpriced():
+    from tokenol.enums import AssumptionTag
+    from tokenol.model.registry import is_claude
+
+    for model_name in ("deepseek-v4-flash", "deepseek-v4-pro", "qwen3.8-max", "glm-5.3", "kimi-k3", "minimax-m3"):
+        usage = Usage(input_tokens=10000, output_tokens=500, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+        tc = cost_for_turn(model_name, usage)
+        assert tc.total_usd == 0.0
+        assert AssumptionTag.GEMINI_UNPRICED in tc.assumptions
+        assert is_claude(model_name) is False
+
+
+def test_is_claude_recognition():
+    from tokenol.model.registry import is_claude
+
+    assert is_claude("claude-opus-4-8") is True
+    assert is_claude("claude-sonnet-5") is True
+    assert is_claude("claude-fable-5") is True
+    assert is_claude("claude-haiku-4-5") is True
+    assert is_claude("claude-custom-opus-v1") is True
+    assert is_claude("deepseek-v4-flash") is False
+    assert is_claude("qwen3.8-max") is False
+    assert is_claude("gemini-2.5-flash") is False
+    assert is_claude(None) is False
+
+
 def test_cost_unknown_claude_model():
-    usage = Usage(input_tokens=1000, output_tokens=100, cache_read_input_tokens=0,
-                  cache_creation_input_tokens=0)
+    usage = Usage(input_tokens=1000, output_tokens=100, cache_read_input_tokens=0, cache_creation_input_tokens=0)
     tc = cost_for_turn("claude-opus-99-ultra", usage)
     # Should use opus family fallback — not zero
     assert tc.total_usd > 0
     from tokenol.enums import AssumptionTag
+
     assert AssumptionTag.UNKNOWN_MODEL_FALLBACK in tc.assumptions
 
 
@@ -211,9 +230,10 @@ def test_daily_rollup():
     assert len(rollups) == 1
     r = rollups[0]
     from datetime import date
+
     assert r.date == date(2026, 4, 14)
     assert r.turns == 2
-    assert r.output_tokens == 500   # 200 + 300
+    assert r.output_tokens == 500  # 200 + 300
 
 
 def test_daily_rollup_since_filters_older_turns():
@@ -221,13 +241,16 @@ def test_daily_rollup_since_filters_older_turns():
     # never dropped turns dated before `since`, so Daily History rendered the
     # full series regardless of the selected 7D/30D/90D range.
     from datetime import date
+
     def _turn(d: date) -> Turn:
         return Turn(
-            dedup_key=f"k-{d}", timestamp=datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc),
-            session_id="s", model="claude-opus-4-7",
-            usage=Usage(input_tokens=1, output_tokens=1,
-                cache_read_input_tokens=0, cache_creation_input_tokens=0),
-            is_sidechain=False, stop_reason=None,
+            dedup_key=f"k-{d}",
+            timestamp=datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc),
+            session_id="s",
+            model="claude-opus-4-7",
+            usage=Usage(input_tokens=1, output_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0),
+            is_sidechain=False,
+            stop_reason=None,
         )
 
     turns = [_turn(date(2026, 1, 1)), _turn(date(2026, 4, 10)), _turn(date(2026, 4, 14))]
@@ -259,7 +282,8 @@ def _turn_with_cache_read(model: str | None, cache_read: int) -> Turn:
         session_id="s",
         model=model,
         usage=Usage(
-            input_tokens=0, output_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
             cache_read_input_tokens=cache_read,
             cache_creation_input_tokens=0,
         ),
@@ -298,7 +322,7 @@ def test_cache_saved_usd_sums_across_turns_and_models():
     # Sonnet 4.6: 500k reads → (0.5 × 3) − (0.5 × 0.3) = $1.35
     # Total: $2.25
     turns = [
-        _turn_with_cache_read("claude-opus-4-7",   200_000),
+        _turn_with_cache_read("claude-opus-4-7", 200_000),
         _turn_with_cache_read("claude-sonnet-4-6", 500_000),
     ]
     assert cache_saved_usd(turns) == pytest.approx(2.25, rel=1e-6)
@@ -323,7 +347,10 @@ def _turn_with_tools(tool_names: dict[str, int]) -> Turn:
 
 def test_session_rollup_sums_tool_mix():
     s = Session(
-        session_id="s1", source_file="x.jsonl", is_sidechain=False, cwd="/p",
+        session_id="s1",
+        source_file="x.jsonl",
+        is_sidechain=False,
+        cwd="/p",
         turns=[
             _turn_with_tools({"Read": 2, "Edit": 1}),
             _turn_with_tools({"Read": 1, "Bash": 3}),
@@ -335,10 +362,8 @@ def test_session_rollup_sums_tool_mix():
 
 def test_build_tool_mix_ranks_descending():
     srs = [
-        Session(session_id="a", source_file="a.jsonl", is_sidechain=False, cwd="/p",
-                turns=[_turn_with_tools({"Read": 5, "Edit": 2})]),
-        Session(session_id="b", source_file="b.jsonl", is_sidechain=False, cwd="/p",
-                turns=[_turn_with_tools({"Edit": 3, "Bash": 1})]),
+        Session(session_id="a", source_file="a.jsonl", is_sidechain=False, cwd="/p", turns=[_turn_with_tools({"Read": 5, "Edit": 2})]),
+        Session(session_id="b", source_file="b.jsonl", is_sidechain=False, cwd="/p", turns=[_turn_with_tools({"Edit": 3, "Bash": 1})]),
     ]
     rollups = [build_session_rollup(s) for s in srs]
     result = build_tool_mix(rollups, top_n=10)
@@ -351,13 +376,27 @@ def test_build_tool_mix_ranks_descending():
 
 
 def test_build_tool_mix_collapses_tail_to_others():
-    srs = [Session(
-        session_id="a", source_file="a.jsonl", is_sidechain=False, cwd="/p",
-        turns=[_turn_with_tools({
-            "Read": 10, "Edit": 8, "Bash": 6, "Grep": 4, "Glob": 3,
-            "Write": 2, "Task": 1,
-        })],
-    )]
+    srs = [
+        Session(
+            session_id="a",
+            source_file="a.jsonl",
+            is_sidechain=False,
+            cwd="/p",
+            turns=[
+                _turn_with_tools(
+                    {
+                        "Read": 10,
+                        "Edit": 8,
+                        "Bash": 6,
+                        "Grep": 4,
+                        "Glob": 3,
+                        "Write": 2,
+                        "Task": 1,
+                    }
+                )
+            ],
+        )
+    ]
     rollups = [build_session_rollup(s) for s in srs]
     result = build_tool_mix(rollups, top_n=3)
 
@@ -369,10 +408,15 @@ def test_build_tool_mix_collapses_tail_to_others():
 
 
 def test_build_tool_mix_no_others_when_under_top_n():
-    srs = [Session(
-        session_id="a", source_file="a.jsonl", is_sidechain=False, cwd="/p",
-        turns=[_turn_with_tools({"Read": 2, "Edit": 1})],
-    )]
+    srs = [
+        Session(
+            session_id="a",
+            source_file="a.jsonl",
+            is_sidechain=False,
+            cwd="/p",
+            turns=[_turn_with_tools({"Read": 2, "Edit": 1})],
+        )
+    ]
     rollups = [build_session_rollup(s) for s in srs]
     result = build_tool_mix(rollups, top_n=10)
 

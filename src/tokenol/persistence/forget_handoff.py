@@ -43,6 +43,7 @@ class ForgetRequest:
 
 # ---- pidfile -----------------------------------------------------------------
 
+
 def write_pidfile() -> None:
     """Write current PID to the pidfile, creating the directory if needed."""
     p = pidfile_path()
@@ -75,6 +76,7 @@ def read_live_pid() -> int | None:
 
 
 # ---- request file ------------------------------------------------------------
+
 
 def submit_forget_request(req: ForgetRequest) -> None:
     """Atomically write the request via tempfile + rename."""

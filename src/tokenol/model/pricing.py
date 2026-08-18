@@ -21,11 +21,11 @@ from typing import TypedDict
 
 class ModelEntry(TypedDict):
     family: str
-    context: int      # tokens
-    input: float       # USD / 1M tokens
+    context: int  # tokens
+    input: float  # USD / 1M tokens
     output: float
-    cache_write: float      # 5-minute TTL cache write (1.25x input)
-    cache_write_1h: float    # 1-hour TTL cache write (2x input)
+    cache_write: float  # 5-minute TTL cache write (1.25x input)
+    cache_write_1h: float  # 1-hour TTL cache write (2x input)
     cache_read: float
 
 
@@ -253,6 +253,7 @@ CLAUDE_MODELS: dict[str, ModelEntry] = {
         "cache_read": 0.025,
     },
 }
+
 
 def context_window(model: str) -> int | None:
     """Return context window size in tokens for *model*, or None if unknown."""

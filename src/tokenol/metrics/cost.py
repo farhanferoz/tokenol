@@ -46,10 +46,7 @@ def cost_for_turn(model: str | None, usage: Usage) -> TurnCost:
     # not an internal invariant) — Anthropic's own payloads never violate it.
     cache_1h_tokens = min(usage.cache_creation_1h_input_tokens, usage.cache_creation_input_tokens)
     cache_5m_tokens = usage.cache_creation_input_tokens - cache_1h_tokens
-    cache_creation_usd = (
-        cache_5m_tokens * entry["cache_write"] / _M
-        + cache_1h_tokens * entry["cache_write_1h"] / _M
-    )
+    cache_creation_usd = cache_5m_tokens * entry["cache_write"] / _M + cache_1h_tokens * entry["cache_write_1h"] / _M
     total = input_usd + output_usd + cache_read_usd + cache_creation_usd
 
     return TurnCost(input_usd, output_usd, cache_read_usd, cache_creation_usd, total, tags)
@@ -118,9 +115,14 @@ def rollup_by_date(
 
     def _empty(d: date) -> DailyRollup:
         return DailyRollup(
-            date=d, turns=0, input_tokens=0, output_tokens=0,
-            cache_read_tokens=0, cache_creation_tokens=0,
-            cost_usd=0.0, interrupted_turns=0,
+            date=d,
+            turns=0,
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_tokens=0,
+            cache_creation_tokens=0,
+            cost_usd=0.0,
+            interrupted_turns=0,
         )
 
     buckets: dict[date, DailyRollup] = {}
@@ -158,8 +160,13 @@ def rollup_by_hour(
 
     def _empty(h: datetime) -> HourlyRollup:
         return HourlyRollup(
-            hour=h, turns=0, input_tokens=0, output_tokens=0,
-            cache_read_tokens=0, cache_creation_tokens=0, cost_usd=0.0,
+            hour=h,
+            turns=0,
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_tokens=0,
+            cache_creation_tokens=0,
+            cost_usd=0.0,
         )
 
     buckets: dict[datetime, HourlyRollup] = {}

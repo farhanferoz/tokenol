@@ -9,12 +9,11 @@ from tokenol.model.pricing import context_window
 
 # ---- trailing_median ---------------------------------------------------
 
+
 def _series(values: list[float], start_date: date) -> list[dict]:
     from datetime import timedelta
-    return [
-        {"date": str(start_date + timedelta(days=i)), "cost_usd": v}
-        for i, v in enumerate(values)
-    ]
+
+    return [{"date": str(start_date + timedelta(days=i)), "cost_usd": v} for i, v in enumerate(values)]
 
 
 def test_trailing_median_basic():
@@ -60,6 +59,7 @@ def test_trailing_median_zero_values_excluded():
 
 # ---- trailing_stddev ---------------------------------------------------
 
+
 def test_trailing_stddev_basic():
     today = date(2026, 1, 15)
     series = _series([10.0, 10.0, 10.0, 20.0, 10.0, 10.0, 10.0], date(2026, 1, 8))
@@ -77,6 +77,7 @@ def test_trailing_stddev_cold_start():
 
 # ---- context_window helper --------------------------------------------
 
+
 def test_context_window_known_model():
     assert context_window("claude-opus-4-7") == 1_000_000
     assert context_window("claude-haiku-4-5") == 200_000
@@ -88,6 +89,7 @@ def test_context_window_unknown_model():
 
 
 # ---- baseline_median (cold-start fallback) ---------------------------------
+
 
 def test_baseline_median_cold_fewer_than_3():
     today = date(2026, 1, 5)

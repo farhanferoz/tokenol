@@ -22,10 +22,7 @@ def compute_verdict(sr: SessionRollup) -> BlowUpVerdict:
     if sr.peak_window_cost > _RUNAWAY_WINDOW_THRESHOLD_USD:
         return BlowUpVerdict.RUNAWAY_WINDOW
 
-    if (
-        sr.max_turn_input > _CONTEXT_CREEP_MAX_INPUT_TOKENS
-        and sr.context_growth_rate_val > _CONTEXT_CREEP_GROWTH_RATE
-    ):
+    if sr.max_turn_input > _CONTEXT_CREEP_MAX_INPUT_TOKENS and sr.context_growth_rate_val > _CONTEXT_CREEP_GROWTH_RATE:
         return BlowUpVerdict.CONTEXT_CREEP
 
     if sr.tool_use_count >= _TOOL_ERROR_STORM_MIN_USES and sr.tool_error_count / sr.tool_use_count > _TOOL_ERROR_STORM_ERROR_RATIO:

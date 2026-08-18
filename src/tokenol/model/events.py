@@ -49,11 +49,7 @@ class Usage:
         consumer of those shares must agree on it byte-for-byte — keep it here,
         not re-summed inline.
         """
-        return (
-            self.input_tokens
-            + self.cache_read_input_tokens
-            + self.cache_creation_input_tokens
-        )
+        return self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens
 
 
 @dataclass(slots=True)
@@ -65,7 +61,7 @@ class ToolCost:
     """
 
     tool_name: str
-    input_tokens: float = 0.0        # fractional after share split
+    input_tokens: float = 0.0  # fractional after share split
     output_tokens: float = 0.0
     cost_usd: float = 0.0
 
@@ -79,11 +75,11 @@ class RawEvent:
     line_number: int
 
     # Identity
-    event_type: str           # "assistant", "user", "system", …
+    event_type: str  # "assistant", "user", "system", …
     session_id: str
     request_id: str | None
-    message_id: str | None    # message.id (Anthropic UUID)
-    uuid: str | None          # event-level uuid
+    message_id: str | None  # message.id (Anthropic UUID)
+    uuid: str | None  # event-level uuid
 
     # Timing
     timestamp: datetime
@@ -125,7 +121,7 @@ class RawEvent:
 class Turn:
     """One deduplicated assistant response."""
 
-    dedup_key: str            # message_id:request_id (or passthrough)
+    dedup_key: str  # message_id:request_id (or passthrough)
     timestamp: datetime
     session_id: str
     model: str | None

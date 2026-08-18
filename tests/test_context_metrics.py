@@ -81,6 +81,7 @@ def test_non_cached_input_ratio_none_when_empty():
 
 # ---- ctx_ratio_n_to_1 --------------------------------------------------
 
+
 def test_ctx_ratio_none_when_output_zero():
     assert ctx_ratio_n_to_1(1000, 0) is None
 
@@ -94,6 +95,7 @@ def test_ctx_ratio_zero_reads():
 
 
 # ---- cache_reuse_n_to_1 ------------------------------------------------
+
 
 def test_cache_reuse_none_when_creation_zero():
     assert cache_reuse_n_to_1(0, 0) is None
@@ -110,6 +112,7 @@ def test_cache_reuse_zero_reads():
 
 # ---- cost_per_kw -------------------------------------------------------
 
+
 def test_cost_per_kw_none_when_output_zero():
     assert cost_per_kw(0.0, 0) is None
     assert cost_per_kw(1.0, 0) is None
@@ -124,6 +127,7 @@ def test_cost_per_kw_zero_cost():
 
 
 # ---- ctx_used_latest ---------------------------------------------------
+
 
 def test_ctx_used_latest_none_when_window_unknown():
     turns = build_turns([FIXTURES / "basic.jsonl"])

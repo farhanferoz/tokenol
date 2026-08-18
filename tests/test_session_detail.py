@@ -100,15 +100,24 @@ class TestExistingKeys:
     def test_existing_turn_keys_unchanged(self):
         detail = build_session_detail(_make_session([_make_turn()]))
         row = detail["turns"][0]
-        for key in ("ts", "model", "input_tokens", "output_tokens", "cache_read_tokens",
-                    "cache_creation_tokens", "cost_usd", "is_sidechain",
-                    "tool_use_count", "tool_error_count", "stop_reason"):
+        for key in (
+            "ts",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "cost_usd",
+            "is_sidechain",
+            "tool_use_count",
+            "tool_error_count",
+            "stop_reason",
+        ):
             assert key in row
 
     def test_top_level_keys_present(self):
         detail = build_session_detail(_make_session([_make_turn()]))
-        for key in ("session_id", "source_file", "model", "cwd", "verdict",
-                    "first_ts", "last_ts", "totals", "turns", "patterns"):
+        for key in ("session_id", "source_file", "model", "cwd", "verdict", "first_ts", "last_ts", "totals", "turns", "patterns"):
             assert key in detail
 
 
@@ -120,10 +129,7 @@ class TestPatterns:
 
     def test_healthy_session_no_patterns(self):
         # Low-cost, no sidechains, no gaps — should be clean
-        turns = [
-            _make_turn(ts=f"2026-04-14T10:0{i}:00+00:00", input_t=100, cache_creation=10, cache_read=50)
-            for i in range(5)
-        ]
+        turns = [_make_turn(ts=f"2026-04-14T10:0{i}:00+00:00", input_t=100, cache_creation=10, cache_read=50) for i in range(5)]
         detail = build_session_detail(_make_session(turns))
         assert detail["patterns"] == []
 

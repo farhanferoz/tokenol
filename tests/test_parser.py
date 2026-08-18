@@ -49,23 +49,35 @@ def test_parse_usage_extracts_1h_cache_breakdown(tmp_path):
     cache_creation_input_tokens total. Only the 1h share needs to be pulled
     out — cost.py prices it at the 1-hour rate instead of the 5-minute one."""
     p = tmp_path / "hour_cache.jsonl"
-    p.write_text(json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": "s1", "requestId": "req-1", "uuid": "evt-1",
-        "isSidechain": False, "model": "claude-opus-4-7",
-        "message": {
-            "id": "msg-1", "role": "assistant", "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 6, "output_tokens": 6,
-                "cache_read_input_tokens": 16153,
-                "cache_creation_input_tokens": 17618,
-                "cache_creation": {
-                    "ephemeral_1h_input_tokens": 17618,
-                    "ephemeral_5m_input_tokens": 0,
+    p.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "req-1",
+                "uuid": "evt-1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 6,
+                        "output_tokens": 6,
+                        "cache_read_input_tokens": 16153,
+                        "cache_creation_input_tokens": 17618,
+                        "cache_creation": {
+                            "ephemeral_1h_input_tokens": 17618,
+                            "ephemeral_5m_input_tokens": 0,
+                        },
+                    },
                 },
-            },
-        },
-    }) + "\n")
+            }
+        )
+        + "\n"
+    )
     events = list(parse_file(p))
     assert len(events) == 1
     usage = events[0].usage
@@ -75,23 +87,35 @@ def test_parse_usage_extracts_1h_cache_breakdown(tmp_path):
 
 def test_parse_usage_mixed_cache_tiers(tmp_path):
     p = tmp_path / "mixed_cache.jsonl"
-    p.write_text(json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": "s1", "requestId": "req-1", "uuid": "evt-1",
-        "isSidechain": False, "model": "claude-opus-4-7",
-        "message": {
-            "id": "msg-1", "role": "assistant", "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 6, "output_tokens": 6,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 1000,
-                "cache_creation": {
-                    "ephemeral_1h_input_tokens": 300,
-                    "ephemeral_5m_input_tokens": 700,
+    p.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "req-1",
+                "uuid": "evt-1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 6,
+                        "output_tokens": 6,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 1000,
+                        "cache_creation": {
+                            "ephemeral_1h_input_tokens": 300,
+                            "ephemeral_5m_input_tokens": 700,
+                        },
+                    },
                 },
-            },
-        },
-    }) + "\n")
+            }
+        )
+        + "\n"
+    )
     usage = list(parse_file(p))[0].usage
     assert usage.cache_creation_input_tokens == 1000
     assert usage.cache_creation_1h_input_tokens == 300
@@ -139,44 +163,89 @@ def test_parse_normalizes_windows_cwd(tmp_path):
     p = tmp_path / "sess.jsonl"
     lines = [
         # Drive-letter path with backslashes
-        json.dumps({
-            "type": "system", "timestamp": "2026-04-14T10:00:00Z", "sessionId": "s1",
-            "uuid": "u1", "isSidechain": False, "cwd": r"C:\Users\alice\dev\proj",
-        }),
-        json.dumps({
-            "type": "assistant", "timestamp": "2026-04-14T10:00:00Z", "sessionId": "s1",
-            "requestId": "r1", "uuid": "e1", "isSidechain": False,
-            "model": "claude-opus-4-7",
-            "message": {"id": "m1", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 1, "output_tokens": 1,
-                                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
-        }),
+        json.dumps(
+            {
+                "type": "system",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "uuid": "u1",
+                "isSidechain": False,
+                "cwd": r"C:\Users\alice\dev\proj",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "r1",
+                "uuid": "e1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m1",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                },
+            }
+        ),
         # UNC path
-        json.dumps({
-            "type": "system", "timestamp": "2026-04-14T10:00:00Z", "sessionId": "s2",
-            "uuid": "u2", "isSidechain": False, "cwd": r"\\fileserver\share\work",
-        }),
-        json.dumps({
-            "type": "assistant", "timestamp": "2026-04-14T10:00:00Z", "sessionId": "s2",
-            "requestId": "r2", "uuid": "e2", "isSidechain": False,
-            "model": "claude-opus-4-7",
-            "message": {"id": "m2", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 1, "output_tokens": 1,
-                                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
-        }),
+        json.dumps(
+            {
+                "type": "system",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s2",
+                "uuid": "u2",
+                "isSidechain": False,
+                "cwd": r"\\fileserver\share\work",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s2",
+                "requestId": "r2",
+                "uuid": "e2",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m2",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                },
+            }
+        ),
         # POSIX path — untouched
-        json.dumps({
-            "type": "system", "timestamp": "2026-04-14T10:00:00Z", "sessionId": "s3",
-            "uuid": "u3", "isSidechain": False, "cwd": "/home/alice/dev/proj",
-        }),
-        json.dumps({
-            "type": "assistant", "timestamp": "2026-04-14T10:00:00Z", "sessionId": "s3",
-            "requestId": "r3", "uuid": "e3", "isSidechain": False,
-            "model": "claude-opus-4-7",
-            "message": {"id": "m3", "role": "assistant", "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 1, "output_tokens": 1,
-                                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
-        }),
+        json.dumps(
+            {
+                "type": "system",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s3",
+                "uuid": "u3",
+                "isSidechain": False,
+                "cwd": "/home/alice/dev/proj",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s3",
+                "requestId": "r3",
+                "uuid": "e3",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m3",
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                },
+            }
+        ),
     ]
     p.write_text("\n".join(lines) + "\n")
 
@@ -189,20 +258,30 @@ def test_parse_normalizes_windows_cwd(tmp_path):
 
 def test_parse_captures_tool_names_single_use(tmp_path):
     p = tmp_path / "tools.jsonl"
-    p.write_text(json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {
-            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-            "usage": {"input_tokens": 1, "output_tokens": 1,
-                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-            "content": [
-                {"type": "text", "text": "ok"},
-                {"type": "tool_use", "name": "Read", "input": {}},
-            ],
-        },
-    }) + "\n")
+    p.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "r1",
+                "uuid": "e1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m1",
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                    "content": [
+                        {"type": "text", "text": "ok"},
+                        {"type": "tool_use", "name": "Read", "input": {}},
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
 
     events = list(parse_file(p))
     assert events[0].tool_names == Counter({"Read": 1})
@@ -211,22 +290,32 @@ def test_parse_captures_tool_names_single_use(tmp_path):
 
 def test_parse_captures_tool_names_multiple_per_turn(tmp_path):
     p = tmp_path / "tools_multi.jsonl"
-    p.write_text(json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {
-            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-            "usage": {"input_tokens": 1, "output_tokens": 1,
-                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-            "content": [
-                {"type": "tool_use", "name": "Read",  "input": {}},
-                {"type": "tool_use", "name": "Read",  "input": {}},
-                {"type": "tool_use", "name": "Edit",  "input": {}},
-                {"type": "text",     "text": "done"},
-            ],
-        },
-    }) + "\n")
+    p.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "r1",
+                "uuid": "e1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m1",
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "input": {}},
+                        {"type": "tool_use", "name": "Read", "input": {}},
+                        {"type": "tool_use", "name": "Edit", "input": {}},
+                        {"type": "text", "text": "done"},
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
 
     events = list(parse_file(p))
     assert events[0].tool_names == Counter({"Read": 2, "Edit": 1})
@@ -236,21 +325,31 @@ def test_parse_captures_tool_names_multiple_per_turn(tmp_path):
 def test_parse_skips_unnamed_tool_block(tmp_path):
     """`tool_use` blocks without a `name` field are junk — skip them but don't crash."""
     p = tmp_path / "tools_unnamed.jsonl"
-    p.write_text(json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {
-            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-            "usage": {"input_tokens": 1, "output_tokens": 1,
-                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-            "content": [
-                {"type": "tool_use", "input": {}},                 # no "name" key
-                {"type": "tool_use", "name": "",  "input": {}},    # empty name
-                {"type": "tool_use", "name": "Bash", "input": {}},
-            ],
-        },
-    }) + "\n")
+    p.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "r1",
+                "uuid": "e1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m1",
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                    "content": [
+                        {"type": "tool_use", "input": {}},  # no "name" key
+                        {"type": "tool_use", "name": "", "input": {}},  # empty name
+                        {"type": "tool_use", "name": "Bash", "input": {}},
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
 
     events = list(parse_file(p))
     assert events[0].tool_names == Counter({"Bash": 1})
@@ -268,20 +367,30 @@ def test_parse_zero_tools(tmp_path):
 def test_builder_propagates_tool_names(tmp_path):
     """tool_names on RawEvent must survive through build_turns to Turn."""
     p = tmp_path / "sess.jsonl"
-    p.write_text(json.dumps({
-        "type": "assistant", "timestamp": "2026-04-14T10:00:00Z",
-        "sessionId": "s1", "requestId": "r1", "uuid": "e1", "isSidechain": False,
-        "model": "claude-opus-4-7",
-        "message": {
-            "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-            "usage": {"input_tokens": 1, "output_tokens": 1,
-                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-            "content": [
-                {"type": "tool_use", "name": "Grep", "input": {}},
-                {"type": "tool_use", "name": "Grep", "input": {}},
-            ],
-        },
-    }) + "\n")
+    p.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-14T10:00:00Z",
+                "sessionId": "s1",
+                "requestId": "r1",
+                "uuid": "e1",
+                "isSidechain": False,
+                "model": "claude-opus-4-7",
+                "message": {
+                    "id": "m1",
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                    "content": [
+                        {"type": "tool_use", "name": "Grep", "input": {}},
+                        {"type": "tool_use", "name": "Grep", "input": {}},
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
 
     turns = build_turns([p])
     assert len(turns) == 1

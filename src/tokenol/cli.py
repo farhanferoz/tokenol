@@ -7,6 +7,7 @@ import re
 import subprocess
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -22,6 +23,8 @@ from tokenol.metrics.rollups import (
 )
 from tokenol.metrics.verdicts import compute_verdict
 from tokenol.metrics.windows import align_windows, project_window
+from tokenol.model import registry
+from tokenol.model.events import Session, Turn
 from tokenol.report.text import (
     print_daily,
     print_hourly,
@@ -74,9 +77,7 @@ def _parse_last(last: str) -> timedelta:
     """Parse lookback duration like '20m', '2h', '30s'. Rejects bare numbers and zero."""
     m = re.fullmatch(r"([1-9]\d*)([mhs])", last.strip())
     if not m:
-        raise typer.BadParameter(
-            f"Invalid duration '{last}'. Use a positive number with unit: '20m', '2h', '30s'."
-        )
+        raise typer.BadParameter(f"Invalid duration '{last}'. Use a positive number with unit: '20m', '2h', '30s'.")
     value = int(m.group(1))
     unit = m.group(2)
     if unit == "m":
@@ -115,28 +116,31 @@ def _timedelta_label(td: timedelta) -> str:
     return f"{total}sec"
 
 
-def _load_turns(since: date | None = None):
+def _load_turns(since: date | None = None, claude_only: bool = True) -> tuple[list[Turn], list[Path]]:
+    """Load and optionally filter turns by Claude provider and date."""
     assumption_recorder.reset()
     dirs = get_config_dirs(all_projects=_SCAN_ALL)
     paths = find_jsonl_files(dirs)
     turns = build_turns(paths)
+    if claude_only:
+        turns = [t for t in turns if registry.is_claude(t.model)]
     if since:
         turns = [t for t in turns if t.timestamp.date() >= since]
     return turns, paths
 
 
-def _load_turns_and_sessions(since: date | None = None):
+def _load_turns_and_sessions(since: date | None = None, claude_only: bool = True) -> tuple[list[Turn], list[Session], list[Path]]:
+    """Load turns and sessions, filtering by Claude provider and date."""
     assumption_recorder.reset()
     dirs = get_config_dirs(all_projects=_SCAN_ALL)
     paths = find_jsonl_files(dirs)
     turns = build_turns(paths)
+    if claude_only:
+        turns = [t for t in turns if registry.is_claude(t.model)]
     sessions = build_sessions(turns, paths=paths)
     if since:
         turns = [t for t in turns if t.timestamp.date() >= since]
-        sessions = [
-            s for s in sessions
-            if s.turns and s.turns[-1].timestamp.date() >= since
-        ]
+        sessions = [s for s in sessions if s.turns and s.turns[-1].timestamp.date() >= since]
     return turns, sessions, paths
 
 
@@ -297,6 +301,7 @@ def projects(
 @app.command()
 def models(
     since: str = typer.Option("14d", help="Start date, e.g. '14d' or '2026-04-01'"),
+    all_models: bool = typer.Option(False, "--all-models", help="Include non-Claude models (DeepSeek, Gemini, etc.)"),
     strict: bool = typer.Option(False, "--strict"),
     show_assumptions: bool = typer.Option(False, "--show-assumptions"),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
@@ -306,7 +311,7 @@ def models(
     _set_scan_scope(all_projects)
     _configure_logging(log_level)
     since_date = _parse_since(since)
-    turns, paths = _load_turns(since=since_date)
+    turns, paths = _load_turns(since=since_date, claude_only=not all_models)
 
     if strict and assumption_recorder.fired():
         raise typer.BadParameter("Assumptions fired and --strict is set.")
@@ -332,13 +337,16 @@ def verify(
     try:
         result = subprocess.run(
             ["ccusage", "--json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             err.print("[yellow]ccusage returned non-zero exit — skipping comparison[/yellow]")
             console.print(f"tokenol total: ${our_cost:.4f}")
             return
         import json
+
         data = json.loads(result.stdout)
         # ccusage JSON structure: list of day objects or a totals key
         ccusage_cost = 0.0
@@ -368,10 +376,7 @@ def serve(
     scoped: bool = typer.Option(  # noqa: B008
         False,
         "--scoped",
-        help=(
-            "Honor CLAUDE_CONFIG_DIR and scan only that project. "
-            "Default scans every ~/.claude* directory."
-        ),
+        help=("Honor CLAUDE_CONFIG_DIR and scan only that project. Default scans every ~/.claude* directory."),
     ),
     persist: bool = typer.Option(
         False,
@@ -396,20 +401,14 @@ def serve(
 
         from tokenol.serve.app import ServerConfig, create_app
     except ImportError:
-        err.print(
-            "[red]tokenol[serve] extras not installed.[/red] "
-            "Run: pip install 'tokenol[serve]'"
-        )
+        err.print("[red]tokenol[serve] extras not installed.[/red] Run: pip install 'tokenol[serve]'")
         raise typer.Exit(code=1) from None
 
     if persist:
         try:
             import duckdb  # noqa: F401  — probe only
         except ImportError:
-            err.print(
-                "[red]--persist requires the 'persist' extras.[/red] "
-                "Run: pip install 'tokenol[persist]'"
-            )
+            err.print("[red]--persist requires the 'persist' extras.[/red] Run: pip install 'tokenol[persist]'")
             raise typer.Exit(code=1) from None
 
     config = ServerConfig(
@@ -424,6 +423,7 @@ def serve(
 
     if open_browser:
         import webbrowser
+
         webbrowser.open(url)
 
     uvicorn.run(application, host="127.0.0.1", port=port, log_level=log_level.value.lower())

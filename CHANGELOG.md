@@ -4,6 +4,12 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.3 — 2026-08-18
+
+### Fixed
+- **Phantom Fable-5 pricing on non-Claude models.** When running Claude Code with alternative models via translation proxies or multi-provider gateways (e.g. DeepSeek, Qwen, GLM, Kimi, MiniMax, Mimo), unrecognised model names previously fell back to the table's default sibling (`claude-fable-5` at $10/M input, $50/M output), generating hundreds of dollars in phantom costs. `ModelRegistry` now strictly recognizes the Claude family (`fable`, `opus`, `sonnet`, `haiku`, and `claude-` prefixes); any non-Claude model resolves to unpriced ($0.00 marginal cost) tagged with `GEMINI_UNPRICED`.
+- **Metric pollution from non-Claude models.** Non-Claude turns (which produce zero Anthropic cache-read tokens and consume no Anthropic 5-hour rate limits) are now excluded by default from CLI metrics (`daily`, `hourly`, `live`, `sessions`, `projects`) and the web dashboard (`serve`), preserving clean 98%+ cache hit rates and eliminating false rate-limit burn alarms. `tokenol models` gains `--all-models` to view all models when desired.
+
 ## 0.7.2 — 2026-07-17
 
 ### Fixed

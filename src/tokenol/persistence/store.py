@@ -121,10 +121,7 @@ def _turn_row(t: Turn) -> tuple:
     ts = t.timestamp.replace(tzinfo=None) if t.timestamp.tzinfo else t.timestamp
     # Tool costs use compact one-letter keys so a corpus with thousands of
     # turns × tens of tools doesn't bloat the warm-tier file with verbose JSON.
-    tool_costs_json = _json.dumps({
-        name: {"i": tc.input_tokens, "o": tc.output_tokens, "c": tc.cost_usd}
-        for name, tc in t.tool_costs.items()
-    })
+    tool_costs_json = _json.dumps({name: {"i": tc.input_tokens, "o": tc.output_tokens, "c": tc.cost_usd} for name, tc in t.tool_costs.items()})
     return (
         t.dedup_key,
         ts,
@@ -174,10 +171,31 @@ def _row_to_turn(r: tuple) -> Turn:
     """
     from tokenol.enums import AssumptionTag
 
-    (dedup_key, ts, sid, model, inp, out, cr, cc, cc_1h, cost, sidechain, interrupted,
-     stop_reason, tu, te, tool_names_json, assumptions_json,
-     tool_costs_json, unattr_in, unattr_out, unattr_cost,
-     attribution_skill, skill_names_json) = r
+    (
+        dedup_key,
+        ts,
+        sid,
+        model,
+        inp,
+        out,
+        cr,
+        cc,
+        cc_1h,
+        cost,
+        sidechain,
+        interrupted,
+        stop_reason,
+        tu,
+        te,
+        tool_names_json,
+        assumptions_json,
+        tool_costs_json,
+        unattr_in,
+        unattr_out,
+        unattr_cost,
+        attribution_skill,
+        skill_names_json,
+    ) = r
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     tool_names = Counter(_json.loads(tool_names_json) if tool_names_json else {})
@@ -199,8 +217,10 @@ def _row_to_turn(r: tuple) -> Turn:
         session_id=sid,
         model=model,
         usage=Usage(
-            input_tokens=inp, output_tokens=out,
-            cache_read_input_tokens=cr, cache_creation_input_tokens=cc,
+            input_tokens=inp,
+            output_tokens=out,
+            cache_read_input_tokens=cr,
+            cache_creation_input_tokens=cc,
             cache_creation_1h_input_tokens=cc_1h or 0,
         ),
         is_sidechain=bool(sidechain),
@@ -260,8 +280,7 @@ class HistoryStore:
         self._con.execute(_MIGRATION_V4)
         # Upsert schema_version. Existing v1/v2 files get bumped here.
         self._con.execute(
-            "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             [str(SCHEMA_VERSION)],
         )
 
@@ -294,9 +313,7 @@ class HistoryStore:
         # when the caller didn't pass an explicit Session.
         for sid in _session_aggregate(turns):
             if sid not in sessions_by_id:
-                sessions_by_id[sid] = Session(
-                    session_id=sid, source_file="", is_sidechain=False, cwd=None, turns=[]
-                )
+                sessions_by_id[sid] = Session(session_id=sid, source_file="", is_sidechain=False, cwd=None, turns=[])
 
         if turns:
             insert_sql = """
@@ -321,8 +338,7 @@ class HistoryStore:
         sids = list(sessions_by_id)
         placeholders = ",".join(["?"] * len(sids))
         agg_rows = self._con.execute(
-            f"SELECT session_id, MIN(ts), MAX(ts), COUNT(*) FROM turns "
-            f"WHERE session_id IN ({placeholders}) GROUP BY session_id",
+            f"SELECT session_id, MIN(ts), MAX(ts), COUNT(*) FROM turns WHERE session_id IN ({placeholders}) GROUP BY session_id",
             sids,
         ).fetchall()
         actual_by_sid = {sid: (mn, mx, c) for sid, mn, mx, c in agg_rows}
@@ -348,8 +364,7 @@ class HistoryStore:
                         turn_count  = EXCLUDED.turn_count,
                         updated_at  = EXCLUDED.updated_at
                     """,
-                    [sid, s.source_file or None, s.cwd, s.is_sidechain,
-                     first_ts, last_ts, count],
+                    [sid, s.source_file or None, s.cwd, s.is_sidechain, first_ts, last_ts, count],
                 )
 
     def hydrate_hot(self, window_days: int) -> tuple[list[Turn], list[Session]]:
@@ -385,8 +400,7 @@ class HistoryStore:
         session_ids = {t.session_id for t in turns}
         placeholders = ",".join(["?"] * len(session_ids))
         session_rows = self._con.execute(
-            f"SELECT session_id, source_file, cwd, is_sidechain "
-            f"FROM sessions WHERE session_id IN ({placeholders})",
+            f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
             list(session_ids),
         ).fetchall()
 
@@ -396,20 +410,20 @@ class HistoryStore:
 
         sessions: list[Session] = []
         for sid, src, cwd, sidechain in session_rows:
-            sessions.append(Session(
-                session_id=sid,
-                source_file=src or "",
-                is_sidechain=bool(sidechain),
-                cwd=cwd,
-                turns=turns_by_sid.get(sid, []),
-            ))
+            sessions.append(
+                Session(
+                    session_id=sid,
+                    source_file=src or "",
+                    is_sidechain=bool(sidechain),
+                    cwd=cwd,
+                    turns=turns_by_sid.get(sid, []),
+                )
+            )
         return turns, sessions
 
     def last_ts_by_session(self) -> dict[str, datetime]:
         """High-water marks per session_id (UTC datetimes)."""
-        rows = self._con.execute(
-            "SELECT session_id, last_ts FROM sessions"
-        ).fetchall()
+        rows = self._con.execute("SELECT session_id, last_ts FROM sessions").fetchall()
         return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
 
     def query_turns(
@@ -463,8 +477,7 @@ class HistoryStore:
     def query_session(self, session_id: str) -> Session | None:
         """Return a Session with all its persisted turns, or None if unknown."""
         srow = self._con.execute(
-            "SELECT session_id, source_file, cwd, is_sidechain "
-            "FROM sessions WHERE session_id = ?",
+            "SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id = ?",
             [session_id],
         ).fetchone()
         if srow is None:
@@ -511,12 +524,14 @@ class HistoryStore:
         their denormalized `first_ts` and `turn_count` re-derived from remaining turns.
         """
         specified = sum(
-            1 for x in (
+            1
+            for x in (
                 session_ids is not None,
                 cwd is not None,
                 older_than is not None,
                 bool(all),
-            ) if x
+            )
+            if x
         )
         if specified != 1:
             raise ValueError("forget requires exactly one of: session_ids, cwd, older_than, all")
@@ -552,9 +567,7 @@ class HistoryStore:
                 return s_dropped, t_dropped
 
             if cwd is not None:
-                sids = [r[0] for r in self._con.execute(
-                    "SELECT session_id FROM sessions WHERE cwd = ?", [cwd]
-                ).fetchall()]
+                sids = [r[0] for r in self._con.execute("SELECT session_id FROM sessions WHERE cwd = ?", [cwd]).fetchall()]
                 if not sids:
                     return 0, 0
                 placeholders = ",".join(["?"] * len(sids))
@@ -562,22 +575,14 @@ class HistoryStore:
                     f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
                     sids,
                 ).fetchone()[0]
-                self._con.execute(
-                    f"DELETE FROM turns WHERE session_id IN ({placeholders})", sids
-                )
-                self._con.execute(
-                    f"DELETE FROM sessions WHERE session_id IN ({placeholders})", sids
-                )
+                self._con.execute(f"DELETE FROM turns WHERE session_id IN ({placeholders})", sids)
+                self._con.execute(f"DELETE FROM sessions WHERE session_id IN ({placeholders})", sids)
                 return len(sids), t_dropped
 
             # older_than (per-turn semantics)
             cutoff_naive = older_than.replace(tzinfo=None)
-            t_dropped = self._con.execute(
-                "SELECT COUNT(*) FROM turns WHERE ts < ?", [cutoff_naive]
-            ).fetchone()[0]
-            affected_sids = [r[0] for r in self._con.execute(
-                "SELECT DISTINCT session_id FROM turns WHERE ts < ?", [cutoff_naive]
-            ).fetchall()]
+            t_dropped = self._con.execute("SELECT COUNT(*) FROM turns WHERE ts < ?", [cutoff_naive]).fetchone()[0]
+            affected_sids = [r[0] for r in self._con.execute("SELECT DISTINCT session_id FROM turns WHERE ts < ?", [cutoff_naive]).fetchall()]
             self._con.execute("DELETE FROM turns WHERE ts < ?", [cutoff_naive])
 
             s_dropped = 0
@@ -587,14 +592,11 @@ class HistoryStore:
                     [sid],
                 ).fetchone()
                 if agg[2] == 0:
-                    self._con.execute(
-                        "DELETE FROM sessions WHERE session_id = ?", [sid]
-                    )
+                    self._con.execute("DELETE FROM sessions WHERE session_id = ?", [sid])
                     s_dropped += 1
                 else:
                     self._con.execute(
-                        "UPDATE sessions SET first_ts = ?, last_ts = ?, turn_count = ?, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                        "UPDATE sessions SET first_ts = ?, last_ts = ?, turn_count = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
                         [agg[0], agg[1], agg[2], sid],
                     )
             return s_dropped, t_dropped

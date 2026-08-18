@@ -63,10 +63,7 @@ def test_open_creates_schema(tmp_path: Path) -> None:
     # Tables present (verify after closing write connection)
     con = duckdb.connect(str(db_path), read_only=True)
     try:
-        tables = {row[0] for row in con.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'main'"
-        ).fetchall()}
+        tables = {row[0] for row in con.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'").fetchall()}
     finally:
         con.close()
     assert {"meta", "sessions", "turns"} <= tables
@@ -80,12 +77,11 @@ def test_open_existing_is_idempotent(tmp_path: Path) -> None:
 
 def test_schema_version_recorded(tmp_path: Path) -> None:
     from tokenol.persistence.store import SCHEMA_VERSION
+
     db_path = tmp_path / "history.duckdb"
     store = HistoryStore(db_path)
     try:
-        rows = store._con.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchall()
+        rows = store._con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
         assert rows == [(str(SCHEMA_VERSION),)]
     finally:
         store.close()
@@ -99,19 +95,20 @@ def test_flush_inserts_turns_and_session(tmp_path: Path) -> None:
         t2 = _turn("k2", "sess-1", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))
         store.flush(turns=[t1, t2], sessions=[s])
 
-        rows = store._con.execute(
-            "SELECT dedup_key, session_id, cost_usd FROM turns ORDER BY dedup_key"
-        ).fetchall()
+        rows = store._con.execute("SELECT dedup_key, session_id, cost_usd FROM turns ORDER BY dedup_key").fetchall()
         assert rows == [("k1", "sess-1", 0.01), ("k2", "sess-1", 0.01)]
 
-        srows = store._con.execute(
-            "SELECT session_id, source_file, cwd, turn_count, first_ts, last_ts FROM sessions"
-        ).fetchall()
-        assert srows == [(
-            "sess-1", "/tmp/x.jsonl", "/tmp/proj", 2,
-            datetime(2026, 5, 1, 12, 0),
-            datetime(2026, 5, 1, 13, 0),
-        )]
+        srows = store._con.execute("SELECT session_id, source_file, cwd, turn_count, first_ts, last_ts FROM sessions").fetchall()
+        assert srows == [
+            (
+                "sess-1",
+                "/tmp/x.jsonl",
+                "/tmp/proj",
+                2,
+                datetime(2026, 5, 1, 12, 0),
+                datetime(2026, 5, 1, 13, 0),
+            )
+        ]
     finally:
         store.close()
 
@@ -139,13 +136,15 @@ def test_flush_upserts_session_metadata(tmp_path: Path) -> None:
         t2 = _turn("k2", "sess-1", ts=datetime(2026, 5, 1, 14, 0, tzinfo=timezone.utc))
         store.flush([t2], [s2])
 
-        srows = store._con.execute(
-            "SELECT source_file, cwd, turn_count, last_ts FROM sessions"
-        ).fetchall()
-        assert srows == [(
-            "/new/path.jsonl", "/tmp/new", 2,
-            datetime(2026, 5, 1, 14, 0),
-        )]
+        srows = store._con.execute("SELECT source_file, cwd, turn_count, last_ts FROM sessions").fetchall()
+        assert srows == [
+            (
+                "/new/path.jsonl",
+                "/tmp/new",
+                2,
+                datetime(2026, 5, 1, 14, 0),
+            )
+        ]
     finally:
         store.close()
 
@@ -156,9 +155,7 @@ def test_flush_serializes_tool_names_and_assumptions_as_json(tmp_path: Path) -> 
         s = _session("sess-1")
         t = _turn("k1", "sess-1")
         store.flush([t], [s])
-        row = store._con.execute(
-            "SELECT tool_names, assumptions FROM turns WHERE dedup_key = 'k1'"
-        ).fetchone()
+        row = store._con.execute("SELECT tool_names, assumptions FROM turns WHERE dedup_key = 'k1'").fetchone()
         assert json.loads(row[0]) == {"Read": 1, "Bash": 1}
         assert json.loads(row[1]) == ["UNKNOWN_MODEL_FALLBACK"]
     finally:
@@ -168,20 +165,17 @@ def test_flush_serializes_tool_names_and_assumptions_as_json(tmp_path: Path) -> 
 def test_flush_refreshes_updated_at_on_upsert(tmp_path: Path) -> None:
     """Subsequent flushes for the same session must bump sessions.updated_at."""
     import time
+
     store = HistoryStore(tmp_path / "h.duckdb")
     try:
         store.flush([_turn("k1", "sess-1")], [_session("sess-1")])
-        first_updated = store._con.execute(
-            "SELECT updated_at FROM sessions WHERE session_id = 'sess-1'"
-        ).fetchone()[0]
+        first_updated = store._con.execute("SELECT updated_at FROM sessions WHERE session_id = 'sess-1'").fetchone()[0]
         time.sleep(0.05)  # ensure CURRENT_TIMESTAMP can advance
         store.flush(
             [_turn("k2", "sess-1", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))],
             [_session("sess-1")],
         )
-        second_updated = store._con.execute(
-            "SELECT updated_at FROM sessions WHERE session_id = 'sess-1'"
-        ).fetchone()[0]
+        second_updated = store._con.execute("SELECT updated_at FROM sessions WHERE session_id = 'sess-1'").fetchone()[0]
         assert second_updated > first_updated
     finally:
         store.close()
@@ -314,9 +308,7 @@ def test_forget_session_drops_turns_and_session(tmp_path: Path) -> None:
         )
         dropped = store.forget(session_ids=["s1"])
         assert dropped == (1, 1)
-        assert store._con.execute(
-            "SELECT session_id FROM sessions ORDER BY session_id"
-        ).fetchall() == [("s2",)]
+        assert store._con.execute("SELECT session_id FROM sessions ORDER BY session_id").fetchall() == [("s2",)]
         assert store._con.execute("SELECT dedup_key FROM turns").fetchall() == [("b",)]
     finally:
         store.close()
@@ -355,13 +347,9 @@ def test_forget_older_than_drops_old_turns_only(tmp_path: Path) -> None:
         assert dropped == (1, 2)
 
         # s1 retained with only its recent turn; first_ts/turn_count refreshed.
-        srows = store._con.execute(
-            "SELECT session_id, first_ts, turn_count FROM sessions"
-        ).fetchall()
+        srows = store._con.execute("SELECT session_id, first_ts, turn_count FROM sessions").fetchall()
         assert srows == [("s1", datetime(2026, 5, 1), 1)]
-        assert store._con.execute(
-            "SELECT dedup_key FROM turns ORDER BY dedup_key"
-        ).fetchall() == [("recent",)]
+        assert store._con.execute("SELECT dedup_key FROM turns ORDER BY dedup_key").fetchall() == [("recent",)]
     finally:
         store.close()
 
@@ -372,13 +360,12 @@ def test_forget_all_wipes_store(tmp_path: Path) -> None:
         store.flush([_turn("a", "s1")], [_session("s1")])
         dropped = store.forget(all=True)
         from tokenol.persistence.store import SCHEMA_VERSION
+
         assert dropped == (1, 1)
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (0,)
         assert store._con.execute("SELECT COUNT(*) FROM sessions").fetchone() == (0,)
         # Schema/meta retained.
-        assert store._con.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone() == (str(SCHEMA_VERSION),)
+        assert store._con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (str(SCHEMA_VERSION),)
     finally:
         store.close()
 
@@ -415,10 +402,7 @@ def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
     test crosses several chunk boundaries to exercise that path."""
     n = FLUSH_CHUNK_SIZE * 3 + 7  # spans 4 chunks; the +7 catches off-by-one
     base_ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
-    turns = [
-        _turn(f"k-{i:06d}", f"s-{i % 5}", ts=base_ts + timedelta(seconds=i))
-        for i in range(n)
-    ]
+    turns = [_turn(f"k-{i:06d}", f"s-{i % 5}", ts=base_ts + timedelta(seconds=i)) for i in range(n)]
     sessions = [_session(f"s-{i}") for i in range(5)]
 
     store = HistoryStore(tmp_path / "h.duckdb")
@@ -426,9 +410,7 @@ def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
         store.flush(turns, sessions)
         assert store._con.execute("SELECT COUNT(*) FROM turns").fetchone() == (n,)
         # Denormalized counts must agree with the chunked-insert outcome.
-        per_session = dict(store._con.execute(
-            "SELECT session_id, turn_count FROM sessions ORDER BY session_id"
-        ).fetchall())
+        per_session = dict(store._con.execute("SELECT session_id, turn_count FROM sessions ORDER BY session_id").fetchall())
         assert per_session == {f"s-{i}": sum(1 for j in range(n) if j % 5 == i) for i in range(5)}
 
         # ON CONFLICT DO NOTHING keeps re-flush idempotent across chunk splits.
@@ -444,19 +426,23 @@ def test_tool_costs_round_trip(tmp_path: Path) -> None:
     /api/breakdown/tools reconciliation invariant breaks for any --persist user
     on range=all (warm-tier turns return with empty tool_costs)."""
     from tokenol.model.events import ToolCost
+
     store = HistoryStore(tmp_path / "h.duckdb")
     try:
         ts = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
         original = Turn(
-            dedup_key="rt-1", timestamp=ts, session_id="s1",
+            dedup_key="rt-1",
+            timestamp=ts,
+            session_id="s1",
             model="claude-opus-4-7",
-            usage=Usage(input_tokens=100, output_tokens=50,
-                        cache_read_input_tokens=20, cache_creation_input_tokens=10),
-            is_sidechain=False, stop_reason="end_turn", cost_usd=0.123,
-            tool_use_count=1, tool_names=Counter({"Read": 1}),
+            usage=Usage(input_tokens=100, output_tokens=50, cache_read_input_tokens=20, cache_creation_input_tokens=10),
+            is_sidechain=False,
+            stop_reason="end_turn",
+            cost_usd=0.123,
+            tool_use_count=1,
+            tool_names=Counter({"Read": 1}),
             tool_costs={
-                "Read": ToolCost(tool_name="Read", input_tokens=42.5,
-                                  output_tokens=12.75, cost_usd=0.078),
+                "Read": ToolCost(tool_name="Read", input_tokens=42.5, output_tokens=12.75, cost_usd=0.078),
             },
             unattributed_input_tokens=7.5,
             unattributed_output_tokens=1.25,
@@ -490,14 +476,11 @@ def test_schema_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
     store = HistoryStore(db_path)
     try:
         from tokenol.persistence.store import SCHEMA_VERSION
-        rows = store._con.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchall()
+
+        rows = store._con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
         assert rows == [(str(SCHEMA_VERSION),)]
         # The new columns are present and queryable.
-        store._con.execute(
-            "SELECT tool_costs, unattributed_cost_usd FROM turns LIMIT 0"
-        ).fetchall()
+        store._con.execute("SELECT tool_costs, unattributed_cost_usd FROM turns LIMIT 0").fetchall()
     finally:
         store.close()
 
@@ -509,8 +492,7 @@ def test_skill_fields_survive_flush_and_hydrate(tmp_path: Path) -> None:
         s = _session("sess-sk")
         trigger = _turn("k-trig", "sess-sk")
         trigger.skill_names = Counter({"tiered-review": 2})
-        subagent = _turn("k-sub", "sess-sk",
-                         ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))
+        subagent = _turn("k-sub", "sess-sk", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))
         subagent.attribution_skill = "tiered-review"
         store.flush(turns=[trigger, subagent], sessions=[s])
 
@@ -526,6 +508,7 @@ def test_skill_fields_survive_flush_and_hydrate(tmp_path: Path) -> None:
 
 def test_schema_version_is_four(tmp_path: Path) -> None:
     from tokenol.persistence.store import SCHEMA_VERSION
+
     assert SCHEMA_VERSION == 4
 
 
@@ -537,13 +520,14 @@ def test_cache_creation_1h_tokens_round_trip(tmp_path: Path) -> None:
     try:
         ts = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
         original = Turn(
-            dedup_key="rt-1h", timestamp=ts, session_id="s1",
+            dedup_key="rt-1h",
+            timestamp=ts,
+            session_id="s1",
             model="claude-opus-4-7",
-            usage=Usage(input_tokens=6, output_tokens=6,
-                        cache_read_input_tokens=16153,
-                        cache_creation_input_tokens=17618,
-                        cache_creation_1h_input_tokens=17618),
-            is_sidechain=False, stop_reason="end_turn", cost_usd=0.17738,
+            usage=Usage(input_tokens=6, output_tokens=6, cache_read_input_tokens=16153, cache_creation_input_tokens=17618, cache_creation_1h_input_tokens=17618),
+            is_sidechain=False,
+            stop_reason="end_turn",
+            cost_usd=0.17738,
         )
         store.flush([original], [_session("s1")])
 
@@ -564,12 +548,9 @@ def test_schema_v3_to_v4_migration_is_idempotent(tmp_path: Path) -> None:
     store = HistoryStore(db_path)
     try:
         from tokenol.persistence.store import SCHEMA_VERSION
-        rows = store._con.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchall()
+
+        rows = store._con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
         assert rows == [(str(SCHEMA_VERSION),)]
-        store._con.execute(
-            "SELECT cache_creation_1h_tokens FROM turns LIMIT 0"
-        ).fetchall()
+        store._con.execute("SELECT cache_creation_1h_tokens FROM turns LIMIT 0").fetchall()
     finally:
         store.close()

@@ -18,6 +18,7 @@ def _sized(content):
     signature. Mirrors the parser's per-line pre-pass."""
     return [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
 
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -35,43 +36,58 @@ def test_lingering_input_attribution_across_turns(tmp_path):
     big_result = "x" * 50_000
     lines = [
         {
-            "type": "assistant", "timestamp": "2026-05-15T10:00:00Z",
-            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-15T10:00:00Z",
+            "sessionId": "s1",
+            "requestId": "r1",
+            "uuid": "u1",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-                "usage": {"input_tokens": 100, "output_tokens": 20,
-                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-                "content": [{"type": "tool_use", "id": "tu1", "name": "Read",
-                             "input": {"file_path": "/x"}}],
+                "id": "m1",
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Read", "input": {"file_path": "/x"}}],
             },
         },
         {
-            "type": "user", "timestamp": "2026-05-15T10:01:00Z",
-            "sessionId": "s1", "uuid": "u2", "isSidechain": False,
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tu1", "content": big_result}
-            ]},
+            "type": "user",
+            "timestamp": "2026-05-15T10:01:00Z",
+            "sessionId": "s1",
+            "uuid": "u2",
+            "isSidechain": False,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": big_result}]},
         },
         {
-            "type": "assistant", "timestamp": "2026-05-15T10:02:00Z",
-            "sessionId": "s1", "requestId": "r2", "uuid": "u3", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-15T10:02:00Z",
+            "sessionId": "s1",
+            "requestId": "r2",
+            "uuid": "u3",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m2", "role": "assistant", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 200, "output_tokens": 30,
-                          "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0},
+                "id": "m2",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 200, "output_tokens": 30, "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0},
                 "content": [{"type": "text", "text": "Got it."}],
             },
         },
         {
-            "type": "assistant", "timestamp": "2026-05-15T10:03:00Z",
-            "sessionId": "s1", "requestId": "r3", "uuid": "u4", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-15T10:03:00Z",
+            "sessionId": "s1",
+            "requestId": "r3",
+            "uuid": "u4",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m3", "role": "assistant", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 100, "output_tokens": 30,
-                          "cache_read_input_tokens": 50_500, "cache_creation_input_tokens": 0},
+                "id": "m3",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 30, "cache_read_input_tokens": 50_500, "cache_creation_input_tokens": 0},
                 "content": [{"type": "text", "text": "Anything else?"}],
             },
         },
@@ -145,8 +161,7 @@ def test_turn_has_tool_costs_default_empty():
 def test_output_share_single_tool():
     content = [
         {"type": "text", "text": "I'll search for it."},
-        {"type": "tool_use", "id": "a", "name": "Grep",
-         "input": {"pattern": "foo"}},
+        {"type": "tool_use", "id": "a", "name": "Grep", "input": {"pattern": "foo"}},
     ]
     shares, unattributed = _output_byte_shares(_sized(content))
     assert set(shares.keys()) == {"Grep"}
@@ -195,21 +210,14 @@ def test_attribute_cost_uses_all_four_components():
     )
     output_shares = {"Read": 0.6}
     input_shares = {"Read": 0.4}
-    tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(
-        "claude-opus-4-7", usage, output_shares, input_shares
-    )
+    tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost("claude-opus-4-7", usage, output_shares, input_shares)
 
     assert "Read" in tool_costs
     tc = tool_costs["Read"]
     assert tc.output_tokens == 200 * 0.6
     assert tc.input_tokens == 1000 * 0.4 + 10_000 * 0.4 + 2_000 * 0.4
     # Opus rates: input 5, output 25, cache_read 0.5, cache_write 6.25 per 1M
-    expected_cost = (
-        200 * 25 / 1_000_000 * 0.6
-        + 1000 * 5 / 1_000_000 * 0.4
-        + 10_000 * 0.5 / 1_000_000 * 0.4
-        + 2_000 * 6.25 / 1_000_000 * 0.4
-    )
+    expected_cost = 200 * 25 / 1_000_000 * 0.6 + 1000 * 5 / 1_000_000 * 0.4 + 10_000 * 0.5 / 1_000_000 * 0.4 + 2_000 * 6.25 / 1_000_000 * 0.4
     assert abs(tc.cost_usd - expected_cost) < 1e-9
     assert abs(unattr_out - 200 * 0.4) < 1e-9
     assert abs(unattr_in - (1000 + 10_000 + 2_000) * 0.6) < 1e-9
@@ -217,9 +225,7 @@ def test_attribute_cost_uses_all_four_components():
 
 def test_attribute_cost_unknown_model_zero():
     usage = Usage(input_tokens=1000, output_tokens=200)
-    tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(
-        None, usage, {"Read": 1.0}, {"Read": 1.0}
-    )
+    tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(None, usage, {"Read": 1.0}, {"Read": 1.0})
     assert tool_costs["Read"].cost_usd == 0.0
     assert tool_costs["Read"].input_tokens == 1000.0
     assert tool_costs["Read"].output_tokens == 200.0
@@ -233,33 +239,43 @@ def test_compaction_resets_tallies(tmp_path):
     big_result = "x" * 50_000
     lines = [
         {
-            "type": "assistant", "timestamp": "2026-05-15T10:00:00Z",
-            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-15T10:00:00Z",
+            "sessionId": "s1",
+            "requestId": "r1",
+            "uuid": "u1",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-                "usage": {"input_tokens": 10_000, "output_tokens": 20,
-                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-                "content": [{"type": "tool_use", "id": "tu1", "name": "Read",
-                             "input": {"file_path": "/x"}}],
+                "id": "m1",
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10_000, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Read", "input": {"file_path": "/x"}}],
             },
         },
         {
-            "type": "user", "timestamp": "2026-05-15T10:01:00Z",
-            "sessionId": "s1", "uuid": "u2", "isSidechain": False,
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tu1", "content": big_result}
-            ]},
+            "type": "user",
+            "timestamp": "2026-05-15T10:01:00Z",
+            "sessionId": "s1",
+            "uuid": "u2",
+            "isSidechain": False,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": big_result}]},
         },
         # Compaction: input_tokens drops from peak (60_000) to 500 (< 20%).
         {
-            "type": "assistant", "timestamp": "2026-05-15T10:02:00Z",
-            "sessionId": "s1", "requestId": "r2", "uuid": "u3", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-15T10:02:00Z",
+            "sessionId": "s1",
+            "requestId": "r2",
+            "uuid": "u3",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m2", "role": "assistant", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 500, "output_tokens": 30,
-                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "id": "m2",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 500, "output_tokens": 30, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
                 "content": [{"type": "text", "text": "Compacted then asked again."}],
             },
         },
@@ -280,20 +296,26 @@ def test_unknown_tool_use_id_goes_to_unknown_bucket(tmp_path):
     (e.g. compaction lost the call) lands in __unknown__ — never crashes."""
     lines = [
         {
-            "type": "user", "timestamp": "2026-05-15T10:00:00Z",
-            "sessionId": "s1", "uuid": "u1", "isSidechain": False,
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "ghost", "content": "leftover"}
-            ]},
+            "type": "user",
+            "timestamp": "2026-05-15T10:00:00Z",
+            "sessionId": "s1",
+            "uuid": "u1",
+            "isSidechain": False,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "ghost", "content": "leftover"}]},
         },
         {
-            "type": "assistant", "timestamp": "2026-05-15T10:01:00Z",
-            "sessionId": "s1", "requestId": "r1", "uuid": "u2", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-15T10:01:00Z",
+            "sessionId": "s1",
+            "requestId": "r1",
+            "uuid": "u2",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m1", "role": "assistant", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 50, "output_tokens": 10,
-                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "id": "m1",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 50, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
                 "content": [{"type": "text", "text": "ok"}],
             },
         },
@@ -310,6 +332,7 @@ def test_golden_fixture_reconciliation():
     """Three-turn fixture with Read + Bash. Per-tool cost + unattributed = total cost
     within 5% reconciliation tolerance."""
     from tokenol.metrics.cost import cost_for_turn
+
     events = list(parse_file(FIXTURES / "per_tool_basic.jsonl"))
     assistants = [e for e in events if e.event_type == "assistant"]
     assert len(assistants) == 3
@@ -334,6 +357,7 @@ def test_golden_fixture_reconciliation():
 
 def test_builder_propagates_tool_costs():
     from tokenol.ingest.builder import build_sessions, build_turns
+
     fixture = FIXTURES / "per_tool_basic.jsonl"
     turns = build_turns([fixture])
     sessions = build_sessions(turns, [fixture])
@@ -367,6 +391,7 @@ def test_build_tool_cost_daily_zero_fills():
 
 def test_rank_dict_with_others_top_n_plus_other():
     from tokenol.metrics.rollups import _rank_dict_with_others
+
     d = {"Read": 10.0, "Bash": 7.0, "Grep": 5.0, "Edit": 3.0, "Glob": 1.5}
     out = _rank_dict_with_others(d, top_n=3)
     names = [r["name"] for r in out]
@@ -383,6 +408,7 @@ def test_rank_dict_with_others_deterministic_tie_break():
     """Equal values must sort by name ascending so the 'other' membership and
     head order are reproducible across runs."""
     from tokenol.metrics.rollups import _rank_dict_with_others
+
     d = {"zebra": 5.0, "apple": 5.0, "mango": 5.0}
     out1 = _rank_dict_with_others(d, top_n=2)
     out2 = _rank_dict_with_others({k: v for k, v in reversed(list(d.items()))}, top_n=2)
@@ -392,6 +418,7 @@ def test_rank_dict_with_others_deterministic_tie_break():
 
 def test_rank_dict_with_others_skips_other_when_short():
     from tokenol.metrics.rollups import _rank_dict_with_others
+
     d = {"Read": 10.0, "Bash": 7.0}
     out = _rank_dict_with_others(d, top_n=5)
     names = [r["name"] for r in out]
@@ -404,6 +431,7 @@ def test_sentinel_tool_name_rejected_by_extract_tool_blocks():
     tool_names — otherwise the attacker can hide cost under the cost-attribution
     sentinels or masquerade as the collapsed tail in the ranked-bar UI."""
     from tokenol.ingest.parser import _extract_tool_blocks
+
     content = [
         {"type": "tool_use", "id": "a", "name": "__unattributed__"},
         {"type": "tool_use", "id": "b", "name": "__unknown__"},
@@ -422,13 +450,18 @@ def test_plain_string_content_is_wrapped(tmp_path):
     not be silently dropped."""
     lines = [
         {
-            "type": "assistant", "timestamp": "2026-05-16T10:00:00Z",
-            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-16T10:00:00Z",
+            "sessionId": "s1",
+            "requestId": "r1",
+            "uuid": "u1",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m1", "role": "assistant", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 100, "output_tokens": 20,
-                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "id": "m1",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
                 # Plain string content — historically zeroed by the parser.
                 "content": "Quick reply with no tool calls.",
             },
@@ -451,56 +484,71 @@ def test_compaction_resets_peak_so_steady_state_doesnt_re_fire(tmp_path):
     lines = [
         # Turn 1: peak input 60_000 (10_000 fresh + 50_000 cache_read).
         {
-            "type": "assistant", "timestamp": "2026-05-16T10:00:00Z",
-            "sessionId": "s1", "requestId": "r1", "uuid": "u1", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-16T10:00:00Z",
+            "sessionId": "s1",
+            "requestId": "r1",
+            "uuid": "u1",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m1", "role": "assistant", "stop_reason": "tool_use",
-                "usage": {"input_tokens": 10_000, "output_tokens": 20,
-                          "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0},
-                "content": [{"type": "tool_use", "id": "tu1", "name": "Read",
-                             "input": {"file_path": "/x"}}],
+                "id": "m1",
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10_000, "output_tokens": 20, "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Read", "input": {"file_path": "/x"}}],
             },
         },
         {
-            "type": "user", "timestamp": "2026-05-16T10:01:00Z",
-            "sessionId": "s1", "uuid": "u2", "isSidechain": False,
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tu1", "content": big_result}
-            ]},
+            "type": "user",
+            "timestamp": "2026-05-16T10:01:00Z",
+            "sessionId": "s1",
+            "uuid": "u2",
+            "isSidechain": False,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": big_result}]},
         },
         # Turn 2: input drops to 500 (compaction). Peak should reset here.
         {
-            "type": "assistant", "timestamp": "2026-05-16T10:02:00Z",
-            "sessionId": "s1", "requestId": "r2", "uuid": "u3", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-16T10:02:00Z",
+            "sessionId": "s1",
+            "requestId": "r2",
+            "uuid": "u3",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m2", "role": "assistant", "stop_reason": "tool_use",
-                "usage": {"input_tokens": 500, "output_tokens": 20,
-                          "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-                "content": [{"type": "tool_use", "id": "tu2", "name": "Grep",
-                             "input": {"pattern": "foo"}}],
+                "id": "m2",
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 500, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "tu2", "name": "Grep", "input": {"pattern": "foo"}}],
             },
         },
         {
-            "type": "user", "timestamp": "2026-05-16T10:03:00Z",
-            "sessionId": "s1", "uuid": "u4", "isSidechain": False,
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tu2", "content": "matches"}
-            ]},
+            "type": "user",
+            "timestamp": "2026-05-16T10:03:00Z",
+            "sessionId": "s1",
+            "uuid": "u4",
+            "isSidechain": False,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu2", "content": "matches"}]},
         },
         # Turn 3: same scale as turn 2. Pre-fix this would have re-fired the
         # reset (still <20% of original 60_000 peak) and dumped Grep input
         # share into unattributed. Post-fix peak is 500 from turn 2, so this
         # turn is *not* a compaction event and Grep gets attributed.
         {
-            "type": "assistant", "timestamp": "2026-05-16T10:04:00Z",
-            "sessionId": "s1", "requestId": "r3", "uuid": "u5", "isSidechain": False,
+            "type": "assistant",
+            "timestamp": "2026-05-16T10:04:00Z",
+            "sessionId": "s1",
+            "requestId": "r3",
+            "uuid": "u5",
+            "isSidechain": False,
             "model": "claude-opus-4-7",
             "message": {
-                "id": "m3", "role": "assistant", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 400, "output_tokens": 10,
-                          "cache_read_input_tokens": 200, "cache_creation_input_tokens": 0},
+                "id": "m3",
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 400, "output_tokens": 10, "cache_read_input_tokens": 200, "cache_creation_input_tokens": 0},
                 "content": [{"type": "text", "text": "Done."}],
             },
         },

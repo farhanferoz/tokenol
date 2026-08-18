@@ -22,9 +22,7 @@ def trailing_median(
     window = [
         r[value_key]
         for r in daily_series
-        if r.get("date") and date.fromisoformat(r["date"]).toordinal() > cutoff
-        and date.fromisoformat(r["date"]) < today
-        and r.get(value_key, 0) > 0
+        if r.get("date") and date.fromisoformat(r["date"]).toordinal() > cutoff and date.fromisoformat(r["date"]) < today and r.get(value_key, 0) > 0
     ]
     if len(window) < max(3, days // 3):
         return None
@@ -68,9 +66,7 @@ def trailing_stddev(
     window = [
         r[value_key]
         for r in daily_series
-        if r.get("date") and date.fromisoformat(r["date"]).toordinal() > cutoff
-        and date.fromisoformat(r["date"]) < today
-        and r.get(value_key, 0) >= 0
+        if r.get("date") and date.fromisoformat(r["date"]).toordinal() > cutoff and date.fromisoformat(r["date"]) < today and r.get(value_key, 0) >= 0
     ]
     if len(window) < 4:
         return None

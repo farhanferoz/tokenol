@@ -132,9 +132,7 @@ def build_turn_detail(session: Session, turn_idx: int) -> dict | None:
 
     t = session.turns[turn_idx]
     tc = cost_for_turn(t.model, t.usage)
-    user_prompt, asst_preview, tool_calls, source_line = _parse_turn_snippets(
-        session.source_file, session.session_id, t
-    )
+    user_prompt, asst_preview, tool_calls, source_line = _parse_turn_snippets(session.source_file, session.session_id, t)
 
     return {
         "session_id": session.session_id,
@@ -145,27 +143,23 @@ def build_turn_detail(session: Session, turn_idx: int) -> dict | None:
         "stop_reason": t.stop_reason,
         "is_sidechain": t.is_sidechain,
         "cost_components": {
-            "input":          tc.input_usd,
-            "output":         tc.output_usd,
-            "cache_read":     tc.cache_read_usd,
+            "input": tc.input_usd,
+            "output": tc.output_usd,
+            "cache_read": tc.cache_read_usd,
             "cache_creation": tc.cache_creation_usd,
         },
         "token_counts": {
-            "input":         t.usage.input_tokens,
-            "output":        t.usage.output_tokens,
-            "cache_read":    t.usage.cache_read_input_tokens,
+            "input": t.usage.input_tokens,
+            "output": t.usage.output_tokens,
+            "cache_read": t.usage.cache_read_input_tokens,
             "cache_creation": t.usage.cache_creation_input_tokens,
-            "total_visible": (
-                t.usage.input_tokens
-                + t.usage.cache_read_input_tokens
-                + t.usage.cache_creation_input_tokens
-            ),
+            "total_visible": (t.usage.input_tokens + t.usage.cache_read_input_tokens + t.usage.cache_creation_input_tokens),
         },
-        "tool_calls":        tool_calls,
-        "user_prompt":       user_prompt,
+        "tool_calls": tool_calls,
+        "user_prompt": user_prompt,
         "assistant_preview": asst_preview,
-        "source_file":       session.source_file,
-        "source_line":       source_line,
+        "source_file": session.source_file,
+        "source_line": source_line,
     }
 
 
@@ -182,25 +176,27 @@ def build_session_detail(session: Session) -> dict:
     turn_rows = []
     for t in turns:
         tc = cost_for_turn(t.model, t.usage)
-        turn_rows.append({
-            "ts": t.timestamp.isoformat(),
-            "model": t.model,
-            "input_tokens": t.usage.input_tokens,
-            "output_tokens": t.usage.output_tokens,
-            "cache_read_tokens": t.usage.cache_read_input_tokens,
-            "cache_creation_tokens": t.usage.cache_creation_input_tokens,
-            "cost_usd": t.cost_usd,
-            "is_sidechain": t.is_sidechain,
-            "tool_use_count": t.tool_use_count,
-            "tool_error_count": t.tool_error_count,
-            "stop_reason": t.stop_reason,
-            "cost_components": {
-                "input":          tc.input_usd,
-                "output":         tc.output_usd,
-                "cache_read":     tc.cache_read_usd,
-                "cache_creation": tc.cache_creation_usd,
-            },
-        })
+        turn_rows.append(
+            {
+                "ts": t.timestamp.isoformat(),
+                "model": t.model,
+                "input_tokens": t.usage.input_tokens,
+                "output_tokens": t.usage.output_tokens,
+                "cache_read_tokens": t.usage.cache_read_input_tokens,
+                "cache_creation_tokens": t.usage.cache_creation_input_tokens,
+                "cost_usd": t.cost_usd,
+                "is_sidechain": t.is_sidechain,
+                "tool_use_count": t.tool_use_count,
+                "tool_error_count": t.tool_error_count,
+                "stop_reason": t.stop_reason,
+                "cost_components": {
+                    "input": tc.input_usd,
+                    "output": tc.output_usd,
+                    "cache_read": tc.cache_read_usd,
+                    "cache_creation": tc.cache_creation_usd,
+                },
+            }
+        )
 
     patterns = [asdict(h) for h in detect_patterns(turns)]
 

@@ -5,6 +5,7 @@ v0.3.2 behavior: no `import duckdb`, no `~/.tokenol/` directory created,
 `app.state.history_store is None`, no flusher task. Spec:
 docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -36,9 +37,7 @@ def test_default_create_app_does_not_import_duckdb(tmp_path):
         text=True,
         timeout=30,
     )
-    assert proc.returncode == 0, (
-        f"subprocess failed: stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    )
+    assert proc.returncode == 0, f"subprocess failed: stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert "OK" in proc.stdout
 
 
@@ -46,6 +45,7 @@ def test_default_app_state_has_no_store(tmp_path, monkeypatch):
     """In-process check that ServerConfig() yields None store/queue."""
     monkeypatch.setenv("HOME", str(tmp_path))
     from tokenol.serve.app import ServerConfig, create_app
+
     app = create_app(ServerConfig())
     assert app.state.history_store is None
     assert app.state.flush_queue is None
@@ -56,6 +56,7 @@ def test_persist_true_constructs_store(tmp_path, monkeypatch):
     pytest.importorskip("duckdb")
     monkeypatch.setenv("HOME", str(tmp_path))
     from tokenol.serve.app import ServerConfig, create_app
+
     app = create_app(ServerConfig(persist=True))
     assert app.state.history_store is not None
     assert app.state.flush_queue is not None
@@ -71,6 +72,7 @@ def test_default_warns_when_orphan_store_exists(tmp_path, monkeypatch, capsys):
     store_dir.mkdir()
     (store_dir / "history.duckdb").write_bytes(b"x" * 1024)
     from tokenol.serve.app import ServerConfig, create_app
+
     create_app(ServerConfig())
     captured = capsys.readouterr()
     # Rich strips ANSI when not in a TTY; the literal text still appears.
@@ -87,6 +89,7 @@ def test_default_warns_when_orphan_store_at_custom_env_path(tmp_path, monkeypatc
     # Set HOME to a clean dir so the default path definitely doesn't exist.
     monkeypatch.setenv("HOME", str(tmp_path / "clean_home"))
     from tokenol.serve.app import ServerConfig, create_app
+
     create_app(ServerConfig())
     captured = capsys.readouterr()
     # Rich may word-wrap long paths; collapse newlines before asserting.

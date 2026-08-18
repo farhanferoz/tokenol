@@ -127,9 +127,7 @@ class _Group:
                     continue
 
                 try:
-                    curr = await loop.run_in_executor(
-                        None, self._build_payload, self.period
-                    )
+                    curr = await loop.run_in_executor(None, self._build_payload, self.period)
                 except Exception:
                     log.exception("snapshot build failed — skipping tick")
                     await asyncio.sleep(sleep_for)
@@ -239,26 +237,18 @@ class SnapshotBroadcaster:
             store = self._history_store
             if req.kind == "session" and req.value:
                 evicted_sids = [req.value]
-                await loop.run_in_executor(
-                    None, lambda: store.forget(session_ids=[req.value])
-                )
+                await loop.run_in_executor(None, lambda: store.forget(session_ids=[req.value]))
             elif req.kind == "project" and req.value:
                 if hasattr(cache, "_hot_sessions_by_id"):
-                    evicted_sids = [
-                        sid for sid, s in cache._hot_sessions_by_id.items()
-                        if s.cwd == req.value
-                    ]
-                await loop.run_in_executor(
-                    None, lambda: store.forget(cwd=req.value)
-                )
+                    evicted_sids = [sid for sid, s in cache._hot_sessions_by_id.items() if s.cwd == req.value]
+                await loop.run_in_executor(None, lambda: store.forget(cwd=req.value))
             elif req.kind == "older_than" and req.value:
                 from datetime import datetime, timezone
+
                 cutoff = datetime.fromisoformat(req.value)
                 if cutoff.tzinfo is None:
                     cutoff = cutoff.replace(tzinfo=timezone.utc)
-                await loop.run_in_executor(
-                    None, lambda: store.forget(older_than=cutoff)
-                )
+                await loop.run_in_executor(None, lambda: store.forget(older_than=cutoff))
                 if hasattr(cache, "_hot_turns"):
                     cache._hot_turns = [t for t in cache._hot_turns if t.timestamp >= cutoff]
                     cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
@@ -266,19 +256,11 @@ class SnapshotBroadcaster:
                     # phantoms in the hot-tier maps and inflate session counts.
                     surviving_sids = {t.session_id for t in cache._hot_turns}
                     if hasattr(cache, "_hot_sessions_by_id"):
-                        cache._hot_sessions_by_id = {
-                            sid: s for sid, s in cache._hot_sessions_by_id.items()
-                            if sid in surviving_sids
-                        }
+                        cache._hot_sessions_by_id = {sid: s for sid, s in cache._hot_sessions_by_id.items() if sid in surviving_sids}
                     if hasattr(cache, "_last_ts_by_session"):
-                        cache._last_ts_by_session = {
-                            sid: ts for sid, ts in cache._last_ts_by_session.items()
-                            if sid in surviving_sids
-                        }
+                        cache._last_ts_by_session = {sid: ts for sid, ts in cache._last_ts_by_session.items() if sid in surviving_sids}
             elif req.kind == "all":
-                await loop.run_in_executor(
-                    None, lambda: store.forget(all=True)
-                )
+                await loop.run_in_executor(None, lambda: store.forget(all=True))
                 if hasattr(cache, "_hot_turns"):
                     cache._hot_turns = []
                     cache._hot_sessions_by_id = {}
@@ -292,9 +274,7 @@ class SnapshotBroadcaster:
                 for sid in evicted_sids:
                     cache._hot_sessions_by_id.pop(sid, None)
                     cache._last_ts_by_session.pop(sid, None)
-                cache._hot_turns = [
-                    t for t in cache._hot_turns if t.session_id not in evict_set
-                ]
+                cache._hot_turns = [t for t in cache._hot_turns if t.session_id not in evict_set]
                 cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
         except Exception:
             log.exception("processing forget request failed")
@@ -312,9 +292,7 @@ class SnapshotBroadcaster:
                     heartbeat_s=self._heartbeat_s,
                     forget_hook=self.process_pending_forget,
                 )
-                grp.task = asyncio.create_task(
-                    grp.run(), name=f"snapshot-broadcaster:{period}"
-                )
+                grp.task = asyncio.create_task(grp.run(), name=f"snapshot-broadcaster:{period}")
                 self._groups[period] = grp
             grp.subscribers.add(sub)
             # Bootstrap a late-joining subscriber with the most recent payload so

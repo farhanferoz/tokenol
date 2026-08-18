@@ -25,18 +25,25 @@ def _turn(key: str, sid: str) -> Turn:
         timestamp=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
         session_id=sid,
         model="claude-sonnet-4-6",
-        usage=Usage(input_tokens=100, output_tokens=50,
-                    cache_read_input_tokens=20, cache_creation_input_tokens=10),
-        is_sidechain=False, stop_reason="end_turn", cost_usd=0.01, is_interrupted=False,
-        tool_use_count=0, tool_error_count=0, tool_names=Counter(),
+        usage=Usage(input_tokens=100, output_tokens=50, cache_read_input_tokens=20, cache_creation_input_tokens=10),
+        is_sidechain=False,
+        stop_reason="end_turn",
+        cost_usd=0.01,
+        is_interrupted=False,
+        tool_use_count=0,
+        tool_error_count=0,
+        tool_names=Counter(),
         assumptions=[AssumptionTag.UNKNOWN_MODEL_FALLBACK],
     )
 
 
 def _session(sid: str) -> Session:
     return Session(
-        session_id=sid, source_file="/tmp/x.jsonl",
-        is_sidechain=False, cwd="/tmp/proj", turns=[],
+        session_id=sid,
+        source_file="/tmp/x.jsonl",
+        is_sidechain=False,
+        cwd="/tmp/proj",
+        turns=[],
     )
 
 

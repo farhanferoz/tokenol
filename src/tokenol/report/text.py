@@ -220,20 +220,9 @@ def print_live_full(
     remaining = _fmt_duration(projection["remaining_in_window"])
     window_start = active_window.start.strftime("%Y-%m-%d %H:%M UTC")
 
-    c.print(
-        f"Active 5h window: started {window_start}, "
-        f"{elapsed} elapsed, {remaining} remaining"
-    )
-    c.print(
-        f"Last {last_label}:   "
-        f"{recent_turns_count} turns,  "
-        f"${projection['recent_cost']:.2f} spent,  "
-        f"burn rate ${projection['burn_rate_usd_per_hour']:.2f}/hr"
-    )
-    c.print(
-        f"Window:     ${active_window.cost_usd:.2f} spent,  "
-        f"projected ${projection['projected_window_cost']:.2f} at end of window"
-    )
+    c.print(f"Active 5h window: started {window_start}, {elapsed} elapsed, {remaining} remaining")
+    c.print(f"Last {last_label}:   {recent_turns_count} turns,  ${projection['recent_cost']:.2f} spent,  burn rate ${projection['burn_rate_usd_per_hour']:.2f}/hr")
+    c.print(f"Window:     ${active_window.cost_usd:.2f} spent,  projected ${projection['projected_window_cost']:.2f} at end of window")
 
 
 def print_sessions(
@@ -284,9 +273,7 @@ def print_projects(
     tbl.add_column("Cache reuse %", justify="right")
 
     for pr in rollups:
-        total_tokens = (
-            pr.input_tokens + pr.output_tokens + pr.cache_read_tokens + pr.cache_creation_tokens
-        )
+        total_tokens = pr.input_tokens + pr.output_tokens + pr.cache_read_tokens + pr.cache_creation_tokens
         crr_str = f"{pr.cache_reuse_ratio * 100:.1f}%" if pr.cache_reuse_ratio is not None else "—"
         tbl.add_row(
             pr.cwd,
@@ -300,10 +287,7 @@ def print_projects(
     # Trailing totals row
     total_sessions = sum(pr.sessions for pr in rollups)
     total_turns = sum(pr.turns for pr in rollups)
-    total_tok = sum(
-        pr.input_tokens + pr.output_tokens + pr.cache_read_tokens + pr.cache_creation_tokens
-        for pr in rollups
-    )
+    total_tok = sum(pr.input_tokens + pr.output_tokens + pr.cache_read_tokens + pr.cache_creation_tokens for pr in rollups)
     tbl.add_row(
         "[bold]TOTAL[/bold]",
         str(total_sessions),
@@ -334,10 +318,7 @@ def print_models(
     tbl.add_column("Tool-error %", justify="right")
 
     for mr in rollups:
-        if mr.tool_use_count > 0:
-            tool_err_pct = f"{mr.tool_error_count / mr.tool_use_count * 100:.1f}%"
-        else:
-            tool_err_pct = "—"
+        tool_err_pct = f"{mr.tool_error_count / mr.tool_use_count * 100:.1f}%" if mr.tool_use_count > 0 else "—"
         tbl.add_row(
             _fmt_model(mr.model),
             str(mr.turns),

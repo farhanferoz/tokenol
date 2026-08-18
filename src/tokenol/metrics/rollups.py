@@ -112,9 +112,7 @@ class DailyToolCost:
     cost_usd: float
 
 
-def build_tool_cost_daily(
-    turns: list[Turn], *, tool_name: str, days: int = 30, today: date | None = None
-) -> list[DailyToolCost]:
+def build_tool_cost_daily(turns: list[Turn], *, tool_name: str, days: int = 30, today: date | None = None) -> list[DailyToolCost]:
     """Per-day cost_usd for *tool_name* over the last *days* days, zero-filled.
 
     Defaults *today* to UTC so the window aligns with the UTC turn timestamps;
@@ -137,9 +135,7 @@ def build_tool_cost_daily(
     return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
 
 
-def build_skill_cost_daily(
-    turns: list[Turn], *, skill_name: str, days: int = 30, today: date | None = None
-) -> list[DailyToolCost]:
+def build_skill_cost_daily(turns: list[Turn], *, skill_name: str, days: int = 30, today: date | None = None) -> list[DailyToolCost]:
     """Per-day cost_usd for *skill_name* over the last *days* days, zero-filled.
 
     Skill cost is turn-level: each attributed turn's full cost_usd is summed.
@@ -427,11 +423,13 @@ def _rank_dict_with_others(values: dict[str, float], top_n: int) -> list[dict]:
     tail = ranked[top_n:]
     out = [{"name": name, "value": v} for name, v in head]
     if tail:
-        out.append({
-            "name": "other",
-            "value": sum(v for _, v in tail),
-            "tool_count": len(tail),
-        })
+        out.append(
+            {
+                "name": "other",
+                "value": sum(v for _, v in tail),
+                "tool_count": len(tail),
+            }
+        )
     return out
 
 

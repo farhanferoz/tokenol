@@ -87,7 +87,7 @@ You can also set `CLAUDE_CONFIG_DIR` to a colon- or comma-separated list of path
 | `live`     | Active 5-hour window burn rate, recent-activity rate, projected final cost  |
 | `sessions` | Per-session detail table with blow-up verdict (RUNAWAY, CONTEXT_CREEP, …)  |
 | `projects` | Per-project rollup grouped by `cwd`                                         |
-| `models`   | Per-model rollup with tool-use counts and error rates                       |
+| `models`   | Per-model rollup with tool-use counts and error rates (`--all-models` to include non-Claude) |
 | `verify`   | Cross-check tokenol totals against `ccusage --json` (if installed)          |
 | `serve`    | Launch a local browser dashboard with live burn-rate gauge and all panels   |
 
@@ -98,6 +98,8 @@ Every command accepts:
 - `--strict` — exit non-zero if any cost-computation assumption fired
 - `--show-assumptions` — always print the assumption footer
 - `--log-level debug|info|warning`
+
+`tokenol models` accepts `--all-models` to include non-Claude providers (DeepSeek, Qwen, GLM, etc.) in the count.
 
 `tokenol sessions` additionally takes `--sort` (`cost`, `input`, `output`, `cache_read`, `turns`, `max_input`, `duration`) and `--top`.
 

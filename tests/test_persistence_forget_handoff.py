@@ -42,7 +42,8 @@ def test_read_live_pid_returns_none_when_pid_dead(tmp_path: Path, monkeypatch) -
 def test_submit_and_take_forget_request(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
     req = ForgetRequest(
-        kind="session", value="sess-abc",
+        kind="session",
+        value="sess-abc",
         submitted_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
     submit_forget_request(req)
@@ -60,10 +61,13 @@ def test_take_forget_request_returns_none_when_absent(tmp_path: Path, monkeypatc
 
 def test_submit_is_atomic_write(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
-    submit_forget_request(ForgetRequest(
-        kind="all", value=None,
-        submitted_at=datetime.now(tz=timezone.utc),
-    ))
+    submit_forget_request(
+        ForgetRequest(
+            kind="all",
+            value=None,
+            submitted_at=datetime.now(tz=timezone.utc),
+        )
+    )
     # Verify no leftover .tmp file.
     leftovers = list(tmp_path.glob("pending-forget*.tmp"))
     assert leftovers == []
