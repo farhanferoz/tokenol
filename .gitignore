@@ -3,6 +3,7 @@ _local/
 *_PLAN.md
 *.plan.md
 RESUME.md
+DECISIONS.md
 __pycache__/
 *.pyc
 *.pyo
