@@ -2,18 +2,20 @@
 
 Rates from Anthropic docs (Fable 5 added 2026-06-10; Sonnet 5 added
 2026-07-13; cache_write_1h + Sonnet 4.5/Opus 4.5/Opus 4.1/Opus 4/Sonnet 4/
-Haiku 3 added 2026-07-17). All current Claude models price flat at all
-context sizes — no 1M-tier surcharge. Prompt-cache writes bill at one of
-two rates depending on TTL: 1.25x input for a 5-minute cache (``cache_write``)
-or 2x input for a 1-hour cache (``cache_write_1h``); cache-read is 0.1x
-input regardless of which TTL wrote the entry. Unknown models fall back to
-the newest sibling in their family via ModelRegistry.
+Haiku 3 added 2026-07-17; Opus 5 + Fable 5.1 added 2026-09-04). All current
+Claude models price flat at all context sizes — no 1M-tier surcharge.
+Prompt-cache writes bill at one of two rates depending on TTL: 1.25x input
+for a 5-minute cache (``cache_write``) or 2x input for a 1-hour cache
+(``cache_write_1h``). Cache-read is 0.1x input on every model EXCEPT
+Fable 5.1 and Mythos 5.1, which read at 0.025x input ($0.25/MTok) — so a
+family fallback from an unpriced Fable 5.x to Fable 5 overcharges cache
+reads 4x. Unknown models fall back to the newest sibling in their family
+via ModelRegistry.
 
-Sonnet 5 is at introductory pricing ($2/$10, cache-read $0.20, cache-write
-$2.50/$4.00) through 2026-08-31; standard pricing ($3/$15, cache-read $0.30,
-cache-write $3.75/$6.00 — same as Sonnet 4.6) takes effect 2026-09-01. This
-table has no dated tiers, so the entry below will need a manual update to
-the standard rate on that date.
+Sonnet 5's $2/$10 launch rate was announced as introductory pricing through
+2026-08-31, with a rise to $3/$15 on 2026-09-01. Anthropic cancelled that
+increase and made $2/$10 the standard price (verified on the pricing page
+2026-09-04) — do NOT "fix" this entry up to $3/$15.
 """
 
 from typing import TypedDict
@@ -30,6 +32,17 @@ class ModelEntry(TypedDict):
 
 
 CLAUDE_MODELS: dict[str, ModelEntry] = {
+    # Fable 5.1 (top tier, above Opus). Identical to Fable 5 except cache
+    # reads bill at 0.025x input ($0.25/MTok) instead of the usual 0.1x.
+    "claude-fable-5-1": {
+        "family": "fable",
+        "context": 1_000_000,
+        "input": 10.00,
+        "output": 50.00,
+        "cache_write": 12.50,
+        "cache_write_1h": 20.00,
+        "cache_read": 0.25,
+    },
     # Fable 5 (top tier, above Opus)
     "claude-fable-5": {
         "family": "fable",
@@ -39,6 +52,16 @@ CLAUDE_MODELS: dict[str, ModelEntry] = {
         "cache_write": 12.50,
         "cache_write_1h": 20.00,
         "cache_read": 1.00,
+    },
+    # Opus 5
+    "claude-opus-5": {
+        "family": "opus",
+        "context": 1_000_000,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_write_1h": 10.00,
+        "cache_read": 0.50,
     },
     # Opus 4.x
     "claude-opus-4-8": {
@@ -262,10 +285,14 @@ def context_window(model: str) -> int | None:
 
 
 # Family fallback — when an unknown model matches a family prefix, use this
-# (newest known) entry in the corresponding family.
+# entry in the corresponding family. Newest known sibling, except for fable:
+# Fable 5.1 reads cache at 0.025x input where Fable 5 reads at 0.1x, so
+# falling back to 5.1 would silently *understate* an unknown fable model by
+# 4x on cache reads (the dominant cost component in an agent workload).
+# Overstating is the safer error for a spend monitor, so fable stays on 5.
 FAMILY_FALLBACKS: dict[str, str] = {
     "fable": "claude-fable-5",
-    "opus": "claude-opus-4-8",
+    "opus": "claude-opus-5",
     "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5-20251001",
 }

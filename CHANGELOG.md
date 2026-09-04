@@ -4,6 +4,18 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- **A single session started in the home directory collapsed every project into one bucket.** Project grouping rolls a nested cwd up to its shortest active ancestor, so `/dev/proj/backend` reports under `/dev/proj`. A session whose cwd was the home directory itself (`cd ~ && claude`) made the home directory a proper ancestor of every project on the machine, and the whole dashboard — the project filter, Tokens by Project, per-project rollups — collapsed to a single entry named after the user. Container directories (a home directory, a filesystem root, a mount point, and anything above them) are now excluded as roll-up *targets*; a session that genuinely ran in one still appears as its own project. Matched by path shape rather than against `$HOME`, since cwds are ingested from other machines too.
+- **Fable 5.1 cache reads overcharged 4x.** `claude-fable-5-1` had no table entry and fell back to `claude-fable-5`, which reads cache at the standard 0.1x of input ($1.00/MTok). Fable 5.1 and Mythos 5.1 read at 0.025x ($0.25/MTok) — the only models that deviate from the 0.1x rule. Cache reads dominate an agent workload, so the fallback inflated Fable 5.1 spend by roughly 4x.
+
+### Added
+- **Explicit `claude-opus-5` and `claude-fable-5-1` pricing entries** (verified against Anthropic's pricing page 2026-09-04). Opus 5 bills identically to Opus 4.8 ($5/$25, cache $6.25 5m / $10 1h / $0.50 read), so its totals were already right, but as an unmapped model it resolved through the family fallback and was reported as an estimated price — on this corpus that covered the single largest model by spend. Both now price exactly.
+
+### Changed
+- **Sonnet 5's $2/$10 rate is now documented as standard, not introductory.** Anthropic cancelled the increase to $3/$15 that had been scheduled for 2026-09-01. The table value is unchanged; the note that told a future reader to raise it has been replaced with one telling them not to.
+
 ## 0.7.3 — 2026-08-18
 
 ### Fixed

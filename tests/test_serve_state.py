@@ -1380,3 +1380,39 @@ def test_recompute_excl_cache_read_uses_passed_turn_cost():
     # input_pool_excl = 100 + 5 = 105 (cache_read_usd=999 dropped)
     # cost = 0.5 * 105 + 0.5 * 10 = 57.5
     assert result["Read"] == pytest.approx(57.5, rel=1e-9)
+
+
+def test_home_dir_session_does_not_swallow_every_project() -> None:
+    """Regression guard: one `cd ~ && claude` session must not collapse every
+    project on the machine into a single home-directory bucket.
+
+    The home dir is a proper ancestor of every project under it, so the
+    shortest-active-ancestor rule would otherwise roll them all up into it.
+    """
+    from tokenol.model.events import Session
+    from tokenol.serve.state import _grouped_cwd_by_sid
+
+    sessions = [
+        Session(session_id="home", source_file="", is_sidechain=False, cwd="/home/ff235"),
+        Session(session_id="a", source_file="", is_sidechain=False, cwd="/home/ff235/dev/StratSense"),
+        Session(session_id="b", source_file="", is_sidechain=False, cwd="/home/ff235/dev/StratSense/Backend"),
+        Session(session_id="c", source_file="", is_sidechain=False, cwd="/home/ff235/dev/OtherProj"),
+    ]
+    m = _grouped_cwd_by_sid(sessions)
+    assert m["a"] == "/home/ff235/dev/StratSense"
+    assert m["b"] == "/home/ff235/dev/StratSense"
+    assert m["c"] == "/home/ff235/dev/OtherProj"
+    # The home-dir session is still its own project — it is dropped as a
+    # roll-up *target*, not dropped from the data.
+    assert m["home"] == "/home/ff235"
+
+
+def test_container_cwd_shapes() -> None:
+    """Container dirs are matched by shape, so cwds mirrored in from another
+    machine (with its own home path) are classified without consulting $HOME."""
+    from tokenol.serve.state import is_container_cwd
+
+    for cwd in ("/", "/home", "/Users", "/mnt", "/home/ff235", "/Users/someone", "/mnt/scratch"):
+        assert is_container_cwd(cwd), cwd
+    for cwd in ("/home/ff235/dev", "/Users/someone/code", "/opt/app", "/mnt/scratch/proj"):
+        assert not is_container_cwd(cwd), cwd

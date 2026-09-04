@@ -426,3 +426,59 @@ def test_build_tool_mix_no_others_when_under_top_n():
 
 def test_build_tool_mix_empty():
     assert build_tool_mix([], top_n=10) == []
+
+
+def test_cost_opus_5_has_own_entry():
+    """Opus 5 is the dominant model in real usage; it must price from its own
+    entry, not as an UNKNOWN_MODEL_FALLBACK onto Opus 4.8 (same rates, but the
+    fallback flags the whole model as an estimated price in the UI)."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-opus-5[1m]")
+    assert entry == CLAUDE_MODELS["claude-opus-5"]
+    assert tags == []
+
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    tc = cost_for_turn("claude-opus-5", usage)
+    expected = (1000 * 5.00 + 200 * 25.00 + 500 * 0.50 + 100 * 6.25) / _M
+    assert abs(tc.total_usd - expected) < _COST_EPS
+    assert tc.assumptions == []
+
+
+def test_fable_5_1_cache_read_is_quarter_of_fable_5():
+    """Fable 5.1 reads cache at 0.025x input ($0.25/MTok), not the usual 0.1x
+    ($1.00/MTok). Falling back to the Fable 5 entry overcharges reads 4x."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+
+    assert CLAUDE_MODELS["claude-fable-5-1"]["cache_read"] == 0.25
+    assert CLAUDE_MODELS["claude-fable-5"]["cache_read"] == 1.00
+    # Everything else matches Fable 5.
+    for field in ("input", "output", "cache_write", "cache_write_1h"):
+        assert CLAUDE_MODELS["claude-fable-5-1"][field] == CLAUDE_MODELS["claude-fable-5"][field]
+
+    usage = Usage(input_tokens=0, output_tokens=0, cache_read_input_tokens=1_000_000, cache_creation_input_tokens=0)
+    tc = cost_for_turn("claude-fable-5-1", usage)
+    assert abs(tc.total_usd - 0.25) < _COST_EPS
+    # Guard against a regression back to the Fable 5 fallback.
+    assert tc.total_usd < cost_for_turn("claude-fable-5", usage).total_usd
+
+
+def test_fable_5_1_priced_and_suffix_clean():
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry, tags = resolve("claude-fable-5-1[1m]")
+    assert entry == CLAUDE_MODELS["claude-fable-5-1"]
+    assert tags == []
+
+
+def test_sonnet_5_two_ten_is_now_standard_not_introductory():
+    """The scheduled 2026-09-01 rise to $3/$15 was cancelled by Anthropic;
+    $2/$10 is the standard price. Guards against a well-meaning "the intro
+    period expired" edit pushing this entry up to Sonnet 4.6's rate."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+
+    entry = CLAUDE_MODELS["claude-sonnet-5"]
+    assert (entry["input"], entry["output"]) == (2.00, 10.00)
+    assert entry["cache_read"] == 0.20
