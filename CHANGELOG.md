@@ -10,6 +10,13 @@ All notable changes to tokenol are documented here. The format follows
 - **2026-05-02:** DuckDB `executemany` + `ON CONFLICT DO NOTHING` + JSON columns OOM'd at ~89k rows (24+ GiB). Fix pattern (`memory_limit`, `temp_directory`, `preserve_insertion_order=false`, ≤1000-row chunks) lives in `persistence/store.py`.
 - **2026-04-25:** lint debt slipped into a release tag (ruff skipped, pytest run) — codified as the three-part pre-release gate below.
 
+## 0.7.5 — 2026-09-04
+
+### Fixed
+- **A `--persist` server could hold the store lock long past its advertised shutdown deadline, blocking the next start.** `FlushQueue.stop()` began its 30-second budget only *after* awaiting the in-flight drain, and the deadline is checked between batches rather than during one — so a real shutdown cost `(in-flight batch) + 30s + (one more batch)`. Observed at ~90 seconds against a populated store, well after the checkpoint had already landed; the next `tokenol serve --persist` then failed with a DuckDB lock conflict. The budget now runs from the moment `stop()` is called, and shutdown drains in smaller batches so the final one overruns by less. The in-flight write itself cannot be interrupted — it runs on an executor thread, and `close()` takes the same lock it holds — so the honest guarantee is `stop_timeout` plus at most one batch, and the docstring now says so instead of promising a flat 30 seconds. Measured after the fix: lock released in 35s, with a restart acquiring it immediately.
+- **Starting a second tokenol printed a DuckDB traceback instead of saying tokenol was already running.** The failure ended in `IO Error: Could not set lock on file …`, which never mentions tokenol. It now reports one line naming the process that holds the store. This was never a data hazard — DuckDB's lock is exclusive and cross-process, so the second process dies at connect having written nothing, and `turns.dedup_key` makes re-flushing the same turns a no-op — but the error gave no way to know that. Non-lock IO errors (full disk, bad permissions) are untouched.
+- **The dashboard multiplied SSE reconnect attempts while its server was down.** `EventSource` fires `onerror` repeatedly, and each one queued another reconnect timer, so attempts stacked up instead of backing off once.
+
 ## 0.7.4 — 2026-09-04
 
 > **This release also delivers everything in 0.7.3.** Version 0.7.3 was tagged on 2026-08-18 but never
