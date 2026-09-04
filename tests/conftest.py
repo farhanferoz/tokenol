@@ -30,6 +30,43 @@ import pytest
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+def seed_history_store(db_path: Path, *, days_ago: int, turns: int, session_id: str = "warm-sess", cwd: str = "/dev/archived") -> float:
+    """Write *turns* persisted turns dated *days_ago* back. Returns their total cost.
+
+    Shared because four separate test modules had grown their own near-identical
+    copy of this. Timestamps are built relative to now, not from a fixture file,
+    so a caller pairing this with a windowed range does not become a time bomb
+    (see the module docstring above).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from tokenol.metrics.cost import cost_for_turn
+    from tokenol.model.events import Session, Turn, Usage
+    from tokenol.persistence.store import HistoryStore
+
+    ts = datetime.now(tz=timezone.utc) - timedelta(days=days_ago)
+    usage = Usage(input_tokens=1000, output_tokens=500, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    unit = cost_for_turn("claude-opus-4-8", usage).total_usd
+    made = [
+        Turn(
+            dedup_key=f"warm-{i}",
+            timestamp=ts + timedelta(seconds=i),
+            session_id=session_id,
+            model="claude-opus-4-8",
+            usage=usage,
+            is_sidechain=False,
+            stop_reason="end_turn",
+            cost_usd=unit,
+        )
+        for i in range(turns)
+    ]
+    session = Session(session_id=session_id, source_file="", is_sidechain=False, cwd=cwd, turns=made)
+    store = HistoryStore(db_path)
+    store.flush(made, [session])
+    store.close()
+    return unit * turns
+
+
 @pytest.fixture(autouse=True)
 def _isolate_history_store(tmp_path_factory, monkeypatch):
     """Point every test at a private, non-existent history store.

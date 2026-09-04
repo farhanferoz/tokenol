@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from tokenol.enums import AssumptionTag
 from tokenol.model.pricing import CLAUDE_MODELS, FAMILY_FALLBACKS, ModelEntry
@@ -69,9 +70,30 @@ class ModelRegistry:
 _registry = ModelRegistry()
 
 
+@lru_cache(maxsize=512)
+def _resolve_cached(model: str) -> tuple[ModelEntry | None, tuple[AssumptionTag, ...]]:
+    """Memoized inner resolve. Tags are a tuple so the cached value is immutable.
+
+    Resolution is a regex substitution, a lowercase and a family-prefix scan, and
+    it runs once per turn per request: on a 345k-turn corpus a single breakdown
+    page refresh called it over a million times to distinguish about ten distinct
+    model strings. It was ~11% of server samples. The keyspace is tiny and fixed
+    at import (CLAUDE_MODELS is a module constant), so the cache never staleness-
+    traps — 512 entries is far more than any real corpus has distinct models.
+    """
+    entry, tags = _registry.resolve(model)
+    return entry, tuple(tags)
+
+
 def resolve(model: str) -> tuple[ModelEntry | None, list[AssumptionTag]]:
-    """Resolve a model name to its pricing entry and assumption tags."""
-    return _registry.resolve(model)
+    """Resolve a model name to its pricing entry and assumption tags.
+
+    Returns a FRESH tag list each call: callers extend their own list from it and
+    one caller does a membership test, but handing out a shared mutable list from
+    a cache would make any future mutation corrupt every later lookup.
+    """
+    entry, tags = _resolve_cached(model)
+    return entry, list(tags)
 
 
 def is_claude(model: str | None) -> bool:

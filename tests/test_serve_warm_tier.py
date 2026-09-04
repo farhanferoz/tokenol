@@ -9,10 +9,10 @@ from JSONL against $6,513 of persisted turns for the same month.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from conftest import seed_history_store
 
 import tokenol.serve.state as _state_mod
 
@@ -31,33 +31,6 @@ HISTORICAL_ENDPOINTS = [
 ]
 
 
-def _seed_store(db_path: Path, *, days_ago: int, turns: int) -> float:
-    """Write `turns` persisted turns dated `days_ago` back. Returns total cost."""
-    from tokenol.metrics.cost import cost_for_turn
-    from tokenol.model.events import Session, Turn, Usage
-    from tokenol.persistence.store import HistoryStore
-
-    ts = datetime.now(tz=timezone.utc) - timedelta(days=days_ago)
-    made = [
-        Turn(
-            dedup_key=f"warm-{i}",
-            timestamp=ts + timedelta(seconds=i),
-            session_id="warm-sess",
-            model="claude-opus-4-8",
-            usage=Usage(input_tokens=1000, output_tokens=500, cache_read_input_tokens=0, cache_creation_input_tokens=0),
-            is_sidechain=False,
-            stop_reason="end_turn",
-            cost_usd=cost_for_turn("claude-opus-4-8", Usage(input_tokens=1000, output_tokens=500, cache_read_input_tokens=0, cache_creation_input_tokens=0)).total_usd,
-        )
-        for i in range(turns)
-    ]
-    session = Session(session_id="warm-sess", source_file="", is_sidechain=False, cwd="/dev/archived", turns=made)
-    store = HistoryStore(db_path)
-    store.flush(made, [session])
-    total = sum(t.cost_usd for t in made)
-    store.close()
-    return total
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", HISTORICAL_ENDPOINTS)
@@ -74,7 +47,7 @@ async def test_historical_endpoints_read_the_warm_tier(endpoint, tmp_path, monke
 
     db = tmp_path / ".tokenol" / "history.duckdb"
     db.parent.mkdir(parents=True, exist_ok=True)
-    warm_cost = _seed_store(db, days_ago=200, turns=40)
+    warm_cost = seed_history_store(db, days_ago=200, turns=40)
     assert warm_cost > 0
 
     app = create_app(ServerConfig(persist=True), prefs_path=tmp_path / "prefs.json")
@@ -110,7 +83,7 @@ async def test_warm_turns_are_counted_not_just_present(tmp_path, monkeypatch) ->
 
     db = tmp_path / ".tokenol" / "history.duckdb"
     db.parent.mkdir(parents=True, exist_ok=True)
-    warm_cost = _seed_store(db, days_ago=200, turns=40)
+    warm_cost = seed_history_store(db, days_ago=200, turns=40)
 
     app = create_app(ServerConfig(persist=True), prefs_path=tmp_path / "prefs.json")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
