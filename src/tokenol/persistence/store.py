@@ -15,6 +15,7 @@ import json as _json
 import logging
 import os
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -246,6 +247,16 @@ class HistoryStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path if path is not None else default_path()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # A duckdb.DuckDBPyConnection is NOT safe for concurrent use: two
+        # threads issuing queries on one connection race inside
+        # ClientContext::PendingQuery and segfault the process (confirmed by
+        # coredump 2026-09-04 — memcpy in PendingQuery on a flusher thread
+        # while the event loop held the GIL). This store is used from several
+        # threads at once: the flusher writes from its executor thread while
+        # dashboard requests read from theirs. Every use of `_con` is therefore
+        # serialised on this lock. RLock because flush() nests _tx() inside
+        # already-locked regions.
+        self._lock = threading.RLock()
         self._con = duckdb.connect(str(self.path))
         # DuckDB defaults to 80% of system RAM, which on a 32-GiB box is enough
         # to OOM the process during a large first-run flush. Bounding the pool
@@ -263,14 +274,21 @@ class HistoryStore:
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
-        """Wrap a block in BEGIN/COMMIT, with ROLLBACK on any exception."""
-        self._con.begin()
-        try:
-            yield
-            self._con.commit()
-        except Exception:
-            self._con.rollback()
-            raise
+        """Wrap a block in BEGIN/COMMIT, with ROLLBACK on any exception.
+
+        Holds `_lock` for the transaction's lifetime so no reader can issue a
+        query on the shared connection mid-transaction. Scoped per transaction
+        rather than per flush() call so a large flush yields the connection
+        between chunks instead of stalling the dashboard for its duration.
+        """
+        with self._lock:
+            self._con.begin()
+            try:
+                yield
+                self._con.commit()
+            except Exception:
+                self._con.rollback()
+                raise
 
     def _migrate(self) -> None:
         # Apply schema (DDL is idempotent via IF NOT EXISTS / IF NOT EXISTS).
@@ -286,7 +304,8 @@ class HistoryStore:
 
     def close(self) -> None:
         try:
-            self._con.close()
+            with self._lock:
+                self._con.close()
         except Exception:
             log.debug("error closing DuckDB connection", exc_info=True)
 
@@ -337,10 +356,11 @@ class HistoryStore:
 
         sids = list(sessions_by_id)
         placeholders = ",".join(["?"] * len(sids))
-        agg_rows = self._con.execute(
-            f"SELECT session_id, MIN(ts), MAX(ts), COUNT(*) FROM turns WHERE session_id IN ({placeholders}) GROUP BY session_id",
-            sids,
-        ).fetchall()
+        with self._lock:
+            agg_rows = self._con.execute(
+                f"SELECT session_id, MIN(ts), MAX(ts), COUNT(*) FROM turns WHERE session_id IN ({placeholders}) GROUP BY session_id",
+                sids,
+            ).fetchall()
         actual_by_sid = {sid: (mn, mx, c) for sid, mn, mx, c in agg_rows}
 
         with self._tx():
@@ -375,55 +395,57 @@ class HistoryStore:
         the same hot-window query — callers can iterate sessions and treat them
         as fully-hydrated.
         """
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
-        turn_rows = self._con.execute(
-            """
-            SELECT dedup_key, ts, session_id, model,
-                   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                   cache_creation_1h_tokens,
-                   cost_usd, is_sidechain, is_interrupted, stop_reason,
-                   tool_use_count, tool_error_count, tool_names, assumptions,
-                   tool_costs, unattributed_input_tokens,
-                   unattributed_output_tokens, unattributed_cost_usd,
-                   attribution_skill, skill_names
-            FROM turns
-            WHERE ts >= ?
-            ORDER BY ts
-            """,
-            [cutoff.replace(tzinfo=None)],
-        ).fetchall()
+        with self._lock:
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+            turn_rows = self._con.execute(
+                """
+                SELECT dedup_key, ts, session_id, model,
+                       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                       cache_creation_1h_tokens,
+                       cost_usd, is_sidechain, is_interrupted, stop_reason,
+                       tool_use_count, tool_error_count, tool_names, assumptions,
+                       tool_costs, unattributed_input_tokens,
+                       unattributed_output_tokens, unattributed_cost_usd,
+                       attribution_skill, skill_names
+                FROM turns
+                WHERE ts >= ?
+                ORDER BY ts
+                """,
+                [cutoff.replace(tzinfo=None)],
+            ).fetchall()
 
-        turns = [_row_to_turn(r) for r in turn_rows]
-        if not turns:
-            return [], []
+            turns = [_row_to_turn(r) for r in turn_rows]
+            if not turns:
+                return [], []
 
-        session_ids = {t.session_id for t in turns}
-        placeholders = ",".join(["?"] * len(session_ids))
-        session_rows = self._con.execute(
-            f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
-            list(session_ids),
-        ).fetchall()
+            session_ids = {t.session_id for t in turns}
+            placeholders = ",".join(["?"] * len(session_ids))
+            session_rows = self._con.execute(
+                f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
+                list(session_ids),
+            ).fetchall()
 
-        turns_by_sid: dict[str, list[Turn]] = {}
-        for t in turns:
-            turns_by_sid.setdefault(t.session_id, []).append(t)
+            turns_by_sid: dict[str, list[Turn]] = {}
+            for t in turns:
+                turns_by_sid.setdefault(t.session_id, []).append(t)
 
-        sessions: list[Session] = []
-        for sid, src, cwd, sidechain in session_rows:
-            sessions.append(
-                Session(
-                    session_id=sid,
-                    source_file=src or "",
-                    is_sidechain=bool(sidechain),
-                    cwd=cwd,
-                    turns=turns_by_sid.get(sid, []),
+            sessions: list[Session] = []
+            for sid, src, cwd, sidechain in session_rows:
+                sessions.append(
+                    Session(
+                        session_id=sid,
+                        source_file=src or "",
+                        is_sidechain=bool(sidechain),
+                        cwd=cwd,
+                        turns=turns_by_sid.get(sid, []),
+                    )
                 )
-            )
-        return turns, sessions
+            return turns, sessions
 
     def last_ts_by_session(self) -> dict[str, datetime]:
         """High-water marks per session_id (UTC datetimes)."""
-        rows = self._con.execute("SELECT session_id, last_ts FROM sessions").fetchall()
+        with self._lock:
+            rows = self._con.execute("SELECT session_id, last_ts FROM sessions").fetchall()
         return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
 
     def query_turns(
@@ -471,41 +493,43 @@ class HistoryStore:
             FROM turns {join_clause} {where_clause}
             ORDER BY turns.ts
         """
-        rows = self._con.execute(sql, params).fetchall()
+        with self._lock:
+            rows = self._con.execute(sql, params).fetchall()
         return [_row_to_turn(r) for r in rows]
 
     def query_session(self, session_id: str) -> Session | None:
         """Return a Session with all its persisted turns, or None if unknown."""
-        srow = self._con.execute(
-            "SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id = ?",
-            [session_id],
-        ).fetchone()
-        if srow is None:
-            return None
-        sid, src, cwd, sidechain = srow
-        # Direct query for this session's turns (avoids loading the full warm tier).
-        turn_rows = self._con.execute(
-            """
-            SELECT dedup_key, ts, session_id, model,
-                   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                   cache_creation_1h_tokens,
-                   cost_usd, is_sidechain, is_interrupted, stop_reason,
-                   tool_use_count, tool_error_count, tool_names, assumptions,
-                   tool_costs, unattributed_input_tokens,
-                   unattributed_output_tokens, unattributed_cost_usd,
-                   attribution_skill, skill_names
-            FROM turns WHERE session_id = ? ORDER BY ts
-            """,
-            [sid],
-        ).fetchall()
-        turns = [_row_to_turn(r) for r in turn_rows]
-        return Session(
-            session_id=sid,
-            source_file=src or "",
-            is_sidechain=bool(sidechain),
-            cwd=cwd,
-            turns=turns,
-        )
+        with self._lock:
+            srow = self._con.execute(
+                "SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id = ?",
+                [session_id],
+            ).fetchone()
+            if srow is None:
+                return None
+            sid, src, cwd, sidechain = srow
+            # Direct query for this session's turns (avoids loading the full warm tier).
+            turn_rows = self._con.execute(
+                """
+                SELECT dedup_key, ts, session_id, model,
+                       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                       cache_creation_1h_tokens,
+                       cost_usd, is_sidechain, is_interrupted, stop_reason,
+                       tool_use_count, tool_error_count, tool_names, assumptions,
+                       tool_costs, unattributed_input_tokens,
+                       unattributed_output_tokens, unattributed_cost_usd,
+                       attribution_skill, skill_names
+                FROM turns WHERE session_id = ? ORDER BY ts
+                """,
+                [sid],
+            ).fetchall()
+            turns = [_row_to_turn(r) for r in turn_rows]
+            return Session(
+                session_id=sid,
+                source_file=src or "",
+                is_sidechain=bool(sidechain),
+                cwd=cwd,
+                turns=turns,
+            )
 
     def forget(
         self,
@@ -523,83 +547,84 @@ class HistoryStore:
         Sessions with no remaining turns are also dropped. Surviving sessions have
         their denormalized `first_ts` and `turn_count` re-derived from remaining turns.
         """
-        specified = sum(
-            1
-            for x in (
-                session_ids is not None,
-                cwd is not None,
-                older_than is not None,
-                bool(all),
+        with self._lock:
+            specified = sum(
+                1
+                for x in (
+                    session_ids is not None,
+                    cwd is not None,
+                    older_than is not None,
+                    bool(all),
+                )
+                if x
             )
-            if x
-        )
-        if specified != 1:
-            raise ValueError("forget requires exactly one of: session_ids, cwd, older_than, all")
+            if specified != 1:
+                raise ValueError("forget requires exactly one of: session_ids, cwd, older_than, all")
 
-        with self._tx():
-            if all:
-                t_dropped = self._con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-                s_dropped = self._con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-                self._con.execute("DELETE FROM turns")
-                self._con.execute("DELETE FROM sessions")
-                return s_dropped, t_dropped
+            with self._tx():
+                if all:
+                    t_dropped = self._con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+                    s_dropped = self._con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+                    self._con.execute("DELETE FROM turns")
+                    self._con.execute("DELETE FROM sessions")
+                    return s_dropped, t_dropped
 
-            if session_ids is not None:
-                if not session_ids:
-                    return 0, 0
-                placeholders = ",".join(["?"] * len(session_ids))
-                t_dropped = self._con.execute(
-                    f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
-                    session_ids,
-                ).fetchone()[0]
-                s_dropped = self._con.execute(
-                    f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
-                    session_ids,
-                ).fetchone()[0]
-                self._con.execute(
-                    f"DELETE FROM turns WHERE session_id IN ({placeholders})",
-                    session_ids,
-                )
-                self._con.execute(
-                    f"DELETE FROM sessions WHERE session_id IN ({placeholders})",
-                    session_ids,
-                )
-                return s_dropped, t_dropped
-
-            if cwd is not None:
-                sids = [r[0] for r in self._con.execute("SELECT session_id FROM sessions WHERE cwd = ?", [cwd]).fetchall()]
-                if not sids:
-                    return 0, 0
-                placeholders = ",".join(["?"] * len(sids))
-                t_dropped = self._con.execute(
-                    f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
-                    sids,
-                ).fetchone()[0]
-                self._con.execute(f"DELETE FROM turns WHERE session_id IN ({placeholders})", sids)
-                self._con.execute(f"DELETE FROM sessions WHERE session_id IN ({placeholders})", sids)
-                return len(sids), t_dropped
-
-            # older_than (per-turn semantics)
-            cutoff_naive = older_than.replace(tzinfo=None)
-            t_dropped = self._con.execute("SELECT COUNT(*) FROM turns WHERE ts < ?", [cutoff_naive]).fetchone()[0]
-            affected_sids = [r[0] for r in self._con.execute("SELECT DISTINCT session_id FROM turns WHERE ts < ?", [cutoff_naive]).fetchall()]
-            self._con.execute("DELETE FROM turns WHERE ts < ?", [cutoff_naive])
-
-            s_dropped = 0
-            for sid in affected_sids:
-                agg = self._con.execute(
-                    "SELECT MIN(ts), MAX(ts), COUNT(*) FROM turns WHERE session_id = ?",
-                    [sid],
-                ).fetchone()
-                if agg[2] == 0:
-                    self._con.execute("DELETE FROM sessions WHERE session_id = ?", [sid])
-                    s_dropped += 1
-                else:
+                if session_ids is not None:
+                    if not session_ids:
+                        return 0, 0
+                    placeholders = ",".join(["?"] * len(session_ids))
+                    t_dropped = self._con.execute(
+                        f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
+                        session_ids,
+                    ).fetchone()[0]
+                    s_dropped = self._con.execute(
+                        f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                        session_ids,
+                    ).fetchone()[0]
                     self._con.execute(
-                        "UPDATE sessions SET first_ts = ?, last_ts = ?, turn_count = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
-                        [agg[0], agg[1], agg[2], sid],
+                        f"DELETE FROM turns WHERE session_id IN ({placeholders})",
+                        session_ids,
                     )
-            return s_dropped, t_dropped
+                    self._con.execute(
+                        f"DELETE FROM sessions WHERE session_id IN ({placeholders})",
+                        session_ids,
+                    )
+                    return s_dropped, t_dropped
+
+                if cwd is not None:
+                    sids = [r[0] for r in self._con.execute("SELECT session_id FROM sessions WHERE cwd = ?", [cwd]).fetchall()]
+                    if not sids:
+                        return 0, 0
+                    placeholders = ",".join(["?"] * len(sids))
+                    t_dropped = self._con.execute(
+                        f"SELECT COUNT(*) FROM turns WHERE session_id IN ({placeholders})",
+                        sids,
+                    ).fetchone()[0]
+                    self._con.execute(f"DELETE FROM turns WHERE session_id IN ({placeholders})", sids)
+                    self._con.execute(f"DELETE FROM sessions WHERE session_id IN ({placeholders})", sids)
+                    return len(sids), t_dropped
+
+                # older_than (per-turn semantics)
+                cutoff_naive = older_than.replace(tzinfo=None)
+                t_dropped = self._con.execute("SELECT COUNT(*) FROM turns WHERE ts < ?", [cutoff_naive]).fetchone()[0]
+                affected_sids = [r[0] for r in self._con.execute("SELECT DISTINCT session_id FROM turns WHERE ts < ?", [cutoff_naive]).fetchall()]
+                self._con.execute("DELETE FROM turns WHERE ts < ?", [cutoff_naive])
+
+                s_dropped = 0
+                for sid in affected_sids:
+                    agg = self._con.execute(
+                        "SELECT MIN(ts), MAX(ts), COUNT(*) FROM turns WHERE session_id = ?",
+                        [sid],
+                    ).fetchone()
+                    if agg[2] == 0:
+                        self._con.execute("DELETE FROM sessions WHERE session_id = ?", [sid])
+                        s_dropped += 1
+                    else:
+                        self._con.execute(
+                            "UPDATE sessions SET first_ts = ?, last_ts = ?, turn_count = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                            [agg[0], agg[1], agg[2], sid],
+                        )
+                return s_dropped, t_dropped
 
 
 @contextmanager
