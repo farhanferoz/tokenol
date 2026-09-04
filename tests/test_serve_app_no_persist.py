@@ -64,24 +64,28 @@ def test_persist_true_constructs_store(tmp_path, monkeypatch):
     assert db_path.exists(), f"expected {db_path} to exist after create_app"
 
 
-def test_default_warns_when_orphan_store_exists(tmp_path, monkeypatch, capsys):
-    """Default mode prints a yellow WARNING if ~/.tokenol/history.duckdb exists."""
+def test_default_reports_an_unreadable_store_without_failing_startup(tmp_path, monkeypatch, capsys):
+    """A corrupt store must be reported, not raised — the warm tier is optional.
+
+    Default mode opens any existing store read-only so persisted history still
+    shows in the dashboard. When the file is not a DuckDB database at all,
+    startup has to continue with no warm tier rather than die.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Pre-create an orphan store file (1 KB to make the size readout non-zero).
     store_dir = Path(tmp_path) / ".tokenol"
     store_dir.mkdir()
     (store_dir / "history.duckdb").write_bytes(b"x" * 1024)
     from tokenol.serve.app import ServerConfig, create_app
 
-    create_app(ServerConfig())
+    app = create_app(ServerConfig())
     captured = capsys.readouterr()
-    # Rich strips ANSI when not in a TTY; the literal text still appears.
-    assert "Found existing history store" in captured.err
-    assert "--persist" in captured.err
+    assert "could not be read" in captured.err.replace("\n", "")
+    assert app.state.warm_store is None
+    assert app.state.history_store is None
 
 
-def test_default_warns_when_orphan_store_at_custom_env_path(tmp_path, monkeypatch, capsys):
-    """Orphan-store warning fires for TOKENOL_HISTORY_PATH, not the default ~/.tokenol/ path."""
+def test_default_honours_TOKENOL_HISTORY_PATH_for_the_warm_tier(tmp_path, monkeypatch, capsys):
+    """The store is located via TOKENOL_HISTORY_PATH, not just ~/.tokenol/."""
     custom_db = tmp_path / "custom" / "my_history.duckdb"
     custom_db.parent.mkdir()
     custom_db.write_bytes(b"x" * 2048)
@@ -94,6 +98,4 @@ def test_default_warns_when_orphan_store_at_custom_env_path(tmp_path, monkeypatc
     captured = capsys.readouterr()
     # Rich may word-wrap long paths; collapse newlines before asserting.
     err_flat = captured.err.replace("\n", "")
-    assert "Found existing history store" in err_flat
     assert str(custom_db) in err_flat
-    assert "--persist" in err_flat

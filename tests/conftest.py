@@ -25,4 +25,24 @@ When writing a NEW test that pairs a static fixture with range/window logic:
 
 from pathlib import Path
 
+import pytest
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_history_store(tmp_path_factory, monkeypatch):
+    """Point every test at a private, non-existent history store.
+
+    `tokenol serve` reads any store it finds at `TOKENOL_HISTORY_PATH` (or
+    `~/.tokenol/history.duckdb`) read-only, so without this the suite silently
+    merges the *developer's own* warm tier into fixture-based assertions —
+    observed as tests failing with real project paths and 88M-token counts that
+    no fixture contains.
+
+    Isolating HOME rather than forcing TOKENOL_HISTORY_PATH keeps the existing
+    convention working: a test that wants a store sets HOME itself (monkeypatch
+    applies in order, so its setenv wins) and writes to `$HOME/.tokenol`.
+    """
+    monkeypatch.delenv("TOKENOL_HISTORY_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))

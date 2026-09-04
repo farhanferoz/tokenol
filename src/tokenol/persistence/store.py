@@ -244,9 +244,20 @@ def _row_to_turn(r: tuple) -> Turn:
 class HistoryStore:
     """Owns a single DuckDB write connection and the schema."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, read_only: bool = False) -> None:
+        """Open the warm tier. With *read_only*, no DDL and no writes are issued.
+
+        Read-only mode exists so the dashboard can surface persisted history
+        without running a flusher inside the server process. Reading is the
+        half that recovers history; writing is the half that costs CPU and,
+        before the connection lock, crashed the process. Keeping them separable
+        means a plain `tokenol serve` can show the whole warm tier while the
+        write path lives in a separate, single-threaded process.
+        """
+        self.read_only = read_only
         self.path = path if path is not None else default_path()
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # A duckdb.DuckDBPyConnection is NOT safe for concurrent use: two
         # threads issuing queries on one connection race inside
         # ClientContext::PendingQuery and segfault the process (confirmed by
@@ -257,7 +268,7 @@ class HistoryStore:
         # serialised on this lock. RLock because flush() nests _tx() inside
         # already-locked regions.
         self._lock = threading.RLock()
-        self._con = duckdb.connect(str(self.path))
+        self._con = duckdb.connect(str(self.path), read_only=read_only)
         # DuckDB defaults to 80% of system RAM, which on a 32-GiB box is enough
         # to OOM the process during a large first-run flush. Bounding the pool
         # forces spills to disk instead.
@@ -265,12 +276,47 @@ class HistoryStore:
         temp_dir = tempfile.gettempdir().replace("'", "''")
         self._con.execute(f"SET temp_directory='{temp_dir}'")
         self._con.execute("SET preserve_insertion_order=false")
-        # Best-effort tighten file mode after open (DuckDB may have created it).
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            log.debug("could not chmod 0600 on %s", self.path)
-        self._migrate()
+        if not read_only:
+            # Best-effort tighten file mode after open (DuckDB may have created it).
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                log.debug("could not chmod 0600 on %s", self.path)
+            self._migrate()
+        # Computed once: the schema cannot change after __init__ (migrations run
+        # above), and re-running DESCRIBE per query would touch the shared
+        # connection outside the lock — a race that silently returns no columns,
+        # making every field fall back to its NULL default.
+        self._turn_cols = self._turn_column_sql()
+        self._turn_cols_prefixed = self._turn_column_sql(prefix="turns.")
+
+    # Column order MUST match _row_to_turn's unpacking.
+    _TURN_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("dedup_key", "NULL"), ("ts", "NULL"), ("session_id", "NULL"), ("model", "NULL"),
+        ("input_tokens", "0"), ("output_tokens", "0"), ("cache_read_tokens", "0"),
+        ("cache_creation_tokens", "0"), ("cache_creation_1h_tokens", "0"),
+        ("cost_usd", "0.0"), ("is_sidechain", "FALSE"), ("is_interrupted", "FALSE"),
+        ("stop_reason", "NULL"), ("tool_use_count", "0"), ("tool_error_count", "0"),
+        ("tool_names", "NULL"), ("assumptions", "NULL"), ("tool_costs", "NULL"),
+        ("unattributed_input_tokens", "0.0"), ("unattributed_output_tokens", "0.0"),
+        ("unattributed_cost_usd", "0.0"), ("attribution_skill", "NULL"), ("skill_names", "NULL"),
+    )
+
+    def _turn_column_sql(self, prefix: str = "") -> str:
+        """SELECT list for `turns`, substituting defaults for columns this file lacks.
+
+        A store opened read-only cannot be migrated, and an older file is missing
+        every column added by v2-v4 (tool_costs, the skill fields,
+        cache_creation_1h_tokens, ...). Selecting them unconditionally fails the
+        whole query, which would make the warm tier unreadable exactly on the
+        old stores that hold the history worth recovering. Substituting a typed
+        default reproduces what the migration's DEFAULT would have given.
+        """
+        present = {r[0] for r in self._con.execute("DESCRIBE turns").fetchall()}
+        return ", ".join(
+            f"{prefix}{name}" if name in present else f"{default} AS {name}"
+            for name, default in self._TURN_COLUMNS
+        )
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
@@ -324,6 +370,8 @@ class HistoryStore:
         commits and the session UPSERT is self-healing on next flush, and
         steady-state flushes don't issue a SELECT per session.
         """
+        if self.read_only:
+            raise RuntimeError("HistoryStore opened read-only; flush() is not available")
         if not turns and not sessions:
             return
 
@@ -398,19 +446,7 @@ class HistoryStore:
         with self._lock:
             cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
             turn_rows = self._con.execute(
-                """
-                SELECT dedup_key, ts, session_id, model,
-                       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                       cache_creation_1h_tokens,
-                       cost_usd, is_sidechain, is_interrupted, stop_reason,
-                       tool_use_count, tool_error_count, tool_names, assumptions,
-                       tool_costs, unattributed_input_tokens,
-                       unattributed_output_tokens, unattributed_cost_usd,
-                       attribution_skill, skill_names
-                FROM turns
-                WHERE ts >= ?
-                ORDER BY ts
-                """,
+                f"SELECT {self._turn_cols} FROM turns WHERE ts >= ? ORDER BY ts",
                 [cutoff.replace(tzinfo=None)],
             ).fetchall()
 
@@ -481,15 +517,7 @@ class HistoryStore:
         join_clause = "JOIN sessions USING (session_id)" if join_sessions else ""
         where_clause = ("WHERE " + " AND ".join(where)) if where else ""
         sql = f"""
-            SELECT turns.dedup_key, turns.ts, turns.session_id, turns.model,
-                   turns.input_tokens, turns.output_tokens, turns.cache_read_tokens,
-                   turns.cache_creation_tokens, turns.cache_creation_1h_tokens,
-                   turns.cost_usd, turns.is_sidechain,
-                   turns.is_interrupted, turns.stop_reason, turns.tool_use_count,
-                   turns.tool_error_count, turns.tool_names, turns.assumptions,
-                   turns.tool_costs, turns.unattributed_input_tokens,
-                   turns.unattributed_output_tokens, turns.unattributed_cost_usd,
-                   turns.attribution_skill, turns.skill_names
+            SELECT {self._turn_cols_prefixed}
             FROM turns {join_clause} {where_clause}
             ORDER BY turns.ts
         """
@@ -509,17 +537,7 @@ class HistoryStore:
             sid, src, cwd, sidechain = srow
             # Direct query for this session's turns (avoids loading the full warm tier).
             turn_rows = self._con.execute(
-                """
-                SELECT dedup_key, ts, session_id, model,
-                       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                       cache_creation_1h_tokens,
-                       cost_usd, is_sidechain, is_interrupted, stop_reason,
-                       tool_use_count, tool_error_count, tool_names, assumptions,
-                       tool_costs, unattributed_input_tokens,
-                       unattributed_output_tokens, unattributed_cost_usd,
-                       attribution_skill, skill_names
-                FROM turns WHERE session_id = ? ORDER BY ts
-                """,
+                f"SELECT {self._turn_cols} FROM turns WHERE session_id = ? ORDER BY ts",
                 [sid],
             ).fetchall()
             turns = [_row_to_turn(r) for r in turn_rows]

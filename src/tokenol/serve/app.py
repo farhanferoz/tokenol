@@ -125,17 +125,39 @@ def _is_compare_form(param: str) -> bool:
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def _warn_if_orphan_store_exists() -> None:
-    """Warn on stderr if a history store exists but persistence is off."""
+def _open_readonly_store_if_present():
+    """Open an existing history store read-only, or return None.
+
+    Reading the warm tier and writing it are separate concerns with very
+    different risk: reading is what recovers history the JSONL no longer has,
+    while writing runs a flusher thread inside the server. So a plain
+    `tokenol serve` reads whatever store is already there and never writes to
+    it; `--persist` is only about keeping it up to date.
+
+    Best-effort: a missing, unreadable, or already-write-locked store just
+    means no warm tier, never a failed startup.
+    """
     from rich.console import Console
 
+    console = Console(stderr=True)
     _env = os.environ.get("TOKENOL_HISTORY_PATH")
     store_path = Path(_env) if _env else Path.home() / ".tokenol" / "history.duckdb"
     try:
         size_mb = store_path.stat().st_size / (1024 * 1024)
     except OSError:
-        return
-    Console(stderr=True).print(f"[yellow]Found existing history store at {store_path} ({size_mb:.0f} MB).\nPersistence is OFF — pass --persist to use it.[/yellow]")
+        return None
+    try:
+        from tokenol.persistence.store import HistoryStore
+
+        store = HistoryStore(store_path, read_only=True)
+    except Exception as exc:  # noqa: BLE001 - never block startup on the warm tier
+        console.print(f"[yellow]History store at {store_path} ({size_mb:.0f} MB) could not be read: {exc}[/yellow]")
+        return None
+    console.print(
+        f"[green]Reading history store at {store_path} ({size_mb:.0f} MB) — read-only.[/green]\n"
+        "[yellow]Not being updated. Pass --persist to keep it current.[/yellow]"
+    )
+    return store
 
 
 @dataclass
@@ -191,7 +213,7 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
     real store, each contending with the flusher for the connection lock, which
     is enough to push a breakdown request past a 25-second timeout.
     """
-    store = request.app.state.history_store
+    store = request.app.state.warm_store
     now = time.monotonic()
     cached = getattr(request.app.state, "warm_tier_cache", None)
     if cached is not None and cached[0] > now:
@@ -222,8 +244,7 @@ async def _snapshot_with_warm_tier(request: Request, *, project: str | None = No
     one snapshot pays for the merge once.
     """
     result = _current_snapshot_result(request)
-    store = request.app.state.history_store
-    if store is None:
+    if getattr(request.app.state, "warm_store", None) is None:
         return result
 
     stamp = (result.payload.get("generated_at"), project)
@@ -294,8 +315,10 @@ def create_app(
         flush_queue = _FlushQueue(history_store)
         write_pidfile_fn = _write_pidfile
         clear_pidfile_fn = _clear_pidfile
+        warm_store = history_store
     else:
-        _warn_if_orphan_store_exists()
+        # No flusher, but still surface whatever history is already persisted.
+        warm_store = _open_readonly_store_if_present()
 
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
@@ -325,6 +348,8 @@ def create_app(
                 await flush_queue.stop()
                 history_store.close()
                 clear_pidfile_fn()
+            elif warm_store is not None:
+                warm_store.close()
 
     app = FastAPI(title="tokenol", lifespan=lifespan)
     app.state.config = config
@@ -336,6 +361,7 @@ def create_app(
     app.state.warm_tier_cache = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
+    app.state.warm_store = warm_store
     app.state.flush_queue = flush_queue
 
     if STATIC_DIR.exists():
