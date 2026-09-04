@@ -4,6 +4,12 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2026-09-04 — older RESUME pitfalls rolled down
+
+- **2026-05-03:** Co-Authored-By trailers slipped into 61 commits; fixed via `git filter-branch` + retag + force-push. Verify every commit before push, not just the message you typed.
+- **2026-05-02:** DuckDB `executemany` + `ON CONFLICT DO NOTHING` + JSON columns OOM'd at ~89k rows (24+ GiB). Fix pattern (`memory_limit`, `temp_directory`, `preserve_insertion_order=false`, ≤1000-row chunks) lives in `persistence/store.py`.
+- **2026-04-25:** lint debt slipped into a release tag (ruff skipped, pytest run) — codified as the three-part pre-release gate below.
+
 ## Unreleased
 
 ### Added
