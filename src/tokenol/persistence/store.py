@@ -199,8 +199,11 @@ def _row_to_turn(r: tuple) -> Turn:
     ) = r
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    tool_names = Counter(_json.loads(tool_names_json) if tool_names_json else {})
-    skill_names = Counter(_json.loads(skill_names_json) if skill_names_json else {})
+    # Counter({}) still runs update(), whose isinstance dispatch showed up as the
+    # single hottest leaf during hydration. Counter() with no argument skips it,
+    # and most rows have neither map populated.
+    tool_names = Counter(_json.loads(tool_names_json)) if tool_names_json else Counter()
+    skill_names = Counter(_json.loads(skill_names_json)) if skill_names_json else Counter()
     assumption_values = _json.loads(assumptions_json) if assumptions_json else []
     assumptions = [AssumptionTag(v) for v in assumption_values]
     tool_costs: dict[str, ToolCost] = {}
@@ -443,40 +446,46 @@ class HistoryStore:
         the same hot-window query — callers can iterate sessions and treat them
         as fully-hydrated.
         """
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+        # The lock exists to serialise use of the shared DuckDB connection, so it
+        # covers the queries only. Row conversion is pure Python over rows already
+        # fetched, and on a real store it is the bulk of the work — 91,131 rows,
+        # ~2s — during which holding the lock stalls the flusher and every other
+        # reader for no reason. Two short windows instead of one long one.
         with self._lock:
-            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
             turn_rows = self._con.execute(
                 f"SELECT {self._turn_cols} FROM turns WHERE ts >= ? ORDER BY ts",
                 [cutoff.replace(tzinfo=None)],
             ).fetchall()
 
-            turns = [_row_to_turn(r) for r in turn_rows]
-            if not turns:
-                return [], []
+        turns = [_row_to_turn(r) for r in turn_rows]
+        if not turns:
+            return [], []
 
-            session_ids = {t.session_id for t in turns}
-            placeholders = ",".join(["?"] * len(session_ids))
+        session_ids = {t.session_id for t in turns}
+        placeholders = ",".join(["?"] * len(session_ids))
+        with self._lock:
             session_rows = self._con.execute(
                 f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
                 list(session_ids),
             ).fetchall()
 
-            turns_by_sid: dict[str, list[Turn]] = {}
-            for t in turns:
-                turns_by_sid.setdefault(t.session_id, []).append(t)
+        turns_by_sid: dict[str, list[Turn]] = {}
+        for t in turns:
+            turns_by_sid.setdefault(t.session_id, []).append(t)
 
-            sessions: list[Session] = []
-            for sid, src, cwd, sidechain in session_rows:
-                sessions.append(
-                    Session(
-                        session_id=sid,
-                        source_file=src or "",
-                        is_sidechain=bool(sidechain),
-                        cwd=cwd,
-                        turns=turns_by_sid.get(sid, []),
-                    )
+        sessions: list[Session] = []
+        for sid, src, cwd, sidechain in session_rows:
+            sessions.append(
+                Session(
+                    session_id=sid,
+                    source_file=src or "",
+                    is_sidechain=bool(sidechain),
+                    cwd=cwd,
+                    turns=turns_by_sid.get(sid, []),
                 )
-            return turns, sessions
+            )
+        return turns, sessions
 
     def last_ts_by_session(self) -> dict[str, datetime]:
         """High-water marks per session_id (UTC datetimes)."""
@@ -565,6 +574,11 @@ class HistoryStore:
         Sessions with no remaining turns are also dropped. Surviving sessions have
         their denormalized `first_ts` and `turn_count` re-derived from remaining turns.
         """
+        if self.read_only:
+            # Same guard as flush(). Without it a read-only store fails deep inside
+            # DuckDB instead of at the boundary, and the caller's broad except turns
+            # a refused delete into a silent no-op.
+            raise RuntimeError("HistoryStore opened read-only; forget() is not available")
         with self._lock:
             specified = sum(
                 1

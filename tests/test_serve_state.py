@@ -112,7 +112,14 @@ def test_parse_cache_hit(tmp_path: Path) -> None:
 
 
 def test_parse_cache_miss_on_change(tmp_path: Path) -> None:
-    """Changed mtime_ns/size → re-parses and returns new list."""
+    """Changed mtime_ns/size → re-parses, returns a new list, drops the old one.
+
+    This asserted `size == 2` until 2026-09-04, recording the retention of the
+    superseded entry as though it were intended. It was a leak: a growing session
+    file minted an entry per append and nothing ever removed them, and no caller
+    can reach a stale key — get_derived only looks up the current key set. The
+    contract is one live entry per path.
+    """
     dst = tmp_path / "basic.jsonl"
     dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
 
@@ -125,7 +132,7 @@ def test_parse_cache_miss_on_change(tmp_path: Path) -> None:
     key2, events2 = cache.get_or_parse(dst)
     assert key1 != key2
     assert events1 is not events2
-    assert cache.size == 2
+    assert cache.size == 1, "superseded version of the same path was retained"
 
 
 def test_parse_cache_purge(tmp_path: Path) -> None:
