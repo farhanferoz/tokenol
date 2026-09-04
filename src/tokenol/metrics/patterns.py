@@ -80,7 +80,18 @@ def _compaction_reinflation(turns: list[Turn], t: dict) -> list[PatternHit]:
     red_cycles = int(t["compaction_red_cycles"])
     W = 5
 
-    visible = [context_tokens(tr) for tr in turns]
+    # Main thread only. Compaction happens to the orchestrator's context; a
+    # sub-agent runs with its own, and the two are interleaved in session.turns.
+    # Comparing consecutive raw context sizes across that mix made a big-context
+    # sub-agent turn sitting next to a small orchestrator turn look exactly like
+    # a compact-then-regrow cycle — a false positive on every heavily-parallel
+    # session, and the reason a cost spike was misdiagnosed on 2026-07-13.
+    # Positions are carried through so turn_indices still refer to session.turns.
+    main = [(i, context_tokens(tr)) for i, tr in enumerate(turns) if not tr.is_sidechain]
+    if not main:
+        return []
+    positions = [i for i, _ in main]
+    visible = [v for _, v in main]
 
     # Find cycles: peak → drop ≤ (1-drop_ratio)*peak within W → rise ≥ reinflate_ratio*peak within W
     cycle_indices: list[int] = []
@@ -103,7 +114,7 @@ def _compaction_reinflation(turns: list[Turn], t: dict) -> list[PatternHit]:
         # Look for a reinflation
         for k in range(drop_at + 1, min(drop_at + 1 + W, n)):
             if visible[k] >= reinflate_ratio * peak:
-                cycle_indices.extend([i, drop_at, k])
+                cycle_indices.extend([positions[i], positions[drop_at], positions[k]])
                 i = k + 1
                 break
         else:
