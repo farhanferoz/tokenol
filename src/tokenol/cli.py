@@ -383,10 +383,12 @@ def serve(
         "--persist",
         help=(
             "Enable persistent history store at ~/.tokenol/history.duckdb. "
-            "Dashboard survives JSONL deletion. Adds ~500 MiB steady RSS and a "
-            "one-time multi-minute backfill on first start. "
-            "Default off — matches v0.3.2 resource usage. "
-            "Requires the persist extras: pip install 'tokenol[persist]'."
+            "Dashboard survives JSONL deletion. Expensive, and not only at "
+            "startup: the writer costs roughly two CPU cores' worth of work "
+            "and a few GB of RSS, and steady state is no cheaper than the "
+            "initial backfill, so the cost does not subside. Disk is modest "
+            "(~150 MB for a full corpus). Default off. "
+            "Requires the persist extras: pip install 'tokenol\\[persist]'."
         ),
     ),
     log_level: LogLevel = typer.Option(LogLevel.info, "--log-level"),  # noqa: B008
@@ -401,14 +403,14 @@ def serve(
 
         from tokenol.serve.app import ServerConfig, create_app
     except ImportError:
-        err.print("[red]tokenol[serve] extras not installed.[/red] Run: pip install 'tokenol[serve]'")
+        err.print("[red]tokenol\\[serve] extras not installed.[/red] Run: pip install 'tokenol\\[serve]'")
         raise typer.Exit(code=1) from None
 
     if persist:
         try:
             import duckdb  # noqa: F401  — probe only
         except ImportError:
-            err.print("[red]--persist requires the 'persist' extras.[/red] Run: pip install 'tokenol[persist]'")
+            err.print("[red]--persist requires the 'persist' extras.[/red] Run: pip install 'tokenol\\[persist]'")
             raise typer.Exit(code=1) from None
 
     config = ServerConfig(

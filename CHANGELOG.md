@@ -10,7 +10,17 @@ All notable changes to tokenol are documented here. The format follows
 - **2026-05-02:** DuckDB `executemany` + `ON CONFLICT DO NOTHING` + JSON columns OOM'd at ~89k rows (24+ GiB). Fix pattern (`memory_limit`, `temp_directory`, `preserve_insertion_order=false`, ≤1000-row chunks) lives in `persistence/store.py`.
 - **2026-04-25:** lint debt slipped into a release tag (ruff skipped, pytest run) — codified as the three-part pre-release gate below.
 
-## Unreleased
+## 0.7.4 — 2026-09-04
+
+> **This release also delivers everything in 0.7.3.** Version 0.7.3 was tagged on 2026-08-18 but never
+> published to PyPI, so anyone installing from PyPI is upgrading from **0.7.2** and receives both
+> releases' changes at once. The 0.7.3 section below still applies to you.
+
+> **Historical figures will move if you use `--persist`.** Persisted rows are now re-priced on read from
+> their stored tokens by the current price table, rather than returning the cost computed when they were
+> written. Existing stores will show different — corrected — history after upgrading. Rows written before
+> schema v4 did not capture the 5-minute/1-hour cache-creation split and default that column to 0, so they
+> price exactly as before on that axis while picking up every other correction.
 
 ### Performance
 - **A plain `tokenol serve` burned a full CPU core continuously, and four separate causes were responsible.** Measured on a 3,897-file / 258,856-turn corpus at the default 5-second tick, with a browser attached: **99% of one core before, 2–14% after.** Reported totals are unchanged.
