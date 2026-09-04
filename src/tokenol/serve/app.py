@@ -179,7 +179,7 @@ def _build_and_cache_snapshot(request: Request, period: str = "today") -> Snapsh
         tick_seconds=prefs.tick_seconds,
         period=period,
         thresholds=prefs.thresholds,
-        history_store=request.app.state.history_store,
+        history_store=request.app.state.derivation_store,
         flush_queue=request.app.state.flush_queue,
     )
     request.app.state.snapshot_result = result
@@ -214,15 +214,27 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
     is enough to push a breakdown request past a 25-second timeout.
     """
     store = request.app.state.warm_store
-    now = time.monotonic()
     cached = getattr(request.app.state, "warm_tier_cache", None)
-    if cached is not None and cached[0] > now:
+    if cached is not None and cached[0] > time.monotonic():
         return cached[1]
 
-    loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, lambda: store.hydrate_hot(window_days=_WARM_TIER_ALL_DAYS))
-    request.app.state.warm_tier_cache = (now + _WARM_TIER_TTL_SECONDS, data)
-    return data
+    # Single-flight. Without it, every request arriving while a hydration is in
+    # flight starts its own: the check above and the fill below were unguarded, and
+    # the breakdown page fires six endpoints at once, so one page load hydrated the
+    # whole store six times over — measured as six hydrations of 91,131 rows for a
+    # single page load, against a TTL that should permit one every two minutes.
+    async with request.app.state.warm_tier_lock:
+        # Re-check inside the lock: whoever held it may have just filled the cache.
+        cached = getattr(request.app.state, "warm_tier_cache", None)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(None, lambda: store.hydrate_hot(window_days=_WARM_TIER_ALL_DAYS))
+        # Expiry runs from completion, not from a reading taken before the work
+        # started — on a large store the old form spent much of its own TTL hydrating.
+        request.app.state.warm_tier_cache = (time.monotonic() + _WARM_TIER_TTL_SECONDS, data)
+        return data
 
 
 async def _snapshot_with_warm_tier(request: Request, *, project: str | None = None) -> SnapshotResult:
@@ -247,7 +259,19 @@ async def _snapshot_with_warm_tier(request: Request, *, project: str | None = No
     if getattr(request.app.state, "warm_store", None) is None:
         return result
 
-    stamp = (result.payload.get("generated_at"), project)
+    # Identify the DATA, not the build. This was keyed on `generated_at`, which
+    # build_snapshot_full regenerates every tick, so with a 5s tick the merge was
+    # thrown away before it could ever be reused and the next breakdown request
+    # re-deduped and re-sorted the whole union — ~350,000 turns on a real corpus.
+    # The hot tier is append-only within a process, so length plus the first and
+    # last dedup_key tracks it; the session count catches a forget().
+    stamp = (
+        len(result.turns),
+        result.turns[0].dedup_key if result.turns else "",
+        result.turns[-1].dedup_key if result.turns else "",
+        len(result.sessions),
+        project,
+    )
     cached = getattr(request.app.state, "warm_merged", None)
     if cached is not None and cached[0] == stamp:
         return cached[1]
@@ -310,8 +334,6 @@ def create_app(
         )
 
         history_store = _HistoryStore()
-        # Hot-tier window is read by _store_backed_derivation as a duck-typed attr.
-        history_store._hot_window_days = prefs.hot_window_days
         flush_queue = _FlushQueue(history_store)
         write_pidfile_fn = _write_pidfile
         clear_pidfile_fn = _clear_pidfile
@@ -320,13 +342,27 @@ def create_app(
         # No flusher, but still surface whatever history is already persisted.
         warm_store = _open_readonly_store_if_present()
 
+    # Which store the snapshot DERIVES from. This used to be `history_store`, which
+    # is only set under --persist, so a plain `serve` fell back to re-deriving every
+    # turn from every cached event on every tick — the fallback memo is keyed on a
+    # frozenset of all JSONL (path, size, mtime), so one file changing anywhere
+    # invalidates it. Measured 2026-09-04 on a real corpus: 3,897 files, 258,856
+    # turns, 2.4-5.3s of CPU per miss against a 5s tick, i.e. a permanently
+    # saturated core. Deriving incrementally only needs to READ the store, so it
+    # has nothing to do with whether we are also writing to it.
+    derivation_store = history_store if history_store is not None else warm_store
+    if derivation_store is not None:
+        # Read by _store_backed_derivation as a duck-typed attr; unset it silently
+        # defaults to 90 days and the hot tier would differ between modes.
+        derivation_store._hot_window_days = prefs.hot_window_days
+
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
         all_projects=config.all_projects,
         get_reference_usd=lambda: prefs.reference_usd,
         get_tick_seconds=lambda: prefs.tick_seconds,
         get_thresholds=lambda: prefs.thresholds,
-        history_store=history_store,
+        history_store=derivation_store,
         flush_queue=flush_queue,
     )
 
@@ -361,6 +397,9 @@ def create_app(
     app.state.warm_tier_cache = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
+    app.state.derivation_store = derivation_store
+    # Guards the warm-tier hydration against a stampede; see _warm_tier.
+    app.state.warm_tier_lock = asyncio.Lock()
     app.state.warm_store = warm_store
     app.state.flush_queue = flush_queue
 

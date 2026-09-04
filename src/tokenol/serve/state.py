@@ -81,9 +81,21 @@ class ParseCache:
         """Return (cache_key, events). Parses only when (size, mtime_ns) changes."""
         stat = path.stat()
         key = (str(path), stat.st_size, stat.st_mtime_ns)
+        path_str = str(path)
         with self._lock:
             if key not in self._store:
                 self._store[key] = list(parse_file(path))
+                # Drop superseded versions of THIS path. The key carries (size,
+                # mtime_ns), so every append to a live session file mints a new
+                # entry while the old one — the whole event list for the previous
+                # size — stays resident. A file has exactly one current version and
+                # older ones are never read again, so retaining them is a pure leak
+                # that grows with session activity, not with corpus size. purge()
+                # used to hide this by clearing on every tick, but it runs only on
+                # the non-store derivation path, so store-backed servers never
+                # evicted anything.
+                for stale in [k for k in self._store if k[0] == path_str and k != key]:
+                    del self._store[stale]
                 # New file content invalidates any derived memo.
                 self._derived_keys = None
                 self._derived = None
@@ -883,6 +895,7 @@ def _store_backed_derivation(
     paths: list[Path],
     history_store: HistoryStore,
     flush_queue: FlushQueue | None,
+    mtime_by_path: dict[Path, int] | None = None,
 ) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
     """Hot-tier-aware derivation: hydrate from store on first call, then append deltas.
 
@@ -904,14 +917,22 @@ def _store_backed_derivation(
         parse_cache._hot_initialized = True
 
     # Filter to edge paths (mtime_ns differs from persisted high-water mark).
-    edge_paths = select_edge_paths(paths, parse_cache._last_mtime_ns_by_path)
+    marks = parse_cache._last_mtime_ns_by_path
+    if mtime_by_path is not None and marks:
+        # Same rule as select_edge_paths, but off mtimes the caller already read.
+        edge_paths = [p for p, m in mtime_by_path.items() if marks.get(p) != m]
+    else:
+        edge_paths = select_edge_paths(paths, marks)
 
     # Parse only edge files; record current mtime_ns for next tick's gate.
     new_events: list[RawEvent] = []
     for p in edge_paths:
         try:
             _key, evs = parse_cache.get_or_parse(p)
-            parse_cache._last_mtime_ns_by_path[p] = p.stat().st_mtime_ns
+            # Prefer the caller's already-read mtime over a fresh stat().
+            parse_cache._last_mtime_ns_by_path[p] = (
+                mtime_by_path[p] if mtime_by_path is not None and p in mtime_by_path else p.stat().st_mtime_ns
+            )
             new_events.extend(evs)
         except OSError:
             continue
@@ -975,6 +996,7 @@ def build_snapshot_full(
     thresholds: dict | None = None,
     history_store: HistoryStore | None = None,
     flush_queue: FlushQueue | None = None,
+    active_keys: frozenset[tuple[str, int, int]] | None = None,
 ) -> SnapshotResult:
     """Build the dashboard snapshot.
 
@@ -991,21 +1013,37 @@ def build_snapshot_full(
     today_date = now.date()
     since_90d = today_date - timedelta(days=89)
 
-    dirs = get_config_dirs(all_projects=all_projects)
-    paths = find_jsonl_files(dirs)
+    if active_keys is not None:
+        # The SSE gate has already globbed every JSONL and stat'ed it to decide
+        # whether this tick needs a build at all. Recomputing that here globbed
+        # ~3,900 files a second time and stat'ed each a third time inside
+        # select_edge_paths — around a fifth of server CPU, nearly all of it in
+        # glob._iterdir. The key carries (path, size, mtime_ns), so the mtimes the
+        # edge selection needs are already in hand and cost no further I/O.
+        mtime_by_path: dict[Path, int] | None = {Path(k[0]): k[2] for k in active_keys}
+        paths = sorted(mtime_by_path)
+    else:
+        mtime_by_path = None
+        dirs = get_config_dirs(all_projects=all_projects)
+        paths = find_jsonl_files(dirs)
 
     if history_store is not None:
-        all_turns, all_sessions, _fired = _store_backed_derivation(parse_cache, paths, history_store, flush_queue)
+        all_turns, all_sessions, _fired = _store_backed_derivation(
+            parse_cache, paths, history_store, flush_queue, mtime_by_path
+        )
     else:
-        active_keys: set[tuple[str, int, int]] = set()
+        # Named apart from the `active_keys` parameter: this branch re-derives the
+        # keys from its own parse pass, and reusing the name made it read as though
+        # the caller's set were being mutated.
+        parsed_keys: set[tuple[str, int, int]] = set()
         for path in paths:
             try:
                 key, _events = parse_cache.get_or_parse(path)
-                active_keys.add(key)
+                parsed_keys.add(key)
             except OSError:
                 pass
-        parse_cache.purge(active_keys)
-        all_turns, all_sessions, _fired = parse_cache.get_derived(frozenset(active_keys), _build_turns_and_sessions)
+        parse_cache.purge(parsed_keys)
+        all_turns, all_sessions, _fired = parse_cache.get_derived(frozenset(parsed_keys), _build_turns_and_sessions)
 
     turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
     daily_90d = _build_daily_series(turns_90d, since_90d)

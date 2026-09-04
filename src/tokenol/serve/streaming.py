@@ -127,7 +127,7 @@ class _Group:
                     continue
 
                 try:
-                    curr = await loop.run_in_executor(None, self._build_payload, self.period)
+                    curr = await loop.run_in_executor(None, self._build_payload, self.period, keys)
                 except Exception:
                     log.exception("snapshot build failed — skipping tick")
                     await asyncio.sleep(sleep_for)
@@ -199,7 +199,7 @@ class SnapshotBroadcaster:
     def _compute_active_keys(self) -> frozenset[tuple[str, int, int]]:
         return compute_active_keys(self._all_projects)
 
-    def _build_payload(self, period: str) -> dict:
+    def _build_payload(self, period: str, active_keys: frozenset[tuple[str, int, int]] | None = None) -> dict:
         result: SnapshotResult = build_snapshot_full(
             self._parse_cache,
             all_projects=self._all_projects,
@@ -209,6 +209,7 @@ class SnapshotBroadcaster:
             thresholds=self._get_thresholds(),
             history_store=self._history_store,
             flush_queue=self._flush_queue,
+            active_keys=active_keys,
         )
         self._latest_result = result
         return result.payload
@@ -224,7 +225,13 @@ class SnapshotBroadcaster:
         """
         from tokenol.persistence.forget_handoff import take_forget_request
 
-        if self._history_store is None:
+        # A store alone is not permission to write to one. Since the derivation
+        # store may be the read-only handle a plain `serve` opens, "can we write?"
+        # is flush_queue, which exists only under --persist. Returning BEFORE
+        # take_forget_request() matters: that call unlinks the request file, so a
+        # read-only server would consume the request and then fail to act on it,
+        # leaving the user with a silently discarded delete.
+        if self._history_store is None or self._flush_queue is None:
             return
         req = take_forget_request()
         if req is None:
