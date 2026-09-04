@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
@@ -173,6 +174,35 @@ def _current_snapshot_result(request: Request) -> SnapshotResult:
     return request.app.state.snapshot_result or _build_and_cache_snapshot(request)
 
 
+# The warm tier changes only when the flusher writes, so hydrating it on every
+# request is pure waste — and expensive waste: tens of thousands of rows rebuilt
+# into Turn objects while the flusher holds the store's connection lock.
+_WARM_TIER_TTL_SECONDS = 120.0
+# hydrate_hot() takes a day window; the warm tier wants all of it.
+_WARM_TIER_ALL_DAYS = 100_000
+
+
+async def _warm_tier(request: Request) -> tuple[list, list]:
+    """Return (turns, sessions) for the whole warm tier, cached for a short TTL.
+
+    Goes through ``hydrate_hot`` rather than ``query_turns`` + a
+    ``query_session`` per id: hydrate_hot answers both in two queries, where the
+    per-session form costs one DuckDB round-trip per session — 300+ of them on a
+    real store, each contending with the flusher for the connection lock, which
+    is enough to push a breakdown request past a 25-second timeout.
+    """
+    store = request.app.state.history_store
+    now = time.monotonic()
+    cached = getattr(request.app.state, "warm_tier_cache", None)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, lambda: store.hydrate_hot(window_days=_WARM_TIER_ALL_DAYS))
+    request.app.state.warm_tier_cache = (now + _WARM_TIER_TTL_SECONDS, data)
+    return data
+
+
 async def _snapshot_with_warm_tier(request: Request, *, project: str | None = None) -> SnapshotResult:
     """Return the current snapshot with persisted (warm-tier) turns folded in.
 
@@ -201,22 +231,28 @@ async def _snapshot_with_warm_tier(request: Request, *, project: str | None = No
     if cached is not None and cached[0] == stamp:
         return cached[1]
 
-    loop = asyncio.get_running_loop()
-    warm_turns = await loop.run_in_executor(None, lambda: store.query_turns(project=project))
+    warm_turns, warm_all_sessions = await _warm_tier(request)
     if not warm_turns:
         return result
+
+    if project is not None:
+        warm_all_sessions = [s for s in warm_all_sessions if s.cwd == project]
+        keep = {s.session_id for s in warm_all_sessions}
+        warm_turns = [t for t in warm_turns if t.session_id in keep]
+        if not warm_turns:
+            return result
 
     existing_keys = {t.dedup_key for t in result.turns}
     merged_turns = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
     merged_turns.sort(key=lambda t: t.timestamp)
 
     existing_sids = {s.session_id for s in result.sessions}
-    warm_sessions: list = []
-    for sid in {t.session_id for t in warm_turns} - existing_sids:
-        session = await loop.run_in_executor(None, lambda sid=sid: store.query_session(sid))
-        if session is not None:
-            session.archived = True  # JSONL is gone — content snippets unavailable
-            warm_sessions.append(session)
+    warm_sessions = []
+    for session in warm_all_sessions:
+        if session.session_id in existing_sids:
+            continue
+        session.archived = True  # JSONL is gone — content snippets unavailable
+        warm_sessions.append(session)
 
     merged = replace(result, turns=merged_turns, sessions=list(result.sessions) + warm_sessions)
     request.app.state.warm_merged = (stamp, merged)
@@ -297,6 +333,7 @@ def create_app(
     app.state.parse_cache = parse_cache
     app.state.snapshot_result = None
     app.state.warm_merged = None
+    app.state.warm_tier_cache = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
     app.state.flush_queue = flush_queue
