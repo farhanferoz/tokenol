@@ -199,6 +199,26 @@ def _row_to_turn(r: tuple) -> Turn:
     ) = r
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
+    usage = Usage(
+        input_tokens=inp,
+        output_tokens=out,
+        cache_read_input_tokens=cr,
+        cache_creation_input_tokens=cc,
+        cache_creation_1h_input_tokens=cc_1h or 0,
+    )
+    # Re-price from the stored tokens rather than trusting the stored cost. A row
+    # records what pricing said on the day it was written, so every later pricing
+    # correction stopped at the store boundary: the Opus 5 and Fable 5.1 entries
+    # added on 2026-09-04 would never have reached a single persisted turn, and
+    # Fable 5.1 reads cache at a quarter of the rate its fallback assumed.
+    #
+    # Schema v4 stores the 5m/1h cache-creation split, so the recompute has every
+    # input the live path has. Rows written before v4 default cc_1h to 0 and
+    # therefore price exactly as they did before — that split is genuinely lost
+    # and this does not invent it — but they still pick up every other correction.
+    from tokenol.metrics.cost import cost_for_turn
+
+    repriced = cost_for_turn(model, usage).total_usd if model else float(cost)
     # Counter({}) still runs update(), whose isinstance dispatch showed up as the
     # single hottest leaf during hydration. Counter() with no argument skips it,
     # and most rows have neither map populated.
@@ -220,16 +240,10 @@ def _row_to_turn(r: tuple) -> Turn:
         timestamp=ts,
         session_id=sid,
         model=model,
-        usage=Usage(
-            input_tokens=inp,
-            output_tokens=out,
-            cache_read_input_tokens=cr,
-            cache_creation_input_tokens=cc,
-            cache_creation_1h_input_tokens=cc_1h or 0,
-        ),
+        usage=usage,
         is_sidechain=bool(sidechain),
         stop_reason=stop_reason,
-        cost_usd=float(cost),
+        cost_usd=repriced,
         is_interrupted=bool(interrupted),
         tool_use_count=int(tu),
         tool_error_count=int(te),
