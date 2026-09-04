@@ -71,6 +71,7 @@ setInterval(() => {
 // ---- SSE connection ----
 let _es = null;
 let _reconnectDelay = 1_000;
+let _reconnectTimer = null;
 let _fiveXXSince    = null;
 let _lastMsgAt      = 0;
 // Server heartbeat is ≤60s; >90s without a message means the connection
@@ -80,13 +81,25 @@ const _STALE_MS = 90_000;
 function _scheduleReconnect(reason) {
   if (_es) { _es.close(); _es = null; }
   _lastMsgAt = 0;
+  // One pending reconnect at a time. EventSource fires onerror repeatedly
+  // while the server is down, and without this guard each one queued another
+  // timer: attempts multiplied instead of backing off, so a server that went
+  // away for a while was met with a storm of overlapping connects rather than
+  // one orderly retry.
+  if (_reconnectTimer !== null) return;
   _dotState('amber', `SSE ${reason} — reconnecting…`);
-  setTimeout(() => _connect(_getPeriod()), _reconnectDelay);
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    _connect(_getPeriod());
+  }, _reconnectDelay);
   _reconnectDelay = Math.min(_reconnectDelay * 2, 30_000);
 }
 
 function _connect(period) {
   if (_es) { _es.close(); _es = null; }
+  // A caller-driven connect (period change, tab return) supersedes any pending
+  // retry; leaving it armed would reconnect a second time moments later.
+  if (_reconnectTimer !== null) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
   _lastMsgAt = 0;
   _dotState('', 'SSE connecting…');
   _es = new EventSource(`/api/stream?period=${period}`);

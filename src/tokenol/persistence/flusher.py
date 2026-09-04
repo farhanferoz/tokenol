@@ -36,6 +36,10 @@ DEFAULT_MAX_BATCH = 5_000
 # choice between "lose data" and "keep data" — it is a choice between losing it
 # with a log line and losing it to SIGKILL with a half-written store.
 DEFAULT_STOP_TIMEOUT_SECONDS = 30.0
+# Batch size used once stop() is draining. The deadline can only be checked
+# between batches, so the final batch is how far past it shutdown can run.
+# Smaller here trades a little throughput for a tighter exit.
+SHUTDOWN_BATCH = 500
 
 
 class FlushQueue:
@@ -96,7 +100,23 @@ class FlushQueue:
         deadline turns that into a bounded exit plus an explicit count of what did
         not make it — and those turns are re-derivable from the JSONL on next
         start, provided it has not been pruned.
+
+        The budget is spent from the moment stop() is called. It is not a hard
+        ceiling: one in-flight write may already be running on an executor
+        thread when stop() arrives, and that write cannot be interrupted, so
+        the true bound is `stop_timeout + at most one batch`. Overstating this
+        matters — a server that outlives its advertised deadline keeps the
+        DuckDB lock, and the next `tokenol serve --persist` fails to start.
         """
+        loop = asyncio.get_running_loop()
+        # The clock starts HERE, not after the task wait. Awaiting the task
+        # blocks until the in-flight _drain_once returns, and that write is
+        # uninterruptible: it runs on an executor thread, and close() takes the
+        # same store lock the flush holds, so cancelling the coroutine would
+        # free nothing and would leave a live thread writing through a
+        # connection we are about to close. What we can do is refuse to spend
+        # any MORE time once the budget is gone.
+        deadline = loop.time() + self._stop_timeout
         self._stopping = True
         self._wake.set()
         if self._task is not None:
@@ -104,12 +124,13 @@ class FlushQueue:
                 await self._task
             self._task = None
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._stop_timeout
         while self.pending_count() or self._pending_sessions:
             if loop.time() >= deadline:
                 break
-            await self._drain_once(self._max_batch)
+            # Smaller batches near shutdown: the deadline is checked between
+            # batches, so batch size is the granularity by which the last one
+            # can overrun it.
+            await self._drain_once(min(self._max_batch, SHUTDOWN_BATCH))
 
         remaining = self.pending_count()
         if remaining:

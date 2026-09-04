@@ -14,6 +14,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+import re
 import tempfile
 import threading
 from collections import Counter
@@ -32,6 +33,33 @@ SCHEMA_VERSION = 4
 
 # Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
+
+# DuckDB reports a lock conflict as an IOException whose text carries the
+# holding PID, e.g.:
+#   Could not set lock on file "...": Conflicting lock is held in
+#   /usr/bin/python3.13 (PID 3170792) by user ff235.
+_CONFLICT_PID_RE = re.compile(r"\(PID (\d+)\)")
+
+
+class StoreLockedError(RuntimeError):
+    """Another process holds the store's lock.
+
+    DuckDB's lock is exclusive and cross-process, so this is exactly the case
+    of a second tokenol being started while one is already running. It is a
+    clean refusal, not a data hazard: the second process dies at connect
+    having written nothing, and `turns.dedup_key` makes re-flushing the same
+    turns a no-op anyway. Raised so callers can print a sentence instead of a
+    DuckDB traceback.
+    """
+
+    def __init__(self, path: Path, pid: int | None) -> None:
+        self.path = path
+        self.pid = pid
+        who = f"another process (PID {pid})" if pid is not None else "another process"
+        super().__init__(
+            f"tokenol is already running: {who} holds {path}. "
+            f"Stop it first, or start this one without --persist."
+        )
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -285,7 +313,16 @@ class HistoryStore:
         # serialised on this lock. RLock because flush() nests _tx() inside
         # already-locked regions.
         self._lock = threading.RLock()
-        self._con = duckdb.connect(str(self.path), read_only=read_only)
+        try:
+            self._con = duckdb.connect(str(self.path), read_only=read_only)
+        except duckdb.IOException as exc:
+            # Only a lock conflict becomes StoreLockedError; a genuine IO
+            # failure (full disk, bad permissions) must surface unchanged.
+            text = str(exc)
+            if "lock" not in text.lower():
+                raise
+            m = _CONFLICT_PID_RE.search(text)
+            raise StoreLockedError(self.path, int(m.group(1)) if m else None) from exc
         # DuckDB defaults to 80% of system RAM, which on a 32-GiB box is enough
         # to OOM the process during a large first-run flush. Bounding the pool
         # forces spills to disk instead.

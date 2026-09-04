@@ -419,7 +419,19 @@ def serve(
         tick_seconds=tick_seconds,
         persist=persist,
     )
-    application = create_app(config)
+    try:
+        application = create_app(config)
+    except Exception as exc:  # noqa: BLE001 — narrowed immediately below
+        from tokenol.persistence.store import StoreLockedError
+
+        if not isinstance(exc, StoreLockedError):
+            raise
+        # DuckDB's lock is exclusive and cross-process, so this is a second
+        # tokenol, not a data hazard. Say so in one line instead of letting a
+        # DuckDB traceback out.
+        err.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
     url = f"http://127.0.0.1:{port}"
     err.print(f"tokenol dashboard → {url}")
 
@@ -428,6 +440,10 @@ def serve(
 
         webbrowser.open(url)
 
+    # No port-conflict handling here on purpose: uvicorn binds the socket
+    # itself, catches EADDRINUSE, logs "address already in use" and raises
+    # SystemExit(1). An `except OSError` around this call is unreachable
+    # (verified 2026-09-04), and uvicorn's own message is already clear.
     uvicorn.run(application, host="127.0.0.1", port=port, log_level=log_level.value.lower())
 
 
