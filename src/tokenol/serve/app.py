@@ -6,7 +6,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -173,6 +173,56 @@ def _current_snapshot_result(request: Request) -> SnapshotResult:
     return request.app.state.snapshot_result or _build_and_cache_snapshot(request)
 
 
+async def _snapshot_with_warm_tier(request: Request, *, project: str | None = None) -> SnapshotResult:
+    """Return the current snapshot with persisted (warm-tier) turns folded in.
+
+    The hot tier is only ever as complete as the JSONL still on disk, and Claude
+    Code prunes old transcripts — so any endpoint answering a question about the
+    past has to read the warm tier or it silently reports "all the history that
+    happens to survive" as if it were all the history. Measured on a real store:
+    April 2026 read $790 from JSONL alone against $6,513 of persisted turns for
+    the same month.
+
+    Overlap is resolved on ``dedup_key``, so the merge is safe to apply to every
+    range rather than only ``all`` — a 30- or 90-day window reaches past the
+    JSONL horizon just as easily once pruning has run.
+
+    Cached against the snapshot's ``generated_at`` (not ``id()`` — Python
+    recycles ids for freed objects) so a page firing six breakdown requests off
+    one snapshot pays for the merge once.
+    """
+    result = _current_snapshot_result(request)
+    store = request.app.state.history_store
+    if store is None:
+        return result
+
+    stamp = (result.payload.get("generated_at"), project)
+    cached = getattr(request.app.state, "warm_merged", None)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    loop = asyncio.get_running_loop()
+    warm_turns = await loop.run_in_executor(None, lambda: store.query_turns(project=project))
+    if not warm_turns:
+        return result
+
+    existing_keys = {t.dedup_key for t in result.turns}
+    merged_turns = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
+    merged_turns.sort(key=lambda t: t.timestamp)
+
+    existing_sids = {s.session_id for s in result.sessions}
+    warm_sessions: list = []
+    for sid in {t.session_id for t in warm_turns} - existing_sids:
+        session = await loop.run_in_executor(None, lambda sid=sid: store.query_session(sid))
+        if session is not None:
+            session.archived = True  # JSONL is gone — content snippets unavailable
+            warm_sessions.append(session)
+
+    merged = replace(result, turns=merged_turns, sessions=list(result.sessions) + warm_sessions)
+    request.app.state.warm_merged = (stamp, merged)
+    return merged
+
+
 def create_app(
     config: ServerConfig | None = None,
     prefs_path: Path | None = None,
@@ -246,6 +296,7 @@ def create_app(
     app.state.prefs_path = _prefs_path
     app.state.parse_cache = parse_cache
     app.state.snapshot_result = None
+    app.state.warm_merged = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
     app.state.flush_queue = flush_queue
@@ -326,36 +377,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid cwd encoding") from None
         if range not in ("1d", "7d", "14d", "30d", "all"):
             raise HTTPException(status_code=400, detail="Invalid range — use 1d, 7d, 14d, 30d, or all")
-        result = _current_snapshot_result(request)
-        if range == "all" and request.app.state.history_store is not None:
-            loop = asyncio.get_running_loop()
-            warm_turns = await loop.run_in_executor(
-                None,
-                lambda: request.app.state.history_store.query_turns(project=cwd),
-            )
-            if warm_turns:
-                existing_keys = {t.dedup_key for t in result.turns}
-                merged_turns = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
-                merged_turns.sort(key=lambda t: t.timestamp)
-
-                # Build a superset of sessions: existing + warm-tier sessions for this cwd.
-                warm_sids = {t.session_id for t in warm_turns}
-                existing_sids = {s.session_id for s in result.sessions}
-                missing_sids = warm_sids - existing_sids
-                warm_sessions: list = []
-                for sid in missing_sids:
-                    s = await loop.run_in_executor(
-                        None,
-                        lambda sid=sid: request.app.state.history_store.query_session(sid),
-                    )
-                    if s is not None:
-                        s.archived = True  # JSONL is gone — content snippets unavailable
-                        warm_sessions.append(s)
-                result = replace(
-                    result,
-                    turns=merged_turns,
-                    sessions=list(result.sessions) + warm_sessions,
-                )
+        result = await _snapshot_with_warm_tier(request, project=cwd)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_project_detail(cwd, result.sessions, range_key=range),
@@ -426,22 +448,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"Unknown metric — valid: {sorted(VALID_METRICS)}")
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
-        result = _current_snapshot_result(request)
-        # Warm-tier merge: when range=all and a store is wired, fold in any persisted
-        # turns older than the in-memory hot window so the chart includes them.
-        if range == "all" and request.app.state.history_store is not None:
-            prefs: Preferences = request.app.state.prefs
-            hot_cutoff = date.today() - timedelta(days=prefs.hot_window_days)
-            loop = asyncio.get_running_loop()
-            warm_turns = await loop.run_in_executor(
-                None,
-                lambda: request.app.state.history_store.query_turns(until=hot_cutoff),
-            )
-            if warm_turns:
-                existing_keys = {t.dedup_key for t in result.turns}
-                merged = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
-                merged.sort(key=lambda t: t.timestamp)
-                result = replace(result, turns=merged)
+        result = await _snapshot_with_warm_tier(request)
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
         # Returning 400 here forced clients to special-case "policy" failures even though
@@ -579,7 +586,7 @@ def create_app(
     @app.get("/api/breakdown/summary")
     async def api_breakdown_summary(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = _current_snapshot_result(request)
+        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
         if since is None:
             turns = list(result.turns)
@@ -605,7 +612,7 @@ def create_app(
     @app.get("/api/breakdown/daily-tokens")
     async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = _current_snapshot_result(request)
+        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
         if since is None:
             turns = list(result.turns)
@@ -659,7 +666,7 @@ def create_app(
     @app.get("/api/breakdown/by-project")
     async def api_breakdown_by_project(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = _current_snapshot_result(request)
+        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
 
         cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
@@ -695,7 +702,7 @@ def create_app(
     @app.get("/api/breakdown/by-model")
     async def api_breakdown_by_model(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = _current_snapshot_result(request)
+        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
 
         buckets = _bucket_turns(
@@ -738,7 +745,7 @@ def create_app(
         # future mode in localStorage degrades gracefully on an older server.
         if mode not in _ATTRIBUTION_MODES:
             mode = AttributionMode.PRORATA.value
-        result = _current_snapshot_result(request)
+        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
         filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
         tools = build_breakdown_tools(filtered, mode=mode)
@@ -759,7 +766,7 @@ def create_app(
     @app.get("/api/breakdown/skills")
     async def api_breakdown_skills(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = _current_snapshot_result(request)
+        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
         filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
         # One combined builder (two turn walks) instead of calling the ranked
