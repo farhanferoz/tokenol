@@ -4,6 +4,44 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **A server with a history store no longer keeps every parsed transcript event resident.** On the
+  store-backed derivation path each file's events are consumed once — a changed file is re-parsed and
+  the delta deduplicated by key, and session drill-down re-opens the transcript from disk — yet they
+  went through the parse cache, which retained them for the life of the process. On the first tick
+  every file on disk is an edge file, so the whole corpus was held for a reader that did not exist.
+  Measured at 0.41 MB per transcript file, about 2.1 GB across the 5,109 files of the corpus this was
+  profiled on.
+- **The warm tier is hydrated as the complement of the hot tier, not the whole store.** The hot tier
+  holds every persisted row at or after the cutoff it was hydrated at and only ever grows, so rows in
+  that range were rebuilt into `Turn` objects only to be dropped again as duplicates by the merge. On
+  the profiled store that was 286,553 of 383,420 rows: 604 MB of the 711 MB a full hydration cost.
+  Both tiers now take a single cutoff value computed once by the caller, so they partition the store
+  exactly. `HistoryStore` gains `hydrate_since` and `hydrate_before` for the two halves;
+  `hydrate_hot` is unchanged for callers and now delegates to `hydrate_since`.
+- **The hydrated warm tier is kept while in use and released after two minutes without use**, rather
+  than rebuilt every two minutes for as long as anyone was watching. The old list stayed referenced
+  while its replacement was built, which is where peak memory came from. Every read counts as use,
+  including one served from the merged-snapshot cache. Note that the main dashboard polls an endpoint
+  which reads the warm tier, so with a browser tab open the cache stays in use by design and the
+  memory is reclaimed only once the tabs are closed.
+
+### Fixed
+
+- **Forgetting a session, project or date range left the deleted turns in the warm-tier cache**, so
+  historical totals could keep counting them for up to two minutes after the deletion had been applied
+  to the store and the in-memory tier. The forget path now clears that cache in the same tick.
+
+### Notes
+
+- DuckDB's buffer pool was measured at 83.5 MiB against its 954 MiB cap on a 180 MB store, so that cap
+  is not a constraint and lowering it would save nothing.
+- The per-layer figures above count Python-attributed live objects. Resident memory falls by less,
+  because the allocator does not return every freed arena to the operating system.
+
 ## 2026-09-04 — older RESUME pitfalls rolled down
 
 - **2026-05-03:** Co-Authored-By trailers slipped into 61 commits; fixed via `git filter-branch` + retag + force-push. Verify every commit before push, not just the message you typed.
