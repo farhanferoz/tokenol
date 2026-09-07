@@ -906,7 +906,14 @@ def _store_backed_derivation(
     """
     if not getattr(parse_cache, "_hot_initialized", False):
         window_days = getattr(history_store, "_hot_window_days", 90)
-        hot_turns, hot_sessions = history_store.hydrate_hot(window_days=window_days)
+        # ONE cutoff, computed here and used for both tiers. The warm tier
+        # hydrates its exact complement (app._warm_tier), so the two must agree
+        # on the boundary to the microsecond: deriving it twice from two `now`
+        # readings leaves a band that neither tier covers, and turns landing
+        # there would disappear from every historical total without a word.
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+        parse_cache._hot_cutoff = cutoff
+        hot_turns, hot_sessions = history_store.hydrate_since(cutoff)
         parse_cache._hot_turns = hot_turns
         parse_cache._hot_sessions_by_id = {s.session_id: s for s in hot_sessions}
         parse_cache._known_dedup_keys = {t.dedup_key for t in hot_turns}

@@ -489,6 +489,13 @@ class HistoryStore:
                     [sid, s.source_file or None, s.cwd, s.is_sidechain, first_ts, last_ts, count],
                 )
 
+    @staticmethod
+    def _naive_utc(cutoff: datetime) -> datetime:
+        """Rows are stored as naive UTC timestamps; compare against the same."""
+        if cutoff.tzinfo is not None:
+            return cutoff.astimezone(timezone.utc).replace(tzinfo=None)
+        return cutoff
+
     def hydrate_hot(self, window_days: int) -> tuple[list[Turn], list[Session]]:
         """Load Turn rows whose ts is within `window_days` of now, plus their sessions.
 
@@ -497,7 +504,29 @@ class HistoryStore:
         the same hot-window query — callers can iterate sessions and treat them
         as fully-hydrated.
         """
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+        return self.hydrate_since(datetime.now(tz=timezone.utc) - timedelta(days=window_days))
+
+    def hydrate_since(self, cutoff: datetime) -> tuple[list[Turn], list[Session]]:
+        """Load Turn rows at or after `cutoff` (UTC), plus their sessions.
+
+        Takes the cutoff rather than a window so the caller can hold the exact
+        value and pass the same one to `hydrate_before`. Deriving it twice from
+        two separate `now` readings leaves a band between them that neither
+        tier covers.
+        """
+        return self._hydrate_where("ts >= ?", [self._naive_utc(cutoff)])
+
+    def hydrate_before(self, cutoff: datetime) -> tuple[list[Turn], list[Session]]:
+        """Load Turn rows strictly older than `cutoff` (UTC), plus their sessions.
+
+        The exact complement of `hydrate_since` for the same cutoff: a server
+        that hydrated its hot tier at `cutoff` already holds every row at or
+        after it and appends every new one, so this is the part of the store
+        the hot tier does not cover.
+        """
+        return self._hydrate_where("ts < ?", [self._naive_utc(cutoff)])
+
+    def _hydrate_where(self, clause: str, params: list) -> tuple[list[Turn], list[Session]]:
         # The lock exists to serialise use of the shared DuckDB connection, so it
         # covers the queries only. Row conversion is pure Python over rows already
         # fetched, and on a real store it is the bulk of the work — 91,131 rows,
@@ -505,8 +534,8 @@ class HistoryStore:
         # reader for no reason. Two short windows instead of one long one.
         with self._lock:
             turn_rows = self._con.execute(
-                f"SELECT {self._turn_cols} FROM turns WHERE ts >= ? ORDER BY ts",
-                [cutoff.replace(tzinfo=None)],
+                f"SELECT {self._turn_cols} FROM turns WHERE {clause} ORDER BY ts",
+                params,
             ).fetchall()
 
         turns = [_row_to_turn(r) for r in turn_rows]

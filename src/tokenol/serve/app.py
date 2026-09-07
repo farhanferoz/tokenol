@@ -7,7 +7,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -200,18 +200,22 @@ def _current_snapshot_result(request: Request) -> SnapshotResult:
 # request is pure waste — and expensive waste: tens of thousands of rows rebuilt
 # into Turn objects while the flusher holds the store's connection lock.
 _WARM_TIER_TTL_SECONDS = 120.0
-# hydrate_hot() takes a day window; the warm tier wants all of it.
-_WARM_TIER_ALL_DAYS = 100_000
-
 
 async def _warm_tier(request: Request) -> tuple[list, list]:
-    """Return (turns, sessions) for the whole warm tier, cached for a short TTL.
+    """Return (turns, sessions) for the part of the store the hot tier does not hold.
 
-    Goes through ``hydrate_hot`` rather than ``query_turns`` + a
-    ``query_session`` per id: hydrate_hot answers both in two queries, where the
-    per-session form costs one DuckDB round-trip per session — 300+ of them on a
-    real store, each contending with the flusher for the connection lock, which
-    is enough to push a breakdown request past a 25-second timeout.
+    The hot tier was hydrated once at `parse_cache._hot_cutoff` and has only
+    ever been appended to since, so every persisted row at or after that cutoff
+    is already in memory. Hydrating those again built tens of thousands of Turn
+    objects that `_snapshot_with_warm_tier` then dropped as duplicates — on a
+    --persist server, the whole last 90 days twice. Measured on a real store:
+    286,553 of 383,420 rows, 604 MB of the 711 MB the full hydration cost.
+
+    Goes through ``hydrate_before`` rather than ``query_turns`` + a
+    ``query_session`` per id: one query answers both, where the per-session form
+    costs one DuckDB round-trip per session — 300+ of them on a real store, each
+    contending with the flusher for the connection lock, which is enough to push
+    a breakdown request past a 25-second timeout.
     """
     store = request.app.state.warm_store
     cached = getattr(request.app.state, "warm_tier_cache", None)
@@ -229,8 +233,16 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
         if cached is not None and cached[0] > time.monotonic():
             return cached[1]
 
+        cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
+        if cutoff is None:
+            # No derivation has run yet. Using the pref window here can only
+            # overlap the hot tier once it exists, never leave a gap, and the
+            # merge dedups overlap by dedup_key.
+            window_days = getattr(store, "_hot_window_days", request.app.state.prefs.hot_window_days)
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+
         loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, lambda: store.hydrate_hot(window_days=_WARM_TIER_ALL_DAYS))
+        data = await loop.run_in_executor(None, lambda: store.hydrate_before(cutoff))
         # Expiry runs from completion, not from a reading taken before the work
         # started — on a large store the old form spent much of its own TTL hydrating.
         request.app.state.warm_tier_cache = (time.monotonic() + _WARM_TIER_TTL_SECONDS, data)

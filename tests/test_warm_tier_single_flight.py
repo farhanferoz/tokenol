@@ -39,21 +39,17 @@ async def test_concurrent_requests_hydrate_the_store_once(tmp_path, monkeypatch)
     store = app.state.warm_store
     assert store is not None
 
-    # Count only whole-store hydrations (_WARM_TIER_ALL_DAYS). The derivation path
-    # legitimately hydrates once at startup with the smaller hot window; that one is
-    # not what this test is about.
-    from tokenol.serve.app import _WARM_TIER_ALL_DAYS
-
+    # Count warm-tier hydrations only. The derivation path hydrates the hot
+    # window through hydrate_hot at startup; that one is not what this test is about.
     calls = 0
-    real = store.hydrate_hot
+    real = store.hydrate_before
 
     def counting(*a, **kw):
         nonlocal calls
-        if kw.get("window_days") == _WARM_TIER_ALL_DAYS:
-            calls += 1
+        calls += 1
         return real(*a, **kw)
 
-    store.hydrate_hot = counting
+    store.hydrate_before = counting
 
     endpoints = [
         "/api/breakdown/summary?range=all",
@@ -68,4 +64,4 @@ async def test_concurrent_requests_hydrate_the_store_once(tmp_path, monkeypatch)
     for r in results:
         assert r.status_code == 200
 
-    assert calls == 1, f"{len(endpoints)} concurrent requests caused {calls} whole-store hydrations"
+    assert calls == 1, f"{len(endpoints)} concurrent requests caused {calls} warm-tier hydrations"

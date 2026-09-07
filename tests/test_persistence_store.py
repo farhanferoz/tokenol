@@ -554,3 +554,51 @@ def test_schema_v3_to_v4_migration_is_idempotent(tmp_path: Path) -> None:
         store._con.execute("SELECT cache_creation_1h_tokens FROM turns LIMIT 0").fetchall()
     finally:
         store.close()
+
+
+def test_hydrate_before_returns_older_turns_only(tmp_path: Path) -> None:
+    """The complement of hydrate_hot: rows strictly before the cutoff, plus their sessions."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        now = datetime.now(tz=timezone.utc)
+        cutoff = now - timedelta(days=90)
+        old = _turn("old", "sess-1", ts=cutoff - timedelta(seconds=1))
+        edge = _turn("edge", "sess-2", ts=cutoff)
+        recent = _turn("recent", "sess-3", ts=now - timedelta(days=10))
+        store.flush([old, edge, recent], [_session("sess-1"), _session("sess-2"), _session("sess-3")])
+
+        turns, sessions = store.hydrate_before(cutoff)
+        assert {t.dedup_key for t in turns} == {"old"}
+        assert {s.session_id for s in sessions} == {"sess-1"}
+        assert sessions[0].turns == turns, "session.turns must be populated like hydrate_hot does"
+    finally:
+        store.close()
+
+
+def test_hydrate_before_and_hydrate_hot_partition_the_store(tmp_path: Path) -> None:
+    """Every row lands in exactly one of the two hydrations for the same cutoff."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        now = datetime.now(tz=timezone.utc)
+        made = [_turn(f"k{i}", "sess-1", ts=now - timedelta(days=i * 20)) for i in range(10)]
+        store.flush(made, [_session("sess-1")])
+
+        # ONE cutoff for both sides. Deriving each from its own now() leaves a
+        # band between the two readings that neither side returns.
+        cutoff = now - timedelta(days=90)
+        hot, _ = store.hydrate_since(cutoff)
+        warm, _ = store.hydrate_before(cutoff)
+        hot_keys = {t.dedup_key for t in hot}
+        warm_keys = {t.dedup_key for t in warm}
+        assert hot_keys & warm_keys == set(), "a row appeared in both tiers"
+        assert hot_keys | warm_keys == {t.dedup_key for t in made}, "a row appeared in neither tier"
+
+        # The boundary row itself belongs to hot (>=), never to warm (<).
+        edge = _turn("edge-exact", "sess-2", ts=cutoff)
+        store.flush([edge], [_session("sess-2")])
+        hot2, _ = store.hydrate_since(cutoff)
+        warm2, _ = store.hydrate_before(cutoff)
+        assert "edge-exact" in {t.dedup_key for t in hot2}
+        assert "edge-exact" not in {t.dedup_key for t in warm2}
+    finally:
+        store.close()

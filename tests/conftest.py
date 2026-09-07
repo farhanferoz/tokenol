@@ -49,7 +49,10 @@ def seed_history_store(db_path: Path, *, days_ago: int, turns: int, session_id: 
     unit = cost_for_turn("claude-opus-4-8", usage).total_usd
     made = [
         Turn(
-            dedup_key=f"warm-{i}",
+            # Keyed on session_id, not just the index: turns.dedup_key is a
+            # PRIMARY KEY and flush() skips conflicts, so two seed calls on one
+            # store with different sessions would silently drop the second.
+            dedup_key=f"{session_id}-{i}",
             timestamp=ts + timedelta(seconds=i),
             session_id=session_id,
             model="claude-opus-4-8",
