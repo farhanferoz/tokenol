@@ -133,16 +133,19 @@ Pass `--persist` to enable a DuckDB-backed history store at `~/.tokenol/history.
 
 - **Deleting a JSONL no longer drops it from the dashboard.** Quantitative panels render as before; only the per-turn modal's verbatim content snippets become unavailable, indicated by an "Archived — text snippets unavailable" badge. Metrics survive; words don't (matching the privacy intent of the deletion).
 - **Restart picks up where you left off.** A background flusher batches writes (every 30 s or 100 turns, whichever first) and force-drains on graceful shutdown. The JSONLs remain the durable substrate — a process crash mid-flush loses nothing because the next start re-derives the missing window from the JSONLs (idempotent on `message.id:requestId`).
-- **Cold start stays bounded.** The hot tier loads only the last `hot_window_days` of turns (default 90, tunable via `/api/prefs`); older history is read on demand from the warm tier.
+- **Cold start stays bounded.** The hot tier loads only the last `hot_window_days` of turns (default 90, tunable via `/api/prefs`); older history is read on demand from the warm tier. A turn already in the store is never re-derived from its transcript, whatever its age.
+- **A restart re-reads only what changed.** Per-file parse marks are kept in `~/.tokenol/parse-marks.json` (one entry per transcript), so an unchanged file costs a `stat()` rather than a full parse. A mark is written only once the flusher confirms that file's turns are *in the store*, so a crash can never leave a mark that outruns the data — the file is simply re-read next time. Delete the file to force a full re-read; an empty store makes the server discard it automatically. Marks are used only under `--persist`, since a plain `serve` has no writer and skipping a file would drop its turns.
 
-Measured cost on the author's full `~/.claude*` corpus (~1820 files, ~2 GB of JSONLs, page cache cold both runs):
+Measured on the author's full `~/.claude*` corpus — 5,120 transcript files, ~6.5 GB of JSONL, 385k persisted turns, 218 MB store (2026-09-07):
 
-| | Default mode | `--persist` first start | `--persist` subsequent starts |
-|---|---|---|---|
-| Time to first paint | ~5 s | ~12 s | ~12 s |
-| Wall to settle | ~5 s | ~4 min (one-time backfill) | <30 s |
-| Steady RSS | ~250 MiB | — | ~750 MiB |
-| Durable disk | 0 | ~40 MB after backfill | grows incrementally |
+| | `--persist`, first start | `--persist`, later starts |
+|---|---|---|
+| Time to first request served | ~2 min | ~17 s |
+| Resident, peak | ~1.4 GB | ~1.3 GB |
+| Resident, steady | ~1.2 GB | ~1.2 GB |
+| Durable disk | ~220 MB after backfill | grows incrementally |
+
+Default mode (no `--persist`) stays lighter than either column — it holds only what the transcripts on disk contain — but it reports "all the history that happens to survive" rather than all the history. The figures above are a full corpus; a smaller one scales down roughly linearly.
 
 Requires the persist extras (`pip install 'tokenol[serve,persist]'`).
 
