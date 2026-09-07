@@ -602,3 +602,26 @@ def test_hydrate_before_and_hydrate_hot_partition_the_store(tmp_path: Path) -> N
         assert "edge-exact" not in {t.dedup_key for t in warm2}
     finally:
         store.close()
+
+
+def test_dedup_keys_returns_every_key_in_the_store(tmp_path: Path) -> None:
+    """One query for the whole key set: the derivation seeds its dedup set from it."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        now = datetime.now(tz=timezone.utc)
+        made = [_turn(f"k{i}", "sess-1", ts=now - timedelta(days=i * 40)) for i in range(5)]
+        store.flush(made, [_session("sess-1")])
+
+        keys = store.dedup_keys()
+        assert keys == {f"k{i}" for i in range(5)}
+        assert isinstance(keys, set)
+    finally:
+        store.close()
+
+
+def test_dedup_keys_is_empty_on_an_empty_store(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        assert store.dedup_keys() == set()
+    finally:
+        store.close()

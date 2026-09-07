@@ -573,6 +573,20 @@ class HistoryStore:
             rows = self._con.execute("SELECT session_id, last_ts FROM sessions").fetchall()
         return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
 
+    def dedup_keys(self) -> set[str]:
+        """Every dedup_key in the store, in one query.
+
+        The derivation seeds its in-memory dedup set from this instead of from
+        the hot window alone. Without it every turn older than the window was
+        re-derived from JSONL on each cold start, appended to the hot tier,
+        queued, and rejected by the PRIMARY KEY at the very last step — 96,867
+        turns on the live store. Cost: one string per persisted turn, about
+        15 MB per 100k rows.
+        """
+        with self._lock:
+            rows = self._con.execute("SELECT dedup_key FROM turns").fetchall()
+        return {r[0] for r in rows}
+
     def query_turns(
         self,
         since: date | None = None,

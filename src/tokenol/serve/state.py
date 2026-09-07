@@ -930,7 +930,13 @@ def _store_backed_derivation(
         hot_turns, hot_sessions = history_store.hydrate_since(cutoff)
         parse_cache._hot_turns = hot_turns
         parse_cache._hot_sessions_by_id = {s.session_id: s for s in hot_sessions}
-        parse_cache._known_dedup_keys = {t.dedup_key for t in hot_turns}
+        # Every persisted key, not just the hot window's: a turn the store
+        # already holds must never be rebuilt, whatever its age. The hot keys
+        # are a subset, so this is a superset of what was here before. Without
+        # it a cold start re-derived every row below the cutoff (96,867 on the
+        # live store), appended it to the hot tier, queued it, and had the
+        # database reject it as a key conflict at the last step.
+        parse_cache._known_dedup_keys = history_store.dedup_keys()
         parse_cache._known_passthrough_locs = set()
         parse_cache._last_ts_by_session = history_store.last_ts_by_session()
         parse_cache._last_mtime_ns_by_path = {}  # populated below as files are parsed
