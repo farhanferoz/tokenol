@@ -61,6 +61,13 @@ class FlushQueue:
         self._lock = threading.Lock()
         self._pending_turns: list[Turn] = []
         self._pending_sessions: dict[str, Session] = {}
+        # Written-vs-enqueued accounting for the parse-marks sidecar.
+        # `pending_count() == 0` is NOT "everything is in the store": _drain_once
+        # pops the pending list before the DuckDB write runs, so an empty queue
+        # can mean a write is still in flight, or has just failed and been
+        # re-queued. A mark for a file may reach disk only when these agree.
+        self._enqueued_turns = 0
+        self._written_turns = 0
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._stopping = False
@@ -74,6 +81,7 @@ class FlushQueue:
             return
         with self._lock:
             self._pending_turns.extend(turns)
+            self._enqueued_turns += len(turns)
             for s in sessions:
                 self._pending_sessions[s.session_id] = s
             count = len(self._pending_turns)
@@ -91,6 +99,16 @@ class FlushQueue:
         """Turns still queued. Used by stop() and by tests to observe progress."""
         with self._lock:
             return len(self._pending_turns)
+
+    def all_written(self) -> bool:
+        """True once store.flush has completed for every turn ever enqueued.
+
+        Stronger than an empty queue, and deliberately so: the parse-marks
+        sidecar records that a file need never be read again, which is only
+        true when that file's turns are durable.
+        """
+        with self._lock:
+            return self._written_turns == self._enqueued_turns
 
     async def stop(self) -> None:
         """Stop the loop and drain what fits inside the stop timeout.
@@ -183,4 +201,6 @@ class FlushQueue:
                 for s in sessions:
                     self._pending_sessions.setdefault(s.session_id, s)
             return
+        with self._lock:
+            self._written_turns += len(turns)
         self.drained.set()

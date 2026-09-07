@@ -19,6 +19,7 @@ import bisect
 import itertools
 import logging
 import threading
+import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from tokenol.ingest.parser import (
     parse_file,
 )
 from tokenol.model import registry
+from tokenol.persistence.marks import load_marks, save_marks
 
 if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
@@ -64,6 +66,12 @@ from tokenol.model.events import EMPTY_ASSUMPTIONS, RawEvent, Session, Turn, Usa
 from tokenol.model.pricing import context_window
 
 log = logging.getLogger(__name__)
+
+# Minimum seconds between two writes of the parse-marks sidecar. Bounds the new
+# disk traffic to one small file per minute while transcripts are changing, and
+# none at all when they are not. A save additionally requires the flusher to
+# report every enqueued turn written; see _store_backed_derivation.
+_MARKS_SAVE_INTERVAL_SECONDS = 60.0
 
 
 @dataclass
@@ -939,9 +947,36 @@ def _store_backed_derivation(
         parse_cache._known_dedup_keys = history_store.dedup_keys()
         parse_cache._known_passthrough_locs = set()
         parse_cache._last_ts_by_session = history_store.last_ts_by_session()
-        parse_cache._last_mtime_ns_by_path = {}  # populated below as files are parsed
+        # Marks persist across restarts ONLY under --persist (a flush queue
+        # exists). Plain `serve` has no writer, so a skipped file's turns would
+        # exist nowhere; there the marks start empty and every file is parsed.
+        parse_cache._last_mtime_ns_by_path = load_marks() if flush_queue is not None else {}
+        parse_cache._marks_dirty = False
+        parse_cache._marks_saved_at = 0.0
         parse_cache._fired = Counter()
         parse_cache._hot_initialized = True
+
+    # Persist the marks at the START of a tick, before this tick enqueues
+    # anything: if the flusher reports everything written now, every mark
+    # currently held describes a file whose turns are all in the store. A crash
+    # at any later point then loses at most this tick's work, which the still-old
+    # on-disk mark makes re-parseable on the next start.
+    if (
+        flush_queue is not None
+        and parse_cache._marks_dirty
+        and time.monotonic() - parse_cache._marks_saved_at >= _MARKS_SAVE_INTERVAL_SECONDS
+        and flush_queue.all_written()
+    ):
+        save_marks(dict(parse_cache._last_mtime_ns_by_path))
+        parse_cache._marks_dirty = False
+        parse_cache._marks_saved_at = time.monotonic()
+
+    # Drop marks for files that are gone, so the sidecar tracks the corpus
+    # rather than growing forever with pruned transcripts.
+    present = mtime_by_path.keys() if mtime_by_path is not None else set(paths)
+    if len(parse_cache._last_mtime_ns_by_path) > len(present):
+        parse_cache._last_mtime_ns_by_path = {p: m for p, m in parse_cache._last_mtime_ns_by_path.items() if p in present}
+        parse_cache._marks_dirty = True
 
     # Filter to edge paths (mtime_ns differs from persisted high-water mark).
     marks = parse_cache._last_mtime_ns_by_path
@@ -980,6 +1015,7 @@ def _store_backed_derivation(
             parse_cache._last_mtime_ns_by_path[p] = (
                 mtime_by_path[p] if mtime_by_path is not None and p in mtime_by_path else p.stat().st_mtime_ns
             )
+            parse_cache._marks_dirty = True
         except OSError:
             continue
         if not file_events:

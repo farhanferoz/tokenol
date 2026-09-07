@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
     from tokenol.persistence.store import HistoryStore
 
+from tokenol.persistence.marks import clear_marks
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
@@ -281,6 +282,11 @@ class SnapshotBroadcaster:
                     cache._known_dedup_keys = set()
                     cache._known_passthrough_locs = set()
                     cache._last_ts_by_session = {}
+                    # The store is empty now, so every file must be read again
+                    # on the next start. A surviving mark would skip it forever.
+                    cache._last_mtime_ns_by_path = {}
+                    cache._marks_dirty = False
+                    clear_marks()
 
             # For session/project deletes, evict matching session_ids from the hot tier.
             if evicted_sids and hasattr(cache, "_hot_sessions_by_id"):
