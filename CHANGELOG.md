@@ -28,12 +28,38 @@ All notable changes to tokenol are documented here. The format follows
   including one served from the merged-snapshot cache. Note that the main dashboard polls an endpoint
   which reads the warm tier, so with a browser tab open the cache stays in use by design and the
   memory is reclaimed only once the tabs are closed.
+- **Cold start derives one transcript at a time.** Every edge file's events used to be accumulated
+  into a single list before one derivation at the end. On the first tick every file on disk is an
+  edge file, so the whole corpus of parsed events was alive at the same moment — and about half of
+  that peak never returns to the operating system, because the allocator does not give back
+  fragmented arenas. The peak is now bounded by the largest single file. Results are unchanged: a
+  dedup key never spans two files, and a file is still derived as one batch.
+- **A turn already in the store is never rebuilt, whatever its age.** The in-memory dedup set was
+  seeded from the hot window alone, so every persisted turn older than the window was re-derived
+  from the transcript, appended to the hot tier, queued for flush and finally rejected by the
+  database as a key conflict — 96,867 turns on the store this was measured against, taking the
+  whole journey in order to be discarded at the last step. `HistoryStore.dedup_keys()` answers the
+  full set in one query, at roughly 15 MB per 100,000 rows.
+- **Per-file parse marks now survive a restart** (`~/.tokenol/parse-marks.json`), so a server that
+  restarts re-reads only the transcripts that actually changed. The marks were already used to skip
+  unchanged files, but were reset on every start, so the fast path was never available exactly when
+  it would have helped most. Two rules keep them honest: a mark is written only once the flusher
+  confirms every queued turn is *written* to the store rather than merely dequeued, so a crash can
+  never leave a mark that outruns the data; and marks are read and written only under `--persist`,
+  because a plain `serve` has no writer and skipping a file there would drop its turns. Writes are
+  limited to one per minute and only when a mark changed, so an idle server writes nothing.
 
 ### Fixed
 
 - **Forgetting a session, project or date range left the deleted turns in the warm-tier cache**, so
   historical totals could keep counting them for up to two minutes after the deletion had been applied
   to the store and the in-memory tier. The forget path now clears that cache in the same tick.
+- **An empty history store no longer silences every transcript.** A parse mark asserts that a file's
+  turns are already stored. If the store is deleted or replaced while the marks file survives, that
+  assertion is false for every mark, and honouring them would skip every transcript and serve an
+  empty dashboard indefinitely with nothing to say why. An empty store with non-empty marks is now
+  treated as the contradiction it is: the marks are discarded, the file removed, and a warning
+  logged. `forget --all` already cleared them on its own path.
 
 ### Measured
 
@@ -49,6 +75,23 @@ store), a `--persist` server before and after, same machine, same load:
 A 48% reduction in steady-state resident memory and 50% at peak. Caveat on the comparison: the
 "before" figure is a process that had been up 2.8 days, the "after" one settled over 7 minutes, so
 the after figure is a settled reading rather than a long-run one.
+
+The cold-start changes were measured separately, against a true cold start of the previous code on
+the same corpus — which turned out to peak higher than any settled reading had shown, because the
+whole-corpus transient exists only while the first tick is running:
+
+| | before | after |
+|---|---:|---:|
+| time to first request served, no marks on disk | 333 s | 117 s |
+| time to first request served, marks present | n/a | 17 s |
+| resident, peak during cold start | 3,223 MB | 1,298 MB |
+| resident, steady | 2,317 MB | ~1,250 MB |
+| swapped out | 92 MB | 0 MB |
+
+A 60% reduction at peak, 46% steady, and a 95% reduction in the time a restart takes to become
+useful. The 17-second figure was measured with two-second polling, so the true value lies between
+15 and 17 seconds; what remains is process startup and hydrating the hot window out of the
+database, neither of which these changes touch.
 
 Correctness was checked against the store rather than assumed. The dashboard reported 385,229 turns
 all-time and 288,362 over 90 days, a difference of 96,867; the store holds exactly 96,867 turns older
