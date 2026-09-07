@@ -37,7 +37,7 @@ from tokenol.ingest.parser import (
     parse_file,
 )
 from tokenol.model import registry
-from tokenol.persistence.marks import load_marks, save_marks
+from tokenol.persistence.marks import clear_marks, load_marks, save_marks
 
 if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
@@ -951,6 +951,16 @@ def _store_backed_derivation(
         # exists). Plain `serve` has no writer, so a skipped file's turns would
         # exist nowhere; there the marks start empty and every file is parsed.
         parse_cache._last_mtime_ns_by_path = load_marks() if flush_queue is not None else {}
+        # A mark asserts "this file's turns are already in the store". An EMPTY
+        # store with non-empty marks is that assertion contradicted — the store
+        # was deleted or replaced while the sidecar survived — and honouring the
+        # marks there would skip every transcript and serve an empty dashboard
+        # for ever, silently. The marks lose. (forget --all clears them on its
+        # own path; this covers the store going away behind our back.)
+        if parse_cache._last_mtime_ns_by_path and not parse_cache._known_dedup_keys:
+            log.warning("history store is empty but parse marks exist; ignoring the marks and re-reading every transcript")
+            parse_cache._last_mtime_ns_by_path = {}
+            clear_marks()
         parse_cache._marks_dirty = False
         parse_cache._marks_saved_at = 0.0
         parse_cache._fired = Counter()

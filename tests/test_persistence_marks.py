@@ -199,3 +199,46 @@ async def test_forget_all_clears_the_marks(tmp_path, monkeypatch) -> None:
 
     assert app.state.parse_cache._last_mtime_ns_by_path == {}
     assert not marks_path().exists(), "forget-all left marks that would skip every file on the next start"
+
+
+@pytest.mark.asyncio
+async def test_marks_are_distrusted_when_the_store_is_empty(persist_setup, monkeypatch) -> None:
+    """A store deleted out from under its marks must not silence every file.
+
+    Marks assert "this file's turns are already in the store". If the store
+    goes away (deleted by hand, or replaced with a fresh one) while the sidecar
+    survives, honouring the marks would skip every transcript and serve an
+    empty dashboard for ever, with nothing in the logs. An empty store plus
+    non-empty marks is that contradiction, so the marks lose.
+    """
+    store, queue, src = persist_setup
+    from tokenol.persistence.marks import marks_path, save_marks
+
+    monkeypatch.setattr(_state_mod, "_MARKS_SAVE_INTERVAL_SECONDS", 0.0)
+    first = ParseCache()
+    build_snapshot_full(first, history_store=store, flush_queue=queue)
+    await queue._drain_once()
+    build_snapshot_full(first, history_store=store, flush_queue=queue)
+    assert marks_path().is_file()
+    saved_marks = json.loads(marks_path().read_text())
+    assert saved_marks, "precondition: marks were written"
+
+    # The store loses every row, but the sidecar survives.
+    store.forget(all=True)
+    assert store.dedup_keys() == set()
+    save_marks({src: src.stat().st_mtime_ns})
+
+    parsed: list[Path] = []
+    real = _state_mod.parse_file
+
+    def spy(path):
+        parsed.append(path)
+        return real(path)
+
+    monkeypatch.setattr(_state_mod, "parse_file", spy)
+
+    second = ParseCache()
+    build_snapshot_full(second, history_store=store, flush_queue=queue)
+
+    assert parsed == [src], "an empty store must re-read every file despite its marks"
+    assert len(second._hot_turns) >= BASIC_JSONL_TURNS, "the re-read turns were not recovered"
