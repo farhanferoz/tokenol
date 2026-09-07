@@ -954,24 +954,37 @@ def _store_backed_derivation(
     # disk. Caching the events retained every RawEvent of the whole corpus for
     # the life of the process — on the first tick every file is an edge file —
     # for a reader that does not exist.
-    new_events: list[RawEvent] = []
+    #
+    # Derived PER FILE, one at a time. Nothing here needs the whole tick's
+    # events at once, but accumulating them did cost that: on the first tick
+    # every file is an edge file, and holding every RawEvent of the corpus
+    # simultaneously peaked at ~1.4-2 GB, of which the allocator kept about
+    # half for the life of the process (measured 2026-09-07: 1,000 files ->
+    # 275 MB held, 139 MB still resident after gc and malloc_trim). Per-file
+    # batches give the same answer, because a dedup_key never spans two files
+    # (0 of 56,626 keys over a 1,000-file sample) and within-file last-wins is
+    # unchanged. Deltas are still ENQUEUED once per tick: the flusher's count
+    # threshold must see them as one batch, not one per file.
+    tick_turns: list[Turn] = []
+    tick_sessions: list[Session] = []
     for p in edge_paths:
         try:
-            evs = list(parse_file(p))
+            file_events = list(parse_file(p))
             # Prefer the caller's already-read mtime over a fresh stat().
             parse_cache._last_mtime_ns_by_path[p] = (
                 mtime_by_path[p] if mtime_by_path is not None and p in mtime_by_path else p.stat().st_mtime_ns
             )
-            new_events.extend(evs)
         except OSError:
             continue
+        if not file_events:
+            continue
 
-    if new_events:
         delta_turns, delta_sessions, fired, accepted_passthrough_locs = derive_delta_turns(
-            new_events,
+            file_events,
             parse_cache._known_dedup_keys,
             parse_cache._known_passthrough_locs,
         )
+        del file_events
         # Append new turns to hot tier and update bookkeeping.
         for t in delta_turns:
             parse_cache._hot_turns.append(t)
@@ -994,10 +1007,13 @@ def _store_backed_derivation(
             if sess is not None:
                 sess.turns.append(t)
         parse_cache._fired.update(fired)
-        # Queue deltas for background flush.
-        if flush_queue is not None:
-            sessions_to_flush = [parse_cache._hot_sessions_by_id[s.session_id] for s in delta_sessions if s.session_id in parse_cache._hot_sessions_by_id]
-            flush_queue.enqueue(delta_turns, sessions_to_flush)
+        tick_turns.extend(delta_turns)
+        tick_sessions.extend(delta_sessions)
+
+    # Queue this tick's deltas for background flush, as one batch.
+    if flush_queue is not None and (tick_turns or tick_sessions):
+        sessions_to_flush = [parse_cache._hot_sessions_by_id[s.session_id] for s in tick_sessions if s.session_id in parse_cache._hot_sessions_by_id]
+        flush_queue.enqueue(tick_turns, sessions_to_flush)
 
     # Mark sessions whose JSONL is no longer on disk as archived.
     live_sids = {p.stem for p in paths}
