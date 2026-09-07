@@ -962,7 +962,12 @@ def _store_backed_derivation(
             parse_cache._last_mtime_ns_by_path = {}
             clear_marks()
         parse_cache._marks_dirty = False
-        parse_cache._marks_saved_at = 0.0
+        # None, not 0.0: the interval below is a difference against
+        # time.monotonic(), whose origin is arbitrary (uptime on Linux). A 0.0
+        # sentinel therefore means "never saved" on a long-running box and
+        # "saved just now" on one that booted a minute ago, which delayed the
+        # first save by a whole interval there. An explicit None cannot.
+        parse_cache._marks_saved_at = None
         parse_cache._fired = Counter()
         parse_cache._hot_initialized = True
 
@@ -974,7 +979,7 @@ def _store_backed_derivation(
     if (
         flush_queue is not None
         and parse_cache._marks_dirty
-        and time.monotonic() - parse_cache._marks_saved_at >= _MARKS_SAVE_INTERVAL_SECONDS
+        and (parse_cache._marks_saved_at is None or time.monotonic() - parse_cache._marks_saved_at >= _MARKS_SAVE_INTERVAL_SECONDS)
         and flush_queue.all_written()
     ):
         save_marks(dict(parse_cache._last_mtime_ns_by_path))

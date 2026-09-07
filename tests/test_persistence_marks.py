@@ -131,20 +131,46 @@ async def test_a_restart_skips_files_whose_marks_are_persisted(persist_setup, mo
 
 @pytest.mark.asyncio
 async def test_save_cadence_is_bounded(persist_setup, monkeypatch) -> None:
-    """At most one save per interval, and none when nothing changed."""
+    """First eligible tick saves; a change inside the interval waits its turn.
+
+    The "never saved yet" sentinel must NOT be a clock reading. It was 0.0, and
+    time.monotonic()'s origin is arbitrary — uptime, on Linux — so on a
+    long-running machine 0.0 read as "never" and the first tick saved, while on
+    a freshly booted CI runner it read as "saved just now" and nothing saved at
+    all. That is why this test went red on 3.10/3.11/3.12 and green here. The
+    `is None` assertion below is the regression pin; the rest of the test then
+    drives the interval by moving the recorded time, never the clock.
+    """
     store, queue, src = persist_setup
     from tokenol.persistence import marks as marks_mod
 
     saves: list[dict] = []
     monkeypatch.setattr(_state_mod, "save_marks", lambda m: saves.append(dict(m)))
     monkeypatch.setattr(_state_mod, "_MARKS_SAVE_INTERVAL_SECONDS", 1000.0)
+
     cache = ParseCache()
     build_snapshot_full(cache, history_store=store, flush_queue=queue)
+    assert cache._marks_saved_at is None, "'never saved' must not be expressed as a clock value"
+    assert saves == [], "nothing is written before the flush"
+
     await queue._drain_once()
-    for _ in range(5):
-        build_snapshot_full(cache, history_store=store, flush_queue=queue)
-    assert len(saves) == 1, f"expected exactly one save inside the interval, got {len(saves)}"
+    build_snapshot_full(cache, history_store=store, flush_queue=queue)
+    assert len(saves) == 1, "the first eligible tick must save whatever the machine's uptime"
     assert saves[0] == {src: src.stat().st_mtime_ns}
+    assert cache._marks_saved_at is not None
+
+    # Change the file again, still inside the interval: must NOT save.
+    time.sleep(0.01)
+    src.touch()
+    build_snapshot_full(cache, history_store=store, flush_queue=queue)
+    await queue._drain_once()
+    build_snapshot_full(cache, history_store=store, flush_queue=queue)
+    assert len(saves) == 1, f"a change inside the interval must not trigger a save, got {len(saves)}"
+
+    # Once the interval has elapsed, the pending change is written.
+    cache._marks_saved_at -= 2 * _state_mod._MARKS_SAVE_INTERVAL_SECONDS
+    build_snapshot_full(cache, history_store=store, flush_queue=queue)
+    assert saves[1:] == [{src: src.stat().st_mtime_ns}], f"a change after the interval must save exactly once more, got {len(saves)} saves"
     assert marks_mod.marks_path().exists() is False, "save was stubbed; nothing should touch disk here"
 
 
