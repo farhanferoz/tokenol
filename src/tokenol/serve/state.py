@@ -925,10 +925,18 @@ def _store_backed_derivation(
         edge_paths = select_edge_paths(paths, marks)
 
     # Parse only edge files; record current mtime_ns for next tick's gate.
+    #
+    # Parsed directly, NOT through parse_cache.get_or_parse: on this path a
+    # file's events are consumed exactly once. A changed file is re-parsed under
+    # a new (path, size, mtime_ns) key and derive_delta_turns skips what it has
+    # already seen by dedup_key, and session drill-down re-opens the JSONL from
+    # disk. Caching the events retained every RawEvent of the whole corpus for
+    # the life of the process — on the first tick every file is an edge file —
+    # for a reader that does not exist.
     new_events: list[RawEvent] = []
     for p in edge_paths:
         try:
-            _key, evs = parse_cache.get_or_parse(p)
+            evs = list(parse_file(p))
             # Prefer the caller's already-read mtime over a fresh stat().
             parse_cache._last_mtime_ns_by_path[p] = (
                 mtime_by_path[p] if mtime_by_path is not None and p in mtime_by_path else p.stat().st_mtime_ns
