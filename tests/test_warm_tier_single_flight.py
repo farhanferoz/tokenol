@@ -1,6 +1,6 @@
 """One warm-tier hydration at a time, however many requests arrive together.
 
-`_warm_tier` caches the hydrated store for `_WARM_TIER_TTL_SECONDS`, but the
+`_warm_tier` caches the hydrated store for `_WARM_TIER_IDLE_SECONDS`, but the
 check and the fill are not guarded, so every request arriving while a hydration
 is in flight starts its own. The breakdown page fires six endpoints at once, so
 a single page load can hydrate the whole store six times over.

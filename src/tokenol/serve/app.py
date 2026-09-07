@@ -196,10 +196,50 @@ def _current_snapshot_result(request: Request) -> SnapshotResult:
     return request.app.state.snapshot_result or _build_and_cache_snapshot(request)
 
 
-# The warm tier changes only when the flusher writes, so hydrating it on every
-# request is pure waste — and expensive waste: tens of thousands of rows rebuilt
-# into Turn objects while the flusher holds the store's connection lock.
-_WARM_TIER_TTL_SECONDS = 120.0
+# Seconds of no use after which the hydrated warm tier is dropped. The warm set
+# (rows below the hot cutoff) cannot change for the life of the process except
+# through forget, so this is an idle timeout, not a time-to-live: a use inside
+# the window extends it, and a use after release rebuilds. A TTL instead forced
+# a rebuild every two minutes while anyone was watching, holding the old and new
+# lists at once, which is where the process's peak memory came from.
+_WARM_TIER_IDLE_SECONDS = 120.0
+
+
+def _touch_warm_cache(request: Request) -> tuple[list, list] | None:
+    """Return the cached warm tier and push its idle deadline out, or None."""
+    state = request.app.state
+    cached = getattr(state, "warm_tier_cache", None)
+    if cached is None:
+        return None
+    _arm_warm_release(request)
+    return cached[1]
+
+
+def _arm_warm_release(request: Request) -> None:
+    """(Re)schedule the idle release of the warm cache."""
+    state = request.app.state
+    handle = getattr(state, "warm_tier_release", None)
+    if handle is not None:
+        handle.cancel()
+    loop = asyncio.get_running_loop()
+    state.warm_tier_release = loop.call_later(_WARM_TIER_IDLE_SECONDS, _release_warm_cache, state)
+
+
+def _release_warm_cache(state) -> None:
+    """Drop the hydrated warm tier and the merged snapshot built from it.
+
+    Serves as both the idle-timer callback and the forget hook. Cancelling the
+    stored handle covers the second case: a forget arriving mid-window would
+    otherwise leave a timer that fires later and clears a cache someone has
+    since rebuilt and is using. Cancelling the handle that is currently firing
+    is a no-op, so the timer case is unaffected.
+    """
+    handle = getattr(state, "warm_tier_release", None)
+    if handle is not None:
+        handle.cancel()
+    state.warm_tier_cache = None
+    state.warm_merged = None
+    state.warm_tier_release = None
 
 
 async def _warm_tier(request: Request) -> tuple[list, list]:
@@ -219,9 +259,9 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
     a breakdown request past a 25-second timeout.
     """
     store = request.app.state.warm_store
-    cached = getattr(request.app.state, "warm_tier_cache", None)
-    if cached is not None and cached[0] > time.monotonic():
-        return cached[1]
+    cached = _touch_warm_cache(request)
+    if cached is not None:
+        return cached
 
     # Single-flight. Without it, every request arriving while a hydration is in
     # flight starts its own: the check above and the fill below were unguarded, and
@@ -230,9 +270,9 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
     # single page load, against a TTL that should permit one every two minutes.
     async with request.app.state.warm_tier_lock:
         # Re-check inside the lock: whoever held it may have just filled the cache.
-        cached = getattr(request.app.state, "warm_tier_cache", None)
-        if cached is not None and cached[0] > time.monotonic():
-            return cached[1]
+        cached = _touch_warm_cache(request)
+        if cached is not None:
+            return cached
 
         cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
         if cutoff is None:
@@ -246,7 +286,10 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
         data = await loop.run_in_executor(None, lambda: store.hydrate_before(cutoff))
         # Expiry runs from completion, not from a reading taken before the work
         # started — on a large store the old form spent much of its own TTL hydrating.
-        request.app.state.warm_tier_cache = (time.monotonic() + _WARM_TIER_TTL_SECONDS, data)
+        # First element is the fill time, kept so the entry stays a 2-tuple;
+        # expiry is the timer's job now, not a deadline comparison.
+        request.app.state.warm_tier_cache = (time.monotonic(), data)
+        _arm_warm_release(request)
         return data
 
 
@@ -287,6 +330,11 @@ async def _snapshot_with_warm_tier(request: Request, *, project: str | None = No
     )
     cached = getattr(request.app.state, "warm_merged", None)
     if cached is not None and cached[0] == stamp:
+        # Serving the merged snapshot counts as USE. Without this the idle
+        # release only ever saw hydrations, so a busy server — which hits this
+        # cache on almost every request — looked idle, dropped its warm tier
+        # mid-use and rebuilt it, the exact churn the idle timeout removes.
+        _arm_warm_release(request)
         return cached[1]
 
     warm_turns, warm_all_sessions = await _warm_tier(request)
@@ -377,6 +425,7 @@ def create_app(
         get_thresholds=lambda: prefs.thresholds,
         history_store=derivation_store,
         flush_queue=flush_queue,
+        on_forget=lambda: _release_warm_cache(app.state),
     )
 
     @asynccontextmanager
@@ -408,6 +457,7 @@ def create_app(
     app.state.snapshot_result = None
     app.state.warm_merged = None
     app.state.warm_tier_cache = None
+    app.state.warm_tier_release = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
     app.state.derivation_store = derivation_store

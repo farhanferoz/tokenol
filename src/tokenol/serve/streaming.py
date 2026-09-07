@@ -182,6 +182,7 @@ class SnapshotBroadcaster:
         heartbeat_s: float = DEFAULT_HEARTBEAT_S,
         history_store: HistoryStore | None = None,
         flush_queue: FlushQueue | None = None,
+        on_forget: Callable[[], None] | None = None,
     ) -> None:
         self._parse_cache = parse_cache
         self._all_projects = all_projects
@@ -191,6 +192,12 @@ class SnapshotBroadcaster:
         self._heartbeat_s = heartbeat_s
         self._history_store = history_store
         self._flush_queue = flush_queue
+        # Called on the event loop after a forget request has been applied to
+        # the store and the hot tier, so app-level caches built from the store
+        # (the hydrated warm tier, the merged snapshot) are dropped in the same
+        # tick. Without it a forget left deleted turns being served from the
+        # warm cache until it happened to be rebuilt.
+        self._on_forget = on_forget
         self._groups: dict[str, _Group] = {}
         self._lock = asyncio.Lock()
         # turns/sessions are period-agnostic, so any producer's freshest result serves all readers.
@@ -283,6 +290,9 @@ class SnapshotBroadcaster:
                     cache._last_ts_by_session.pop(sid, None)
                 cache._hot_turns = [t for t in cache._hot_turns if t.session_id not in evict_set]
                 cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
+
+            if self._on_forget is not None:
+                self._on_forget()
         except Exception:
             log.exception("processing forget request failed")
 
