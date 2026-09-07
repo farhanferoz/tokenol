@@ -1,9 +1,15 @@
 """Server-side parse cache and snapshot builder.
 
+Two derivation paths live here. A server with a history store takes
+_store_backed_derivation: it hydrates the hot tier from the store once, then
+each tick parses only the files whose mtime moved and appends the new turns.
+It does NOT populate ParseCache._store, because it reads each file's events
+exactly once. The fallback path, taken only when there is no store (the CLI
+report commands), re-derives everything from cached events and is the sole
+user of _store and of the derived memo.
+
 Thread-safety invariant: ParseCache._store is mutated only under _lock.
 All code paths that call get_or_parse / purge acquire the lock first.
-REST endpoints and the SSE loop both go through build_snapshot_full, which
-holds the lock for the duration of a single parse sweep.
 """
 
 from __future__ import annotations
@@ -70,6 +76,14 @@ class ParseCache:
     parse keys: when no JSONL file changed since the last build, build_snapshot_full
     can skip the O(total events) re-derivation. The memo is invalidated automatically
     on any get_or_parse miss or any purge that drops a key.
+
+    Scope note: `_store` and the derived memo back the NO-STORE fallback path
+    only. A server with a history store parses edge files directly and retains
+    none of their events, so on that path this instance carries just the
+    hot-tier bookkeeping layered on top as duck-typed attributes
+    (`_hot_turns`, `_hot_cutoff`, `_last_mtime_ns_by_path`, ...), and `size`
+    stays 0. Retaining events there cost roughly 2.1 GB on a real corpus for a
+    reader that did not exist.
     """
 
     _store: dict[tuple[str, int, int], list[RawEvent]] = field(default_factory=dict)

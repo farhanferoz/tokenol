@@ -201,6 +201,7 @@ def _current_snapshot_result(request: Request) -> SnapshotResult:
 # into Turn objects while the flusher holds the store's connection lock.
 _WARM_TIER_TTL_SECONDS = 120.0
 
+
 async def _warm_tier(request: Request) -> tuple[list, list]:
     """Return (turns, sessions) for the part of the store the hot tier does not hold.
 
