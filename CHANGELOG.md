@@ -35,6 +35,26 @@ All notable changes to tokenol are documented here. The format follows
   historical totals could keep counting them for up to two minutes after the deletion had been applied
   to the store and the in-memory tier. The forget path now clears that cache in the same tick.
 
+### Measured
+
+On the corpus these were profiled against (5,109 transcript files, 383,420 persisted turns, 180 MB
+store), a `--persist` server before and after, same machine, same load:
+
+| | before | after |
+|---|---:|---:|
+| resident, steady | 4,539 MB | 2,357 MB |
+| resident, peak | 5,028 MB | 2,492 MB |
+| swapped out | 74 MB | 0 MB |
+
+A 48% reduction in steady-state resident memory and 50% at peak. Caveat on the comparison: the
+"before" figure is a process that had been up 2.8 days, the "after" one settled over 7 minutes, so
+the after figure is a settled reading rather than a long-run one.
+
+Correctness was checked against the store rather than assumed. The dashboard reported 385,229 turns
+all-time and 288,362 over 90 days, a difference of 96,867; the store holds exactly 96,867 turns older
+than 90 days. The two tiers therefore partition the data exactly, with nothing lost at the boundary
+and nothing double-counted.
+
 ### Notes
 
 - DuckDB's buffer pool was measured at 83.5 MiB against its 954 MiB cap on a 180 MB store, so that cap
