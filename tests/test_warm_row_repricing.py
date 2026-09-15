@@ -84,8 +84,13 @@ def test_the_1h_cache_split_survives_the_round_trip(tmp_path: Path) -> None:
     assert turns[0].usage.cache_creation_input_tokens == 4_000
 
 
-def test_an_unpriced_model_still_reads_zero(tmp_path: Path) -> None:
-    """Non-Claude models price at 0 by design; re-pricing must not invent a number."""
+def test_a_persisted_non_claude_row_is_not_read_back(tmp_path: Path) -> None:
+    """Non-Claude models are excluded, not priced at 0.
+
+    Before the live path filtered them, their turns were persisted, so existing
+    stores hold such rows. Reading one back as a $0 turn is what diluted every
+    blended cost-per-token figure.
+    """
     pytest.importorskip("duckdb")
     from tokenol.persistence.store import HistoryStore
 
@@ -94,8 +99,14 @@ def test_an_unpriced_model_still_reads_zero(tmp_path: Path) -> None:
 
     store = HistoryStore(db, read_only=True)
     try:
-        turns, _ = store.hydrate_hot(window_days=3650)
+        hot, hot_sessions = store.hydrate_hot(window_days=3650)
+        warm, warm_sessions = store.hydrate_before(datetime.now(tz=timezone.utc))
+        queried = store.query_turns()
+        session = store.query_session("s-1")
     finally:
         store.close()
 
-    assert turns[0].cost_usd == pytest.approx(0.0)
+    assert (hot, hot_sessions) == ([], [])
+    assert (warm, warm_sessions) == ([], [])
+    assert queried == []
+    assert session is not None and session.turns == []

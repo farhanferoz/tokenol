@@ -4,6 +4,18 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **The dashboard counted non-Claude models, at $0.** Turns from models such as DeepSeek, GLM and
+  Qwen run through Claude Code are meant to be excluded, and the full rebuild and the CLI did exclude
+  them, but the incremental derivation did not — and since 0.8.0 that is also the path every file
+  takes on a store-backed cold start. Their tokens entered every blended total with no cost beside
+  them, so cost per token read low: on one 30-day window unpriced models carried 69% of the input
+  and output tokens. The history store also persisted those turns; they are now dropped on read, so existing
+  stores are corrected without a migration.
+
 ## 0.8.0 — 2026-09-07
 
 ### Changed

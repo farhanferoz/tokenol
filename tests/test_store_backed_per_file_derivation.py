@@ -67,6 +67,18 @@ def test_derivation_runs_once_per_edge_file(store_and_three_files, monkeypatch) 
     assert len({t.session_id for t in live}) == EXPECTED_SESSIONS
 
 
+def test_store_backed_snapshot_excludes_non_claude_models(store_and_three_files, tmp_path) -> None:
+    """The per-file path derives through derive_delta_turns, which must apply the Claude-only rule too."""
+    store = store_and_three_files
+    (tmp_path / "projects" / "gemini.jsonl").write_bytes((FIXTURES_DIR / "gemini.jsonl").read_bytes())
+
+    result = build_snapshot_full(ParseCache(), history_store=store)
+
+    assert "gemini-3-flash" not in {t.model for t in result.turns}
+    live = [t for t in result.turns if not t.session_id.startswith("warm-")]
+    assert len(live) == EXPECTED_TURNS
+
+
 def test_per_file_derivation_enqueues_once_per_tick(store_and_three_files, monkeypatch) -> None:
     """The flusher's count threshold must see the tick's deltas as one batch."""
     store = store_and_three_files

@@ -26,6 +26,7 @@ from pathlib import Path
 import duckdb
 
 from tokenol.model.events import Session, ToolCost, Turn, Usage
+from tokenol.model.registry import is_claude
 
 log = logging.getLogger(__name__)
 
@@ -286,6 +287,16 @@ def _row_to_turn(r: tuple) -> Turn:
     )
 
 
+def _claude_turns(rows: Iterable[tuple]) -> list[Turn]:
+    """Hydrate rows, dropping non-Claude models.
+
+    The live path now excludes them before they are ever queued, but stores
+    written before that hold such rows, and a $0 turn read back dilutes every
+    blended cost-per-token figure.
+    """
+    return [t for t in map(_row_to_turn, rows) if is_claude(t.model)]
+
+
 class HistoryStore:
     """Owns a single DuckDB write connection and the schema."""
 
@@ -538,7 +549,7 @@ class HistoryStore:
                 params,
             ).fetchall()
 
-        turns = [_row_to_turn(r) for r in turn_rows]
+        turns = _claude_turns(turn_rows)
         if not turns:
             return [], []
 
@@ -626,7 +637,7 @@ class HistoryStore:
         """
         with self._lock:
             rows = self._con.execute(sql, params).fetchall()
-        return [_row_to_turn(r) for r in rows]
+        return _claude_turns(rows)
 
     def query_session(self, session_id: str) -> Session | None:
         """Return a Session with all its persisted turns, or None if unknown."""
@@ -643,7 +654,7 @@ class HistoryStore:
                 f"SELECT {self._turn_cols} FROM turns WHERE session_id = ? ORDER BY ts",
                 [sid],
             ).fetchall()
-            turns = [_row_to_turn(r) for r in turn_rows]
+            turns = _claude_turns(turn_rows)
             return Session(
                 session_id=sid,
                 source_file=src or "",

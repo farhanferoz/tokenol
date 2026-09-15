@@ -297,6 +297,8 @@ def derive_delta_turns(
             continue
         if ev.model == "<synthetic>":
             continue
+        if not registry.is_claude(ev.model):
+            continue
         k = dedup_key(ev)
         if k is None:
             loc = (ev.source_file, ev.line_number)

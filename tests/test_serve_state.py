@@ -947,6 +947,23 @@ def test_derive_delta_turns_returns_accepted_passthrough_locations() -> None:
     assert accepted == {("/x.jsonl", 10)}
 
 
+def test_derive_delta_turns_drops_non_claude_models() -> None:
+    """Same Claude-only rule as the full rebuild: a $0 non-Claude turn dilutes every blended rate."""
+    ts = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    events = [
+        _ev(sid="s", msg_id="m1", req_id="r1", ts=ts, line=1),
+        _ev(sid="s", msg_id="m2", req_id="r2", ts=ts, line=2, model="deepseek-v4-flash"),
+        _ev(sid="s", msg_id=None, req_id=None, ts=ts, source="/x.jsonl", line=3, model="glm-5.3"),
+    ]
+    turns, _, _, accepted = derive_delta_turns(
+        events,
+        existing_dedup_keys=set(),
+        existing_passthrough_locations=set(),
+    )
+    assert [t.model for t in turns] == ["claude-sonnet-4-6"]
+    assert accepted == set()
+
+
 def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
     """Snapshot from JSONLs == snapshot from store-only after JSONL deletion.
 
