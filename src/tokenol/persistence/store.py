@@ -25,6 +25,8 @@ from pathlib import Path
 
 import duckdb
 
+from tokenol.ingest.parser import _attribute_cost
+from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import Session, ToolCost, Turn, Usage
 from tokenol.model.registry import is_claude
 
@@ -250,9 +252,6 @@ def _row_to_turn(r: tuple) -> Turn:
     # after the total has moved on. Each stored tool's tokens are the turn's pool
     # times that tool's byte share, so dividing them back out recovers the shares
     # exactly and the parser's own attribution prices them at today's rates.
-    from tokenol.ingest.parser import _attribute_cost
-    from tokenol.metrics.cost import cost_for_turn
-
     turn_cost = cost_for_turn(model, usage) if model else None
     repriced = turn_cost.total_usd if turn_cost is not None else float(cost)
     # Counter({}) still runs update(), whose isinstance dispatch showed up as the

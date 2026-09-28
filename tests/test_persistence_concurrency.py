@@ -25,6 +25,13 @@ from pathlib import Path
 
 import pytest
 
+# A deadlock never resolves, so this bound only has to be far above an honest
+# run. Measured 2026-09-28 on a fast laptop: ~65 s plain, 229 s under coverage
+# on Python 3.10 (no sys.monitoring), which is how CI runs it. The old 120 s
+# per-thread join only passed there when the threads finished in a lucky order,
+# and failed a healthy run as "deadlocked" on the 0.8.3 release commit.
+_DEADLOCK_JOIN_SECONDS = 600
+
 
 def _turns(n: int, offset: int = 0):
     from tokenol.metrics.cost import cost_for_turn
@@ -84,7 +91,7 @@ def test_concurrent_read_and_write_does_not_crash(tmp_path: Path) -> None:
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=120)
+        t.join(timeout=_DEADLOCK_JOIN_SECONDS)
 
     assert not any(t.is_alive() for t in threads), "a store thread deadlocked"
     assert not errors, f"concurrent access raised: {errors!r}"
