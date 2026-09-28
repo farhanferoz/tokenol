@@ -53,6 +53,18 @@ CLAUDE_MODELS: dict[str, ModelEntry] = {
         "cache_write_1h": 20.00,
         "cache_read": 1.00,
     },
+    # Opus 5.5 — cheaper than Opus 5 on every rate, and reads cache at 0.05x
+    # input ($0.20/MTok) rather than the usual 0.1x.
+    # Verified 2026-09-28 against platform.claude.com/docs/en/about-claude/pricing
+    "claude-opus-5-5": {
+        "family": "opus",
+        "context": 1_000_000,
+        "input": 4.00,
+        "output": 20.00,
+        "cache_write": 5.00,
+        "cache_write_1h": 8.00,
+        "cache_read": 0.20,
+    },
     # Opus 5
     "claude-opus-5": {
         "family": "opus",

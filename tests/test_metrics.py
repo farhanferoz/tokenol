@@ -446,6 +446,30 @@ def test_cost_opus_5_has_own_entry():
     assert tc.assumptions == []
 
 
+def test_opus_5_5_has_own_entry_not_opus_5_fallback():
+    """Opus 5.5 is cheaper than Opus 5 on every rate and reads cache at 0.05x
+    input, not 0.1x. Resolving it through the opus family fallback overcharged it
+    by 25% on input/output and 2.5x on cache reads, flagged as an estimate."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    # Verified 2026-09-28 against platform.claude.com/docs/en/about-claude/pricing.
+    verified_rates = {"input": 4.00, "output": 20.00, "cache_write": 5.00, "cache_write_1h": 8.00, "cache_read": 0.20}
+    entry = CLAUDE_MODELS["claude-opus-5-5"]
+    assert {k: entry[k] for k in verified_rates} == verified_rates
+
+    for raw in ("claude-opus-5-5", "claude-opus-5-5[1m]"):
+        resolved, tags = resolve(raw)
+        assert resolved == entry, raw
+        assert tags == [], raw
+
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    tc = cost_for_turn("claude-opus-5-5", usage)
+    expected = (1000 * 4.00 + 200 * 20.00 + 500 * 0.20 + 100 * 5.00) / _M
+    assert abs(tc.total_usd - expected) < _COST_EPS
+    assert tc.assumptions == []
+
+
 def test_fable_5_1_cache_read_is_quarter_of_fable_5():
     """Fable 5.1 reads cache at 0.025x input ($0.25/MTok), not the usual 0.1x
     ($1.00/MTok). Falling back to the Fable 5 entry overcharges reads 4x."""
