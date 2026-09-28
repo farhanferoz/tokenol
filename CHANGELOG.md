@@ -4,6 +4,18 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.2 — 2026-09-28
+
+### Fixed
+
+- **Claude Opus 5.5 was priced as Opus 5.** `claude-opus-5-5` had no pricing entry, so it resolved
+  through the Opus family fallback and was flagged as an estimated price. Opus 5.5 is cheaper on every
+  rate and reads cache at 0.05x input rather than 0.1x, so its turns were overstated by 25% on input
+  and output and 2.5x on cache reads. It now has its own entry (verified against Anthropic's pricing
+  page 2026-09-28): $4 input, $20 output, $5 5-minute cache write, $8 1-hour cache write, $0.20 cache
+  read, per million tokens. Persisted rows are repriced on read, so historical totals correct
+  themselves.
+
 ## 0.8.1 — 2026-09-15
 
 ### Fixed
