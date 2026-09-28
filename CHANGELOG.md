@@ -6,6 +6,14 @@ All notable changes to tokenol are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **A banner on the dashboard when a model is missing from the price list.** A new Claude model
+  is priced as its family's fallback until tokenol gains an entry for it, and the only sign used to
+  be a small "estimated" tag. Opus 5.5 ran that way for five days at about twice its real cost. The
+  overview now names each such model and the rates it is being priced at. Once tokenol is updated,
+  every stored turn is repriced on read, so past days correct themselves.
+
 ### Fixed
 
 - **The Tools view kept stale prices after a pricing correction.** Persisted turns were repriced on

@@ -41,6 +41,7 @@ _P5_TOP_LEVEL_KEYS = {
     "models",
     "recent_activity",
     "assumptions_summary",
+    "estimated_models",
 }
 
 
@@ -334,6 +335,33 @@ def test_snapshot_tiles_shape(tmp_path: Path) -> None:
         assert "delta_ratio" in tile, f"tiles.{name} missing 'delta_ratio'"
         assert "baseline_label" in tile, f"tiles.{name} missing 'baseline_label'"
         assert "goal" in tile, f"tiles.{name} missing 'goal'"
+
+
+def test_snapshot_lists_models_priced_by_fallback(tmp_path: Path) -> None:
+    """A model missing from the price list must be named, with what it is priced as.
+
+    Opus 5.5 ran for five days priced as Opus 5 at twice its real cost, and the
+    only sign was a small "estimated" tag. The dashboard banner reads this list.
+    """
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_text((FIXTURES_DIR / "basic.jsonl").read_text().replace("claude-opus-4-7", "claude-opus-9-9"))
+
+    with _mock_dirs(tmp_path):
+        result = build_snapshot_full(ParseCache())
+
+    assert result.payload["estimated_models"] == [{"model": "claude-opus-9-9", "priced_as": "claude-opus-5"}]
+
+
+def test_snapshot_estimated_models_empty_when_all_priced(tmp_path: Path) -> None:
+    dst = tmp_path / "projects" / "sess-001.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+
+    with _mock_dirs(tmp_path):
+        result = build_snapshot_full(ParseCache())
+
+    assert result.payload["estimated_models"] == []
 
 
 def test_snapshot_models_shape(tmp_path: Path) -> None:

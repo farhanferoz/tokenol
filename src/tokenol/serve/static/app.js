@@ -178,6 +178,7 @@ function _applyPayload(payload) {
 function _render() {
   _renderTopbar(S);
   _renderTiles(S);
+  _renderPriceAlert(S);
   _renderAnomalyStrip(S);
   _renderHourly(S);
   _renderDaily(S);
@@ -303,6 +304,34 @@ function _renderAnomalyStrip(payload) {
   div.append(glyph, msg, arrow);
   if (a.drilldown_href) div.addEventListener('click', () => { location.href = a.drilldown_href; });
   _anomalyEl.replaceChildren(div);
+}
+
+// ---- price alert ----
+// One amber line per model missing from the price list. Its cost is a
+// fallback estimate until tokenol gains an entry; stored turns are repriced on
+// read, so updating tokenol corrects every past day as well.
+const _priceAlertEl = $('price-alert');
+let   _lastPriceAlertKey = '';
+
+function _renderPriceAlert(payload) {
+  if (!_priceAlertEl) return;
+  const models = payload.estimated_models || [];
+  const key = models.map(m => `${m.model}>${m.priced_as}`).join(',');
+  if (key === _lastPriceAlertKey) return;
+  _lastPriceAlertKey = key;
+  _priceAlertEl.replaceChildren(...models.map(m => {
+    const div = document.createElement('div');
+    div.className = 'anomaly fade-in';
+    div.setAttribute('role', 'alert');
+    const glyph = document.createElement('span'); glyph.className = 'glyph'; glyph.textContent = '⚠';
+    const msg   = document.createElement('span'); msg.className   = 'msg';
+    msg.textContent = `${m.model} is not in tokenol's price list, so its cost is estimated at `
+      + `${m.priced_as} rates. Update tokenol once it adds this model; past days are corrected automatically.`;
+    const arrow = document.createElement('span'); arrow.className = 'arrow'; arrow.textContent = 'inspect →';
+    div.append(glyph, msg, arrow);
+    div.addEventListener('click', () => { location.href = `/model/${encodeURIComponent(m.model)}`; });
+    return div;
+  }));
 }
 
 // ---- filter state ----

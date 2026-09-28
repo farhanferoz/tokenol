@@ -63,7 +63,7 @@ from tokenol.metrics.rollups import (
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.metrics.verdicts import compute_verdict
 from tokenol.model.events import EMPTY_ASSUMPTIONS, RawEvent, Session, Turn, Usage
-from tokenol.model.pricing import context_window
+from tokenol.model.pricing import FAMILY_FALLBACKS, context_window
 
 log = logging.getLogger(__name__)
 
@@ -1190,6 +1190,7 @@ def build_snapshot_full(
             "interrupted_turn_skipped": _fired.get(AssumptionTag.INTERRUPTED_TURN_SKIPPED, 0),
             "gemini_unpriced": _fired.get(AssumptionTag.GEMINI_UNPRICED, 0),
         },
+        "estimated_models": estimated_models(all_turns),
     }
 
     return SnapshotResult(payload=payload, turns=all_turns, sessions=all_sessions)
@@ -1822,6 +1823,21 @@ def model_price_status(model: str | None) -> str:
     if AssumptionTag.UNKNOWN_MODEL_FALLBACK in tags:
         return "estimated"
     return "known"
+
+
+def estimated_models(turns: list[Turn]) -> list[dict]:
+    """Models in *turns* that are missing from the price list, and what each is priced as.
+
+    Feeds the dashboard banner. A missing model is priced as its family's
+    fallback until the table gains an entry, at which point every stored turn
+    is repriced on read, so the banner is what prompts that correction.
+    """
+    out = []
+    for model in sorted({t.model for t in turns if t.model}):
+        if model_price_status(model) == "estimated":
+            entry, _ = registry.resolve(model)
+            out.append({"model": model, "priced_as": FAMILY_FALLBACKS[entry["family"]]})
+    return out
 
 
 def billable_token_totals(turns: list[Turn]) -> tuple[float, float]:
