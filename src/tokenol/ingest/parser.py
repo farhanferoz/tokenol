@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenol.enums import AssumptionTag
-from tokenol.metrics.cost import cost_for_turn
+from tokenol.metrics.cost import TurnCost, cost_for_turn
 from tokenol.model.events import (
     EMPTY_SKILL_NAMES,
     EMPTY_TOOL_COSTS,
@@ -168,6 +168,7 @@ def _attribute_cost(
     usage: Usage,
     output_shares: dict[str, float],
     input_shares: dict[str, float],
+    turn_cost: TurnCost | None = None,
 ) -> tuple[dict[str, ToolCost], float, float, float]:
     """Split a turn's four cost components by the given byte shares.
 
@@ -182,9 +183,12 @@ def _attribute_cost(
     negative values; they do NOT rescale per-tool amounts if a caller violates
     the precondition.
 
+    `turn_cost` may be passed in by a caller that already priced the turn.
+
     Returns (tool_costs, unattributed_input_tokens, unattributed_output_tokens, unattributed_cost_usd).
     """
-    turn_cost = cost_for_turn(model, usage)
+    if turn_cost is None:
+        turn_cost = cost_for_turn(model, usage)
 
     input_token_pool = usage.input_token_pool
     input_cost_pool = turn_cost.input_usd + turn_cost.cache_read_usd + turn_cost.cache_creation_usd

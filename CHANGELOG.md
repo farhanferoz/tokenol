@@ -4,6 +4,16 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **The Tools view kept stale prices after a pricing correction.** Persisted turns were repriced on
+  read, but only their totals: each turn's per-tool split and unattributed remainder came back at the
+  rates in force when the row was written. Both are now repriced from the stored token shares, so
+  the split always adds up to the repriced total. On a 487,196-turn store this adds about 3 s to a
+  full hydration (17 s to 20 s).
+
 ## 0.8.2 — 2026-09-28
 
 ### Fixed

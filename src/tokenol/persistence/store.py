@@ -245,9 +245,16 @@ def _row_to_turn(r: tuple) -> Turn:
     # input the live path has. Rows written before v4 default cc_1h to 0 and
     # therefore price exactly as they did before — that split is genuinely lost
     # and this does not invent it — but they still pick up every other correction.
+    #
+    # The per-tool split is repriced too, or the Tools view keeps every stale rate
+    # after the total has moved on. Each stored tool's tokens are the turn's pool
+    # times that tool's byte share, so dividing them back out recovers the shares
+    # exactly and the parser's own attribution prices them at today's rates.
+    from tokenol.ingest.parser import _attribute_cost
     from tokenol.metrics.cost import cost_for_turn
 
-    repriced = cost_for_turn(model, usage).total_usd if model else float(cost)
+    turn_cost = cost_for_turn(model, usage) if model else None
+    repriced = turn_cost.total_usd if turn_cost is not None else float(cost)
     # Counter({}) still runs update(), whose isinstance dispatch showed up as the
     # single hottest leaf during hydration. Counter() with no argument skips it,
     # and most rows have neither map populated.
@@ -264,6 +271,14 @@ def _row_to_turn(r: tuple) -> Turn:
                 output_tokens=float(tc_data.get("o", 0.0)),
                 cost_usd=float(tc_data.get("c", 0.0)),
             )
+    unattr_cost = float(unattr_cost or 0.0)
+    if turn_cost is not None:
+        pool = usage.input_token_pool
+        in_shares = {n: tc.input_tokens / pool for n, tc in tool_costs.items()} if pool else {}
+        out_shares = {n: tc.output_tokens / out for n, tc in tool_costs.items()} if out else {}
+        repriced_tools, _, _, unattr_cost = _attribute_cost(model, usage, out_shares, in_shares, turn_cost)
+        for name, tc in tool_costs.items():
+            tc.cost_usd = repriced_tools[name].cost_usd if name in repriced_tools else 0.0
     return Turn(
         dedup_key=dedup_key,
         timestamp=ts,
@@ -281,7 +296,7 @@ def _row_to_turn(r: tuple) -> Turn:
         tool_costs=tool_costs,
         unattributed_input_tokens=float(unattr_in or 0.0),
         unattributed_output_tokens=float(unattr_out or 0.0),
-        unattributed_cost_usd=float(unattr_cost or 0.0),
+        unattributed_cost_usd=unattr_cost,
         attribution_skill=attribution_skill,
         skill_names=skill_names,
     )

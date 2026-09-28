@@ -15,6 +15,7 @@ import duckdb
 import pytest
 
 from tokenol.enums import AssumptionTag
+from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import Session, Turn, Usage
 from tokenol.persistence.store import FLUSH_CHUNK_SIZE, HistoryStore
 
@@ -458,10 +459,15 @@ def test_tool_costs_round_trip(tmp_path: Path) -> None:
         assert rt.tool_name == "Read"
         assert abs(rt.input_tokens - 42.5) < 1e-9
         assert abs(rt.output_tokens - 12.75) < 1e-9
-        assert abs(rt.cost_usd - 0.078) < 1e-9
         assert abs(r.unattributed_input_tokens - 7.5) < 1e-9
         assert abs(r.unattributed_output_tokens - 1.25) < 1e-9
-        assert abs(r.unattributed_cost_usd - 0.045) < 1e-9
+        # Stored costs are repriced at today's rates from the stored token shares
+        # (42.5 of a 130-token input pool, 12.75 of 50 output tokens), so the
+        # split still adds up to the repriced turn total.
+        now = cost_for_turn("claude-opus-4-7", original.usage)
+        in_pool_usd = now.input_usd + now.cache_read_usd + now.cache_creation_usd
+        assert abs(rt.cost_usd - (in_pool_usd * 42.5 / 130 + now.output_usd * 12.75 / 50)) < 1e-9
+        assert abs(rt.cost_usd + r.unattributed_cost_usd - r.cost_usd) < 1e-9
     finally:
         store.close()
 
