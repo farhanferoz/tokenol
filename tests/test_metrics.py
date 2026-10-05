@@ -470,6 +470,28 @@ def test_opus_5_5_has_own_entry_not_opus_5_fallback():
     assert tc.assumptions == []
 
 
+def test_sonnet_5_5_is_priced_as_itself_not_by_fallback():
+    """Sonnet 5.5 had no entry, so it resolved through the sonnet family
+    fallback and every cost was tagged as an estimate. Its rates happen to equal
+    the Sonnet 5 entry's, so the figure was right only by coincidence."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    # Verified 2026-10-05 against platform.claude.com/docs/en/about-claude/pricing.
+    verified_rates = {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_write_1h": 4.00, "cache_read": 0.20}
+    entry = CLAUDE_MODELS["claude-sonnet-5-5"]
+    assert {k: entry[k] for k in verified_rates} == verified_rates
+
+    for raw in ("claude-sonnet-5-5", "claude-sonnet-5-5[1m]"):
+        resolved, tags = resolve(raw)
+        assert resolved == entry, raw
+        assert tags == [], raw
+
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
+    tc = cost_for_turn("claude-sonnet-5-5", usage)
+    assert tc.assumptions == []
+
+
 def test_fable_5_1_cache_read_is_quarter_of_fable_5():
     """Fable 5.1 reads cache at 0.025x input ($0.25/MTok), not the usual 0.1x
     ($1.00/MTok). Falling back to the Fable 5 entry overcharges reads 4x."""

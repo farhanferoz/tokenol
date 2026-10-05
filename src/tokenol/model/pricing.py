@@ -160,6 +160,19 @@ CLAUDE_MODELS: dict[str, ModelEntry] = {
         "cache_write_1h": 30.00,
         "cache_read": 1.50,
     },
+    # Sonnet 5.5. Same rates as the Sonnet 5 entry below, but its own entry so a
+    # Sonnet 5.5 turn is priced as known, not tagged as a family-fallback guess.
+    # Verified 2026-10-05 against platform.claude.com/docs/en/about-claude/pricing
+    # (rates) and .../models/overview (1M context).
+    "claude-sonnet-5-5": {
+        "family": "sonnet",
+        "context": 1_000_000,
+        "input": 2.00,
+        "output": 10.00,
+        "cache_write": 2.50,
+        "cache_write_1h": 4.00,
+        "cache_read": 0.20,
+    },
     # Sonnet 5 (introductory pricing through 2026-08-31 — see module docstring)
     "claude-sonnet-5": {
         "family": "sonnet",
