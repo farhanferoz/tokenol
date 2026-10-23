@@ -8,7 +8,7 @@ pytest.importorskip("duckdb")
 
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
@@ -18,6 +18,7 @@ from tokenol.persistence.store import HistoryStore
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
+    _build_turns_and_sessions,
     _recompute_excl_cache_read,
     build_breakdown_tools,
     build_project_detail,
@@ -911,6 +912,27 @@ def _ev(
         stop_reason="end_turn",
         cwd=cwd,
     )
+
+
+@pytest.mark.parametrize("build", ["full", "delta"])
+def test_server_turn_builders_price_each_turn_on_its_own_day(build: str) -> None:
+    """Both server-side Turn builders must price by the turn's timestamp. Sonnet 5.5
+    cache reads dropped from $0.20 to $0.10/MTok on 2026-10-07; a cold start runs
+    through derive_delta_turns, so missing it there would undo the fix on restart."""
+    cut = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    events = []
+    for n, ts in enumerate((cut - timedelta(minutes=1), cut + timedelta(minutes=1)), start=1):
+        ev = _ev(sid="s", msg_id=f"m{n}", req_id=f"r{n}", ts=ts, line=n, model="claude-sonnet-5-5")
+        ev.usage = Usage(input_tokens=10, output_tokens=5, cache_read_input_tokens=1_000_000)
+        events.append(ev)
+    if build == "full":
+        turns, _, _ = _build_turns_and_sessions(events)
+    else:
+        turns, _, _, _ = derive_delta_turns(events, set(), set())
+
+    before, after = sorted(turns, key=lambda t: t.timestamp)
+    assert before.cost_usd == pytest.approx(cost_for_turn("claude-sonnet-5-5", before.usage, at=before.timestamp).total_usd)
+    assert before.cost_usd - after.cost_usd == pytest.approx(1_000_000 * (0.20 - 0.10) / 1_000_000)
 
 
 def test_derive_delta_turns_skips_known_dedup_keys() -> None:

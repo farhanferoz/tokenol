@@ -346,7 +346,7 @@ def build_model_rollups(turns: list[Turn]) -> list[ModelRollup]:
             b["cache_read_tokens"] += turn.usage.cache_read_input_tokens
             b["cache_creation_tokens"] += turn.usage.cache_creation_input_tokens
             b["cost_usd"] += turn.cost_usd
-            tc = cost_for_turn(turn.model, turn.usage)
+            tc = cost_for_turn(turn.model, turn.usage, at=turn.timestamp)
             b["input_usd"] += tc.input_usd
             b["output_usd"] += tc.output_usd
             b["cache_read_usd"] += tc.cache_read_usd

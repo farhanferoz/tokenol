@@ -278,7 +278,7 @@ The `tokenol daily` report shows these cost/cache efficiency ratios:
 
 ## Pricing
 
-Flat per-model rates (no 1M-token tier surcharge — matches ccusage's default behaviour). The current registry lives in `src/tokenol/metrics/cost.py`. When a turn's model isn't in the registry, `tokenol` records an `UNKNOWN_MODEL_FALLBACK` assumption tag and uses a conservative default; run with `--show-assumptions` or `--strict` to surface these.
+Per-model rates from Anthropic's pricing page, in `src/tokenol/model/pricing.py`. Every model prices flat at all context sizes except Claude Haiku 5.5, where a request whose prompt (input plus cache reads and writes) is over 100,000 tokens pays the higher long-prompt rates. Each turn is priced at the rates in force on the day it ran, so a price change (such as Sonnet 5.5's cache-read cut on 2026-10-07) applies from its date onward and leaves earlier turns at the rate they were billed at. When a turn's model isn't in the registry, `tokenol` records an `UNKNOWN_MODEL_FALLBACK` assumption tag and uses a conservative default; run with `--show-assumptions` or `--strict` to surface these.
 
 See [`docs/METRICS.md`](docs/METRICS.md) for metric definitions and [`docs/ASSUMPTIONS.md`](docs/ASSUMPTIONS.md) for the full list of assumption tags.
 

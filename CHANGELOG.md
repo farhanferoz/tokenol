@@ -4,6 +4,32 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.4 — 2026-10-23
+
+### Added
+
+- **Claude Haiku 5.5 pricing, including its prompt-length tiers.** `claude-haiku-5-5` had no
+  entry and was priced as Haiku 4.5, ten times its real rate for ordinary prompts. It is also the
+  first Claude model priced by prompt length: a request whose prompt is over 100,000 tokens,
+  counting cache reads and cache writes as well as plain input, pays five times as much on every
+  rate, output included. tokenol now prices each request on its own prompt length: $0.10 input,
+  $0.50 output, $0.125 5-minute cache write, $0.20 1-hour cache write and $0.01 cache read per
+  million tokens up to the threshold, and $0.50 / $2.50 / $0.625 / $1 / $0.05 over it (verified
+  against Anthropic's pricing page 2026-10-23).
+
+### Fixed
+
+- **Sonnet 5.5 cache reads were priced at $0.20 per million tokens after Anthropic cut them to
+  $0.10.** The cut took effect on 2026-10-07 and left every other rate unchanged. Turns are now
+  priced at the rate in force on the day they ran, so turns from 7 October onward use $0.10 and
+  earlier turns keep the $0.20 they were billed at. Pricing every turn at today's rate would have
+  understated the earlier ones. Sonnet 5.5 also has its own price entry now, instead of borrowing
+  Sonnet 5's and being labelled an estimate.
+- **The cache-savings figure now uses the same rates as the turn's cost**, including the
+  long-prompt and dated rates above.
+
+Stored history is repriced when it is read, so past days correct themselves after an upgrade.
+
 ## 0.8.3 — 2026-09-28
 
 ### Added

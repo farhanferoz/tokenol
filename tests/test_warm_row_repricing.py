@@ -179,3 +179,64 @@ def test_per_tool_split_is_repriced_on_read(tmp_path: Path) -> None:
     assert got.unattributed_cost_usd == pytest.approx(now_in_pool * 0.25 + now.output_usd * 0.4)
     split_total = sum(tc.cost_usd for tc in got.tool_costs.values()) + got.unattributed_cost_usd
     assert split_total == pytest.approx(got.cost_usd), "split no longer adds up to the turn total"
+
+
+def test_stored_rows_reprice_at_the_rate_of_their_own_day(tmp_path: Path) -> None:
+    """History on disk must follow dated and prompt-length pricing, not just today's flat rate.
+
+    Sonnet 5.5 rows were persisted at $0.20 cache reads; Anthropic cut that to $0.10
+    on 2026-10-07, so rows after the cut must drop and rows before it must not. A
+    Haiku 5.5 row whose prompt is over 100k tokens must reprice at the long-prompt
+    rates. Each row's per-tool split must still add up to its repriced total.
+    """
+    pytest.importorskip("duckdb")
+    from tokenol.model.events import ToolCost
+    from tokenol.persistence.store import HistoryStore
+
+    cut = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    usage = Usage(input_tokens=1_000, output_tokens=500, cache_read_input_tokens=200_000, cache_creation_input_tokens=4_000)
+    rows = {
+        "sonnet-before": ("claude-sonnet-5-5", cut - timedelta(hours=1)),
+        "sonnet-after": ("claude-sonnet-5-5", cut + timedelta(hours=1)),
+        "haiku-long": ("claude-haiku-5-5", cut + timedelta(days=10)),
+    }
+    turns = [
+        Turn(
+            dedup_key=key,
+            timestamp=ts,
+            session_id="s-1",
+            model=model,
+            usage=usage,
+            is_sidechain=False,
+            stop_reason="end_turn",
+            cost_usd=999.0,  # deliberately stale
+            tool_costs={"Bash": ToolCost(tool_name="Bash", input_tokens=usage.input_token_pool / 2, output_tokens=500, cost_usd=999.0)},
+            unattributed_input_tokens=usage.input_token_pool / 2,
+            unattributed_cost_usd=999.0,
+        )
+        for key, (model, ts) in rows.items()
+    ]
+    db = tmp_path / "history.duckdb"
+    store = HistoryStore(db)
+    store.flush(turns, [Session(session_id="s-1", source_file="", is_sidechain=False, cwd="/x", turns=turns)])
+    store.close()
+
+    store = HistoryStore(db, read_only=True)
+    try:
+        got, _ = store.hydrate_hot(window_days=3650)
+    finally:
+        store.close()
+
+    by_key = {t.dedup_key: t for t in got}
+    assert by_key.keys() == rows.keys()
+    for key, (model, ts) in rows.items():
+        t = by_key[key]
+        assert t.cost_usd == pytest.approx(cost_for_turn(model, usage, at=ts).total_usd), key
+        split = sum(tc.cost_usd for tc in t.tool_costs.values()) + t.unattributed_cost_usd
+        assert split == pytest.approx(t.cost_usd), key
+    reads = usage.cache_read_input_tokens
+    assert by_key["sonnet-before"].cost_usd - by_key["sonnet-after"].cost_usd == pytest.approx(reads * (0.20 - 0.10) / 1e6)
+    # Haiku 5.5 over the line: every rate is the long-prompt one ($0.50 in, $2.50 out,
+    # $0.625 5-minute write, $0.05 read).
+    expected_haiku = (1_000 * 0.50 + 500 * 2.50 + 4_000 * 0.625 + reads * 0.05) / 1e6
+    assert by_key["haiku-long"].cost_usd == pytest.approx(expected_haiku)

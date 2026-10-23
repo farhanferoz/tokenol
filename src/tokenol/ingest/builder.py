@@ -19,7 +19,7 @@ def build_turns(paths: list[Path]) -> list[Turn]:
         is_interrupted = ev.usage is None
         usage = ev.usage if ev.usage is not None else Usage()
 
-        tc = cost_for_turn(ev.model, usage)
+        tc = cost_for_turn(ev.model, usage, at=ev.timestamp)
         tags.extend(t for t in tc.assumptions if t not in tags)
         assumption_recorder.record(tags)
 

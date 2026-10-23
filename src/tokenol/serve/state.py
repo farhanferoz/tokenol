@@ -209,7 +209,7 @@ def _build_turns_and_sessions(
         if is_interrupted:
             tags.append(AssumptionTag.INTERRUPTED_TURN_SKIPPED)
 
-        tc = cost_for_turn(ev.model, usage)
+        tc = cost_for_turn(ev.model, usage, at=ev.timestamp)
         tags.extend(t for t in tc.assumptions if t not in tags)
         for tag in tags:
             fired[tag] += 1
@@ -322,7 +322,7 @@ def derive_delta_turns(
         if is_interrupted:
             tags.append(AssumptionTag.INTERRUPTED_TURN_SKIPPED)
 
-        tc = cost_for_turn(ev.model, usage)
+        tc = cost_for_turn(ev.model, usage, at=ev.timestamp)
         tags.extend(t for t in tc.assumptions if t not in tags)
         for tag in tags:
             fired[tag] += 1
@@ -1578,7 +1578,7 @@ def _recompute_excl_cache_read(
     input_token_pool = usage.input_token_pool
     output_token_count = usage.output_tokens
     if turn_cost is None:
-        turn_cost = cost_for_turn(turn.model, usage)
+        turn_cost = cost_for_turn(turn.model, usage, at=turn.timestamp)
     input_pool_excl = turn_cost.input_usd + turn_cost.cache_creation_usd
 
     out: dict[str, float] = {}
@@ -1625,7 +1625,7 @@ def build_breakdown_tools(
             tokens_by_tool.update({n: c for n, c in t.tool_names.items() if n != SKILL_TOOL})
 
         if excl:
-            turn_cost = cost_for_turn(t.model, t.usage)
+            turn_cost = cost_for_turn(t.model, t.usage, at=t.timestamp)
             per_tool = _recompute_excl_cache_read(t, turn_cost)
             per_tool.pop(UNKNOWN_TOOL, None)
             # Clamp at 0 to swallow float drift (~1e-16 from total_usd

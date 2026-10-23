@@ -252,7 +252,7 @@ def _row_to_turn(r: tuple) -> Turn:
     # after the total has moved on. Each stored tool's tokens are the turn's pool
     # times that tool's byte share, so dividing them back out recovers the shares
     # exactly and the parser's own attribution prices them at today's rates.
-    turn_cost = cost_for_turn(model, usage) if model else None
+    turn_cost = cost_for_turn(model, usage, at=ts) if model else None
     repriced = turn_cost.total_usd if turn_cost is not None else float(cost)
     # Counter({}) still runs update(), whose isinstance dispatch showed up as the
     # single hottest leaf during hydration. Counter() with no argument skips it,

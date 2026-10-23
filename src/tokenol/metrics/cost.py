@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from tokenol.enums import AssumptionTag
 from tokenol.model import registry
 from tokenol.model.events import Turn, Usage
+from tokenol.model.pricing import ModelEntry, Rates
 
 _M = 1_000_000  # tokens per pricing unit
 
@@ -23,7 +24,24 @@ class TurnCost:
     assumptions: list[AssumptionTag]
 
 
-def cost_for_turn(model: str | None, usage: Usage) -> TurnCost:
+def _rates(entry: ModelEntry, usage: Usage, at: datetime | None) -> Rates:
+    """The rates *usage* bills at: the ones in force at *at*, for its prompt length.
+
+    *at* None means today's price list. A request over a long-prompt threshold
+    pays the long-prompt rates on every component, output included.
+    """
+    earlier = entry.get("earlier")
+    if earlier is not None and at is not None and at < earlier["until"]:
+        return earlier
+    long_prompt = entry.get("long_prompt")
+    if long_prompt is not None and usage.input_token_pool > long_prompt["threshold"]:
+        return long_prompt
+    return entry
+
+
+def cost_for_turn(model: str | None, usage: Usage, *, at: datetime | None = None) -> TurnCost:
+    """Price one request. Pass its timestamp as *at* so a model whose price has
+    since changed bills at the rate in force that day; None prices it at today's."""
     tags: list[AssumptionTag] = []
 
     if model:
@@ -36,9 +54,10 @@ def cost_for_turn(model: str | None, usage: Usage) -> TurnCost:
     if entry is None:
         return TurnCost(0, 0, 0, 0, 0, tags)
 
-    input_usd = usage.input_tokens * entry["input"] / _M
-    output_usd = usage.output_tokens * entry["output"] / _M
-    cache_read_usd = usage.cache_read_input_tokens * entry["cache_read"] / _M
+    rates = _rates(entry, usage, at)
+    input_usd = usage.input_tokens * rates["input"] / _M
+    output_usd = usage.output_tokens * rates["output"] / _M
+    cache_read_usd = usage.cache_read_input_tokens * rates["cache_read"] / _M
 
     # Cache-creation tokens split by TTL tier: 1-hour writes bill at 2x input,
     # 5-minute writes at 1.25x. Clamp the 1h share to the total as a defensive
@@ -46,7 +65,7 @@ def cost_for_turn(model: str | None, usage: Usage) -> TurnCost:
     # not an internal invariant) — Anthropic's own payloads never violate it.
     cache_1h_tokens = min(usage.cache_creation_1h_input_tokens, usage.cache_creation_input_tokens)
     cache_5m_tokens = usage.cache_creation_input_tokens - cache_1h_tokens
-    cache_creation_usd = cache_5m_tokens * entry["cache_write"] / _M + cache_1h_tokens * entry["cache_write_1h"] / _M
+    cache_creation_usd = cache_5m_tokens * rates["cache_write"] / _M + cache_1h_tokens * rates["cache_write_1h"] / _M
     total = input_usd + output_usd + cache_read_usd + cache_creation_usd
 
     return TurnCost(input_usd, output_usd, cache_read_usd, cache_creation_usd, total, tags)
@@ -57,8 +76,9 @@ def cache_saved_usd(turns: Iterable[Turn]) -> float:
 
     For each turn with a resolvable model: computes what its cache_read tokens
     would have cost at that model's full input price, minus what they actually
-    cost at its cache_read price. Turns with model=None, an unknown model, or
-    zero cache_read_input_tokens contribute 0.
+    cost at its cache_read price, both at the rates the turn billed at. Turns
+    with model=None, an unknown model, or zero cache_read_input_tokens
+    contribute 0.
     """
     total = 0.0
     for turn in turns:
@@ -68,8 +88,9 @@ def cache_saved_usd(turns: Iterable[Turn]) -> float:
         entry, _tags = registry.resolve(turn.model)
         if entry is None:
             continue
-        full_input_usd = cache_read * entry["input"] / _M
-        actual_cache_usd = cache_read * entry["cache_read"] / _M
+        rates = _rates(entry, turn.usage, turn.timestamp)
+        full_input_usd = cache_read * rates["input"] / _M
+        actual_cache_usd = cache_read * rates["cache_read"] / _M
         total += full_input_usd - actual_cache_usd
     return total
 

@@ -169,6 +169,7 @@ def _attribute_cost(
     output_shares: dict[str, float],
     input_shares: dict[str, float],
     turn_cost: TurnCost | None = None,
+    at: datetime | None = None,
 ) -> tuple[dict[str, ToolCost], float, float, float]:
     """Split a turn's four cost components by the given byte shares.
 
@@ -183,12 +184,13 @@ def _attribute_cost(
     negative values; they do NOT rescale per-tool amounts if a caller violates
     the precondition.
 
-    `turn_cost` may be passed in by a caller that already priced the turn.
+    `turn_cost` may be passed in by a caller that already priced the turn;
+    otherwise it is priced here at `at`, the turn's timestamp.
 
     Returns (tool_costs, unattributed_input_tokens, unattributed_output_tokens, unattributed_cost_usd).
     """
     if turn_cost is None:
-        turn_cost = cost_for_turn(model, usage)
+        turn_cost = cost_for_turn(model, usage, at=at)
 
     input_token_pool = usage.input_token_pool
     input_cost_pool = turn_cost.input_usd + turn_cost.cache_read_usd + turn_cost.cache_creation_usd
@@ -280,6 +282,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 attribution_skill = None
 
             usage = _parse_usage(msg)
+            timestamp = _parse_timestamp(ev.get("timestamp", ""))
             model = ev.get("model") or msg.get("model")
             if model:
                 model = sys.intern(model)
@@ -320,7 +323,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 output_shares, _ = _output_byte_shares(block_sizes)
                 total_ctx_bytes = sum(bytes_in_context_by_tool.values()) + non_tool_bytes_in_context
                 input_shares = {name: b / total_ctx_bytes for name, b in bytes_in_context_by_tool.items()} if total_ctx_bytes > 0 else {}
-                tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(model, usage, output_shares, input_shares)
+                tool_costs, unattr_in, unattr_out, unattr_cost = _attribute_cost(model, usage, output_shares, input_shares, at=timestamp)
 
             # Fold this line's content into the running tallies so the next
             # assistant turn can attribute its input side against them.
@@ -354,7 +357,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
                 request_id=ev.get("requestId"),
                 message_id=msg.get("id"),
                 uuid=ev.get("uuid"),
-                timestamp=_parse_timestamp(ev.get("timestamp", "")),
+                timestamp=timestamp,
                 usage=usage,
                 model=model,
                 is_sidechain=ev.get("isSidechain", is_sidechain),

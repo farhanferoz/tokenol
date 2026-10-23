@@ -108,7 +108,7 @@ def _bucket_turns(
             b["output"] += t.usage.output_tokens
             b["cache_read"] += t.usage.cache_read_input_tokens
             b["cache_creation"] += t.usage.cache_creation_input_tokens
-            tc = cost_for_turn(t.model, t.usage)
+            tc = cost_for_turn(t.model, t.usage, at=t.timestamp)
             b["input_cost"] += tc.input_usd
             b["output_cost"] += tc.output_usd
             b["cache_read_cost"] += tc.cache_read_usd
@@ -800,7 +800,7 @@ def create_app(
                 d,
                 {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0},
             )
-            tc = cost_for_turn(t.model, t.usage)
+            tc = cost_for_turn(t.model, t.usage, at=t.timestamp)
             slot["input"] += tc.input_usd
             slot["output"] += tc.output_usd
             slot["cache_creation"] += tc.cache_creation_usd

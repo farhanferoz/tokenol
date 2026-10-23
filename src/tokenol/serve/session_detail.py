@@ -131,7 +131,7 @@ def build_turn_detail(session: Session, turn_idx: int) -> dict | None:
         return None
 
     t = session.turns[turn_idx]
-    tc = cost_for_turn(t.model, t.usage)
+    tc = cost_for_turn(t.model, t.usage, at=t.timestamp)
     user_prompt, asst_preview, tool_calls, source_line = _parse_turn_snippets(session.source_file, session.session_id, t)
 
     return {
@@ -175,7 +175,7 @@ def build_session_detail(session: Session) -> dict:
 
     turn_rows = []
     for t in turns:
-        tc = cost_for_turn(t.model, t.usage)
+        tc = cost_for_turn(t.model, t.usage, at=t.timestamp)
         turn_rows.append(
             {
                 "ts": t.timestamp.isoformat(),

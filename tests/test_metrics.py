@@ -1,7 +1,7 @@
 """Cost metric unit tests with hand-computed expected values."""
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -477,8 +477,9 @@ def test_sonnet_5_5_is_priced_as_itself_not_by_fallback():
     from tokenol.model.pricing import CLAUDE_MODELS
     from tokenol.model.registry import resolve
 
-    # Verified 2026-10-05 against platform.claude.com/docs/en/about-claude/pricing.
-    verified_rates = {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_write_1h": 4.00, "cache_read": 0.20}
+    # Verified 2026-10-23 against platform.claude.com/docs/en/about-claude/pricing
+    # (cache read cut to 0.05x input on 2026-10-07, per the release notes).
+    verified_rates = {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_write_1h": 4.00, "cache_read": 0.10}
     entry = CLAUDE_MODELS["claude-sonnet-5-5"]
     assert {k: entry[k] for k in verified_rates} == verified_rates
 
@@ -490,6 +491,139 @@ def test_sonnet_5_5_is_priced_as_itself_not_by_fallback():
     usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500, cache_creation_input_tokens=100)
     tc = cost_for_turn("claude-sonnet-5-5", usage)
     assert tc.assumptions == []
+
+
+_SONNET_5_5_CACHE_CUT = datetime(2026, 10, 7, tzinfo=timezone.utc)
+
+
+def test_sonnet_5_5_cache_reads_bill_at_the_rate_in_force_that_day():
+    """Anthropic cut Sonnet 5.5 cache reads from $0.20 to $0.10/MTok on 2026-10-07,
+    leaving every other rate alone. Pricing all history at today's rate would
+    understate the turns before the cut by half their cache-read cost, so each
+    turn is priced by its own timestamp."""
+    reads = Usage(cache_read_input_tokens=1_000_000)
+    before = cost_for_turn("claude-sonnet-5-5", reads, at=_SONNET_5_5_CACHE_CUT - timedelta(microseconds=1))
+    on = cost_for_turn("claude-sonnet-5-5", reads, at=_SONNET_5_5_CACHE_CUT)
+    assert before.total_usd == pytest.approx(0.20)
+    assert on.total_usd == pytest.approx(0.10)
+    assert before.assumptions == on.assumptions == []
+    # No timestamp means today's price list.
+    assert cost_for_turn("claude-sonnet-5-5", reads).total_usd == pytest.approx(0.10)
+
+    # Only the cache-read rate moved.
+    rest = Usage(input_tokens=1000, output_tokens=200, cache_creation_input_tokens=100, cache_creation_1h_input_tokens=40)
+    early = cost_for_turn("claude-sonnet-5-5", rest, at=_SONNET_5_5_CACHE_CUT - timedelta(days=3))
+    late = cost_for_turn("claude-sonnet-5-5", rest, at=_SONNET_5_5_CACHE_CUT + timedelta(days=3))
+    assert early.total_usd == pytest.approx(late.total_usd)
+
+
+_HAIKU_5_5_SHORT = {"input": 0.10, "output": 0.50, "cache_write": 0.125, "cache_write_1h": 0.20, "cache_read": 0.01}
+_HAIKU_5_5_LONG = {"input": 0.50, "output": 2.50, "cache_write": 0.625, "cache_write_1h": 1.00, "cache_read": 0.05}
+_HAIKU_5_5_PROMPT_LINE = 100_000  # a prompt OVER this many tokens bills at the long rates
+_HAIKU_5_5_CONTEXT = 1_000_000
+
+
+def _priced_by_hand(rates: dict[str, float], usage: Usage) -> float:
+    cache_5m = usage.cache_creation_input_tokens - usage.cache_creation_1h_input_tokens
+    return (
+        usage.input_tokens * rates["input"]
+        + usage.output_tokens * rates["output"]
+        + usage.cache_read_input_tokens * rates["cache_read"]
+        + cache_5m * rates["cache_write"]
+        + usage.cache_creation_1h_input_tokens * rates["cache_write_1h"]
+    ) / _M
+
+
+def test_haiku_5_5_is_priced_by_prompt_length():
+    """Haiku 5.5 is the first model priced by prompt length: a request whose prompt
+    is over 100,000 tokens pays 5x on every rate, output included. The prompt counts
+    cache reads and cache writes as well as plain input, so a request that is almost
+    all cache hits still crosses the line. Verified 2026-10-23 against
+    platform.claude.com/docs/en/about-claude/pricing; 1M context from the models page."""
+    from tokenol.model.pricing import CLAUDE_MODELS
+    from tokenol.model.registry import resolve
+
+    entry = CLAUDE_MODELS["claude-haiku-5-5"]
+    assert {k: entry[k] for k in _HAIKU_5_5_SHORT} == _HAIKU_5_5_SHORT
+    assert {k: entry["long_prompt"][k] for k in _HAIKU_5_5_LONG} == _HAIKU_5_5_LONG
+    assert entry["long_prompt"]["threshold"] == _HAIKU_5_5_PROMPT_LINE
+    assert entry["context"] == _HAIKU_5_5_CONTEXT
+
+    for raw in ("claude-haiku-5-5", "claude-haiku-5-5[1m]"):
+        resolved, tags = resolve(raw)
+        assert resolved == entry, raw
+        assert tags == [], raw
+
+    # Exactly 100,000 prompt tokens is not over the line.
+    at_line = Usage(
+        input_tokens=1_000, output_tokens=2_000, cache_read_input_tokens=98_000,
+        cache_creation_input_tokens=1_000, cache_creation_1h_input_tokens=400,
+    )
+    assert at_line.input_token_pool == _HAIKU_5_5_PROMPT_LINE
+    tc = cost_for_turn("claude-haiku-5-5", at_line)
+    assert tc.total_usd == pytest.approx(_priced_by_hand(_HAIKU_5_5_SHORT, at_line))
+    assert tc.assumptions == []
+
+    # One more cache-read token and the whole request bills at the higher rates.
+    over = Usage(
+        input_tokens=1_000, output_tokens=2_000, cache_read_input_tokens=98_001,
+        cache_creation_input_tokens=1_000, cache_creation_1h_input_tokens=400,
+    )
+    tc = cost_for_turn("claude-haiku-5-5", over)
+    assert tc.total_usd == pytest.approx(_priced_by_hand(_HAIKU_5_5_LONG, over))
+    assert tc.output_usd == pytest.approx(2_000 * 2.50 / _M)
+    assert tc.assumptions == []
+
+
+def test_cache_saved_usd_uses_the_turns_own_rates():
+    """The savings figure must price reads the way the turn was billed: Haiku 5.5
+    over 100k prompt tokens at its long-prompt rates, and Sonnet 5.5 before the
+    2026-10-07 cut at the old $0.20 read rate."""
+    haiku = _turn_with_cache_read("claude-haiku-5-5", 1_000_000)
+    # 1M reads alone put the prompt over 100k: ($0.50 - $0.05) per MTok.
+    assert cache_saved_usd([haiku]) == pytest.approx(0.45)
+
+    sonnet_before = _turn_with_cache_read("claude-sonnet-5-5", 1_000_000)
+    sonnet_before.timestamp = _SONNET_5_5_CACHE_CUT - timedelta(days=1)
+    sonnet_after = _turn_with_cache_read("claude-sonnet-5-5", 1_000_000)
+    sonnet_after.timestamp = _SONNET_5_5_CACHE_CUT + timedelta(days=1)
+    assert cache_saved_usd([sonnet_before]) == pytest.approx(2.00 - 0.20)
+    assert cache_saved_usd([sonnet_after]) == pytest.approx(2.00 - 0.10)
+
+
+def test_turns_built_from_logs_are_priced_on_their_own_day(tmp_path: Path):
+    """End to end through the parser: two identical Sonnet 5.5 turns either side
+    of the cache-read cut. The turn total and its per-tool split must both use
+    the rate of the day the turn ran, or the split stops adding up to the total."""
+    import json
+
+    def line(n: int, ts: str) -> dict:
+        return {
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": "s1",
+            "requestId": f"r{n}",
+            "uuid": f"u{n}",
+            "isSidechain": False,
+            "model": "claude-sonnet-5-5",
+            "message": {
+                "id": f"m{n}",
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": f"tu{n}", "name": "Bash", "input": {"command": "ls"}}],
+            },
+        }
+
+    p = tmp_path / "s1.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in (line(1, "2026-10-06T23:59:59Z"), line(2, "2026-10-07T00:00:01Z"))) + "\n")
+
+    before, after = sorted(build_turns([p]), key=lambda t: t.timestamp)
+    assert before.cost_usd - after.cost_usd == pytest.approx(1_000_000 * (0.20 - 0.10) / _M)
+    for t in (before, after):
+        assert t.cost_usd == pytest.approx(cost_for_turn(t.model, t.usage, at=t.timestamp).total_usd)
+        split = sum(tc.cost_usd for tc in t.tool_costs.values()) + t.unattributed_cost_usd
+        assert split == pytest.approx(t.cost_usd)
 
 
 def test_fable_5_1_cache_read_is_quarter_of_fable_5():
