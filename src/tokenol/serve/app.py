@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -48,6 +49,7 @@ from tokenol.serve.state import (
     encode_cwd,
     model_price_status,
     range_since,
+    start_rollup_warmup,
 )
 from tokenol.serve.streaming import SnapshotBroadcaster
 
@@ -193,6 +195,11 @@ def create_app(
         usage = _open_readonly_usage(store_path) if store_path.exists() else UsageContext.open(None)
     parse_cache.usage = usage
 
+    # Warm every session rollup once the first snapshot build is done (F7-2); the lifespan stops it.
+    warmup_stop = threading.Event()
+    warmup_threads: list[threading.Thread] = []
+    parse_cache.after_first_build = lambda ctx: warmup_threads.append(start_rollup_warmup(ctx, warmup_stop))
+
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
         all_projects=config.all_projects,
@@ -214,6 +221,9 @@ def create_app(
         try:
             yield
         finally:
+            warmup_stop.set()
+            for thread in warmup_threads:
+                thread.join(timeout=10)
             await broadcaster.shutdown()
             if config.persist:
                 assert flush_queue is not None

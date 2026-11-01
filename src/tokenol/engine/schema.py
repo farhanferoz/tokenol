@@ -58,7 +58,7 @@ TURNS_DDL = f"""CREATE TABLE {TURNS_TABLE} (
     is_sidechain BOOLEAN, is_interrupted BOOLEAN, stop_reason_id SMALLINT,
     tool_use_count SMALLINT, tool_error_count SMALLINT,
     unattributed_input_tokens DOUBLE, unattributed_output_tokens DOUBLE,
-    attribution_skill_id SMALLINT, assumptions INTEGER)"""
+    attribution_skill_id SMALLINT, assumptions INTEGER, rate_ix INTEGER)"""
 TURN_TOOLS_DDL = f"""CREATE TABLE {TURN_TOOLS_TABLE} (
     turn_id INTEGER, tool_id SMALLINT, input_tokens DOUBLE, output_tokens DOUBLE)"""
 TOOL_CALLS_DDL = f"""CREATE TABLE {TOOL_CALLS_TABLE} (turn_id INTEGER, tool_id SMALLINT, n SMALLINT)"""
@@ -122,16 +122,22 @@ class ModelCatalog:
         pending = list(self._unwritten)
         model_rows: list[tuple] = []
         rate_rows: list[tuple] = []
+        # rate_ix stays unique across calls: continue after the largest one held.
+        next_rate_ix = cur.execute(
+            f"SELECT coalesce(max(rate_ix) + 1, 0) FROM {MODEL_RATES_TABLE}"
+        ).fetchone()[0]
         for model in pending:
             model_id = self._ids[model]
             prices = PriceTables([model])
             model_rows.extend((model_id, *row[1:]) for row in prices.models_dim_rows())
-            rate_rows.extend((model_id, *row[1:]) for row in prices.rows_for_sql())
+            for row in prices.rows_for_sql():
+                rate_rows.append((model_id, *row[1:-1], next_rate_ix))
+                next_rate_ix += 1
         if model_rows:
             cur.executemany(f"INSERT INTO {MODELS_TABLE} VALUES (?, ?, ?, ?, ?, ?)", model_rows)
         if rate_rows:
             cur.executemany(
-                f"INSERT INTO {MODEL_RATES_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rate_rows
+                f"INSERT INTO {MODEL_RATES_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rate_rows
             )
         return len(pending)
 

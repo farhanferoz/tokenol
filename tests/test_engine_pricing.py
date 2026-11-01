@@ -29,6 +29,7 @@ from tokenol.engine.pricing import (
     TURNS_TABLE,
     VIEWS_DDL,
     PriceTables,
+    rate_match_on,
 )
 from tokenol.enums import AssumptionTag
 from tokenol.ingest.parser import _attribute_cost
@@ -209,6 +210,9 @@ def _boundary_batch() -> list[Turn]:
     return batch
 
 
+STAGE = "stage_turns"
+
+
 @functools.cache
 def _db() -> tuple[duckdb.DuckDBPyConnection, PriceTables]:
     """One connection holding the price tables; each example refills turns / turn_tools."""
@@ -220,12 +224,18 @@ def _db() -> tuple[duckdb.DuckDBPyConnection, PriceTables]:
         f"INSERT INTO {MODELS_TABLE} VALUES (?, ?, ?, ?, ?, ?)", tables.models_dim_rows()
     )
     con.executemany(
-        f"INSERT INTO {MODEL_RATES_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO {MODEL_RATES_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         tables.rows_for_sql(),
     )
     con.execute(
         f"CREATE TABLE {TURNS_TABLE} (turn_id BIGINT, session_ix INTEGER, ts TIMESTAMP, model_id INTEGER, input_tokens BIGINT, "
-        "output_tokens BIGINT, cache_read_tokens BIGINT, cache_creation_tokens BIGINT, cache_creation_1h_tokens BIGINT)"
+        "output_tokens BIGINT, cache_read_tokens BIGINT, cache_creation_tokens BIGINT, cache_creation_1h_tokens BIGINT, "
+        "rate_ix INTEGER)"
+    )
+    con.execute(
+        f"CREATE TEMP TABLE {STAGE} (turn_id BIGINT, session_ix INTEGER, ts TIMESTAMP, model_id INTEGER, "
+        "input_tokens BIGINT, output_tokens BIGINT, cache_read_tokens BIGINT, cache_creation_tokens BIGINT, "
+        "cache_creation_1h_tokens BIGINT)"
     )
     con.execute(
         f"CREATE TABLE {TURN_TOOLS_TABLE} (turn_id BIGINT, tool_id INTEGER, input_tokens DOUBLE, output_tokens DOUBLE)"
@@ -247,12 +257,13 @@ def test_sql_prices_match_python(batch: list[Turn]) -> None:
         batch = _boundary_batch()
     con, tables = _db()
     con.execute(f"DELETE FROM {TURNS_TABLE}")
+    con.execute(f"DELETE FROM {STAGE}")
     con.execute(f"DELETE FROM {TURN_TOOLS_TABLE}")
     tool_ids = {"Bash": 0, "Read": 1, "Edit": 2, "Grep": 3}
     for i, t in enumerate(batch):
         u = t.usage
         con.execute(
-            f"INSERT INTO {TURNS_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO {STAGE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 i,
                 0,
@@ -270,6 +281,14 @@ def test_sql_prices_match_python(batch: list[Turn]) -> None:
                 f"INSERT INTO {TURN_TOOLS_TABLE} VALUES (?, ?, ?, ?)",
                 [i, tool_ids[name], tc.input_tokens, tc.output_tokens],
             )
+    # Assign each turn its rate row by the engine's own match condition; a second matching
+    # row would duplicate the turn, so the count below is the "at most one rate row" check.
+    pool = "(s.input_tokens + s.cache_read_tokens + s.cache_creation_tokens)"
+    con.execute(
+        f"INSERT INTO {TURNS_TABLE} SELECT s.*, r.rate_ix FROM {STAGE} s "
+        f"LEFT JOIN {MODEL_RATES_TABLE} r ON {rate_match_on('r', 's.model_id', 's.ts', pool)}"
+    )
+    assert con.execute(f"SELECT count(*) FROM {TURNS_TABLE}").fetchone()[0] == len(batch)
 
     rows = con.execute(
         f"SELECT turn_id, input_usd, output_usd, cache_read_usd, cache_creation_usd, cost_usd, cache_saved_usd, pool FROM {PRICED_TURNS_VIEW}"

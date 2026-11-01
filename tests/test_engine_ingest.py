@@ -273,4 +273,24 @@ def _check_project_cwd_and_rollup_cache(turns: list[Turn], newer: Turn) -> None:
     cache.invalidate(["s2"])
     assert cache.rollup("s2").turns == 2
     assert [r.session_id for r in cache.rollups(["s3", "s2"])] == ["s3", "s2"]
+
+    # An invalidate landing while a rollup is being computed is not overwritten by the stale result.
+    cache.invalidate(["s3"])
+    reads: list[list[str]] = []
+    real_read = engine.session_turns_many
+
+    def read_then_invalidate(batch):
+        turns_by_sid = real_read(batch)
+        if not reads:
+            cache.invalidate(["s3"])  # a tick adds turns to s3 after this read began
+        reads.append(list(batch))
+        return turns_by_sid
+
+    engine.session_turns_many = read_then_invalidate
+    assert cache.rollup("s3").session_id == "s3"  # the caller still gets its answer ...
+    assert len(reads) == 1
+    cache.rollup("s3")
+    assert len(reads) == 2  # ... but it was not cached, so the next ask recomputed
+    cache.rollup("s3")
+    assert len(reads) == 2
     engine.close()

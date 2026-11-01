@@ -38,7 +38,10 @@ from tokenol.engine.ingest import naive_utc, sql_literal
 from tokenol.engine.pricing import (
     PRICED_TURN_TOOLS_VIEW,
     PRICED_TURNS_VIEW,
+    TOOL_COSTS_SQL,
+    TURN_TOOLS_TABLE,
     TURNS_TABLE,
+    tool_shares_sql,
 )
 from tokenol.engine.schema import (
     NAMES_TABLE,
@@ -517,15 +520,20 @@ class UsageQueries:
         cte, params = self._filtered_turns_cte(
             f,
             f"{_T}.turn_id, {_T}.ts, {_P}.cost_usd, {_P}.input_usd, {_P}.output_usd, "
-            f"{_P}.cache_read_usd, {_P}.cache_creation_usd",
+            f"{_P}.cache_read_usd, {_P}.cache_creation_usd, {_P}.pool, {_T}.output_tokens AS turn_output",
         )
         cost_col = "cost_prorata" if mode is AttributionMode.PRORATA else "cost_excl_cache_read"
         per_pair = f"""
             ptt AS MATERIALIZED (
-                SELECT ft.turn_id, ft.ts, pt.tool_id, n.name, pt.{cost_col} AS cost,
-                    pt.cost_prorata, pt.input_share, pt.output_share
-                FROM ft JOIN {PRICED_TURN_TOOLS_VIEW} pt ON pt.turn_id = ft.turn_id
-                JOIN {NAMES_TABLE} n ON n.kind = {_TOOL_KIND} AND n.name_id = pt.tool_id),
+                SELECT turn_id, ts, tool_id, name, {cost_col} AS cost, cost_prorata, input_share, output_share
+                FROM (
+                    SELECT *, {TOOL_COSTS_SQL}
+                    FROM (
+                        SELECT ft.turn_id, ft.ts, tt.tool_id, n.name,
+                            {tool_shares_sql("ft", "tt", "ft.turn_output")},
+                            ft.input_usd, ft.output_usd, ft.cache_read_usd, ft.cache_creation_usd
+                        FROM ft JOIN {TURN_TOOLS_TABLE} tt ON tt.turn_id = ft.turn_id
+                        JOIN {NAMES_TABLE} n ON n.kind = {_TOOL_KIND} AND n.name_id = tt.tool_id))),
             calls AS (
                 SELECT ft.turn_id, ft.ts, c.tool_id, n.name, c.n
                 FROM ft JOIN {TOOL_CALLS_TABLE} c ON c.turn_id = ft.turn_id

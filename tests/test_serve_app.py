@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -38,6 +39,16 @@ async def test_snapshot_endpoint_returns_200(tmp_path: Path) -> None:
         app = create_app(ServerConfig())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/api/snapshot")
+
+        # The first build starts the background rollup warm-up, which fills the cache for every session.
+        usage = app.state.usage
+        sessions = len(usage.index.all())
+        assert sessions > 0
+        for _ in range(100):
+            if usage.rollups.cached_count() == sessions:
+                break
+            await asyncio.sleep(0.1)
+        assert usage.rollups.cached_count() == sessions
 
     assert resp.status_code == 200
     data = resp.json()

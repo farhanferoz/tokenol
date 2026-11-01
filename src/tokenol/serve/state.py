@@ -39,7 +39,7 @@ from tokenol.engine.queries import (
     Totals,
     UsageQueries,
 )
-from tokenol.engine.sessions import SessionInfo
+from tokenol.engine.sessions import ROLLUP_BATCH_SESSIONS, SessionInfo
 from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict, PriceStatus
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import (
@@ -106,6 +106,9 @@ class ParseCache:
     # The usage engine and its companions. create_app sets it from the store before any
     # HistoryStore opens; build_snapshot_full opens an empty one when it is still None.
     usage: UsageContext | None = None
+    # Called once, with the usage context, after the first snapshot build finished (the
+    # server sets it to start the rollup warm-up); cleared when it fires.
+    after_first_build: Callable[[UsageContext], None] | None = None
 
 
 def derive_delta_turns(
@@ -849,6 +852,37 @@ def _usage_context(parse_cache: ParseCache) -> UsageContext:
         return parse_cache.usage
 
 
+def warm_session_rollups(usage: UsageContext, stop: threading.Event) -> None:
+    """Compute every session's rollup into the cache, so the first project page or ``verdict:`` search is a hit.
+
+    Cold, that work costs 3-5 s on the real store (2.4k sessions). Runs ``ROLLUP_BATCH_SESSIONS``
+    sessions per engine read, returns the heap to the operating system when done, and stops
+    between batches once *stop* is set. A failure is logged, never raised.
+    """
+    started = time.monotonic()
+    try:
+        ids = [info.session_id for info in usage.index.all()]
+        log.info("rollup warm-up started: %d sessions", len(ids))
+        for start in range(0, len(ids), ROLLUP_BATCH_SESSIONS):
+            if stop.is_set():
+                log.info("rollup warm-up stopped early")
+                return
+            usage.rollups.rollups(ids[start : start + ROLLUP_BATCH_SESSIONS])
+        release_free_memory()
+        log.info("rollup warm-up finished: %d sessions in %.1f s", len(ids), time.monotonic() - started)
+    except Exception:
+        log.exception("rollup warm-up failed; rollups will be computed on first use")
+
+
+def start_rollup_warmup(usage: UsageContext, stop: threading.Event) -> threading.Thread:
+    """Start ``warm_session_rollups`` on a daemon thread and return it."""
+    thread = threading.Thread(
+        target=warm_session_rollups, args=(usage, stop), name="rollup-warmup", daemon=True
+    )
+    thread.start()
+    return thread
+
+
 def build_snapshot_full(
     parse_cache: ParseCache,
     all_projects: bool = False,
@@ -941,6 +975,14 @@ def build_snapshot_full(
     # builds by 60 %.
     before, after = release_free_memory()
     log.debug("snapshot build trimmed the heap: RSS %s -> %s bytes", before, after)
+
+    with parse_cache._lock:
+        hook, parse_cache.after_first_build = parse_cache.after_first_build, None
+    if hook is not None:
+        try:
+            hook(usage)
+        except Exception:
+            log.exception("after-first-build hook failed")
 
     return SnapshotResult(payload=payload)
 

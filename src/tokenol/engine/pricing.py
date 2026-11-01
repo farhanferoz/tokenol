@@ -10,9 +10,11 @@ first two):
 
 * ``models(model_id, model, entry_key, price_status, context_window, assumptions)``
 * ``model_rates(model_id, valid_from, valid_until, pool_above, pool_at_most,
-  input_rate, output_rate, cache_write_rate, cache_write_1h_rate, cache_read_rate)``
+  input_rate, output_rate, cache_write_rate, cache_write_1h_rate, cache_read_rate, rate_ix)``;
+  ``rate_ix`` is unique per row
 * ``turns(turn_id, session_ix, ts, model_id, input_tokens, output_tokens, cache_read_tokens,
-  cache_creation_tokens, cache_creation_1h_tokens)``; ``ts`` is naive UTC
+  cache_creation_tokens, cache_creation_1h_tokens, rate_ix)``; ``ts`` is naive UTC;
+  ``rate_ix`` is the ``model_rates`` row that prices the turn (NULL: none, priced 0)
 * ``turn_tools(turn_id, tool_id, input_tokens, output_tokens)``; the stored,
   fractional token shares of each tool
 
@@ -42,12 +44,18 @@ MODELS_DDL = f"""CREATE TABLE {MODELS_TABLE} (
 MODEL_RATES_DDL = f"""CREATE TABLE {MODEL_RATES_TABLE} (
     model_id INTEGER, valid_from TIMESTAMP, valid_until TIMESTAMP,
     pool_above BIGINT, pool_at_most BIGINT, input_rate DOUBLE, output_rate DOUBLE,
-    cache_write_rate DOUBLE, cache_write_1h_rate DOUBLE, cache_read_rate DOUBLE)"""
+    cache_write_rate DOUBLE, cache_write_1h_rate DOUBLE, cache_read_rate DOUBLE,
+    rate_ix INTEGER)"""
 
 _M = float(TOKENS_PER_MILLION)
 
-# A model with no rate row (unknown or non-Claude) matches nothing in the left
-# join, so its rates are NULL and coalesce to 0, as cost_for_turn prices it.
+# Each turn carries ``rate_ix``, the ``model_rates.rate_ix`` of the one row that
+# prices it (model, validity window and context pool all matching), assigned when
+# the turn is written (``rate_match_on``). The view then joins on equality: a range
+# join would price all 711 k turns even for a 13-turn project, because a project
+# filter reaches the view only through ``sessions`` (~60 ms of ~65). A model with
+# no rate row (unknown or non-Claude) has a NULL ``rate_ix``, so its rates are
+# NULL and coalesce to 0, as cost_for_turn prices it.
 PRICED_TURNS_DDL = f"""CREATE OR REPLACE VIEW {PRICED_TURNS_VIEW} AS
 SELECT turn_id, session_ix, ts, model_id, pool,
     input_usd, output_usd, cache_read_usd, cache_creation_usd,
@@ -68,28 +76,49 @@ FROM (
             least(cache_creation_1h_tokens, cache_creation_tokens) AS cache_1h_tokens
         FROM {TURNS_TABLE}
     ) AS t
-    LEFT JOIN {MODEL_RATES_TABLE} AS r
-        ON r.model_id = t.model_id
-        AND (r.valid_from IS NULL OR t.ts >= r.valid_from)
-        AND (r.valid_until IS NULL OR t.ts < r.valid_until)
-        AND (r.pool_above IS NULL OR t.pool > r.pool_above)
-        AND (r.pool_at_most IS NULL OR t.pool <= r.pool_at_most)
+    LEFT JOIN {MODEL_RATES_TABLE} AS r ON r.rate_ix = t.rate_ix
 )"""
+
+def rate_match_on(alias: str, model_id: str, ts: str, pool: str) -> str:
+    """The ON clause matching ``model_rates`` (as *alias*) to a turn, the one place it is written.
+
+    The other arguments are SQL expressions for the turn's model id, timestamp and context pool.
+    More than one matching row would duplicate the turn, which the pricing test would catch
+    (``rate_rows`` is meant to give at most one row per turn).
+    """
+    r = alias
+    return f"""{r}.model_id = {model_id}
+    AND ({r}.valid_from IS NULL OR {ts} >= {r}.valid_from)
+    AND ({r}.valid_until IS NULL OR {ts} < {r}.valid_until)
+    AND ({r}.pool_above IS NULL OR {pool} > {r}.pool_above)
+    AND ({r}.pool_at_most IS NULL OR {pool} <= {r}.pool_at_most)"""
+
 
 # Per-tool dollars from token shares (never stored dollars). A zero denominator
 # contributes 0, as ingest.parser._attribute_cost and
-# serve.state._recompute_excl_cache_read do.
-PRICED_TURN_TOOLS_DDL = f"""CREATE OR REPLACE VIEW {PRICED_TURN_TOOLS_VIEW} AS
-SELECT turn_id, session_ix, tool_id, input_tokens, output_tokens, input_share, output_share,
-    output_share * output_usd + input_share * (input_usd + cache_read_usd + cache_creation_usd)
+# serve.state._recompute_excl_cache_read do. The two fragments are written once
+# and used by the view and by the per-tool query that prices only its filtered turns.
+def tool_shares_sql(priced: str, tool: str, turn_output_tokens: str) -> str:
+    """``input_share`` / ``output_share`` columns: a tool's token share of the turn's pool / output."""
+    return (
+        f"CASE WHEN {priced}.pool > 0 THEN {tool}.input_tokens / {priced}.pool ELSE 0 END AS input_share, "
+        f"CASE WHEN {turn_output_tokens} > 0 THEN {tool}.output_tokens / {turn_output_tokens} "
+        "ELSE 0 END AS output_share"
+    )
+
+
+# Over columns input_share, output_share, input_usd, output_usd, cache_read_usd, cache_creation_usd.
+TOOL_COSTS_SQL = """output_share * output_usd + input_share * (input_usd + cache_read_usd + cache_creation_usd)
         AS cost_prorata,
     output_share * output_usd + input_share * (input_usd + cache_creation_usd)
-        AS cost_excl_cache_read
+        AS cost_excl_cache_read"""
+
+PRICED_TURN_TOOLS_DDL = f"""CREATE OR REPLACE VIEW {PRICED_TURN_TOOLS_VIEW} AS
+SELECT turn_id, session_ix, tool_id, input_tokens, output_tokens, input_share, output_share,
+    {TOOL_COSTS_SQL}
 FROM (
     SELECT tt.turn_id, p.session_ix, tt.tool_id, tt.input_tokens, tt.output_tokens,
-        CASE WHEN p.pool > 0 THEN tt.input_tokens / p.pool ELSE 0 END AS input_share,
-        CASE WHEN tu.output_tokens > 0 THEN tt.output_tokens / tu.output_tokens ELSE 0 END
-            AS output_share,
+        {tool_shares_sql("p", "tt", "tu.output_tokens")},
         p.input_usd, p.output_usd, p.cache_read_usd, p.cache_creation_usd
     FROM {TURN_TOOLS_TABLE} AS tt
     JOIN {PRICED_TURNS_VIEW} AS p ON p.turn_id = tt.turn_id
@@ -120,7 +149,7 @@ class PriceTables:
         return self._models.index(model)
 
     def rows_for_sql(self) -> list[tuple]:
-        """``model_rates`` rows: one per rate row of every priced model."""
+        """``model_rates`` rows: one per rate row of every priced model, numbered by ``rate_ix`` from 0."""
         rows: list[tuple] = []
         for model_id, model in enumerate(self._models):
             entry, _tags = resolve_pricing(model)
@@ -140,6 +169,7 @@ class PriceTables:
                         rates["cache_write"],
                         rates["cache_write_1h"],
                         rates["cache_read"],
+                        len(rows),
                     )
                 )
         return rows

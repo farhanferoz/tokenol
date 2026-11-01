@@ -26,7 +26,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenol.engine.codes import encode_assumptions
-from tokenol.engine.pricing import MODELS_TABLE, TURN_TOOLS_TABLE, TURNS_TABLE
+from tokenol.engine.pricing import (
+    MODEL_RATES_TABLE,
+    MODELS_TABLE,
+    TURN_TOOLS_TABLE,
+    TURNS_TABLE,
+    rate_match_on,
+)
 from tokenol.engine.schema import (
     NAMES_TABLE,
     SESSIONS_TABLE,
@@ -187,6 +193,11 @@ class TurnTableWriter:
 
     def _insert_turns(self, cur, relation: str, base: int) -> int:
         stop, skill = NameKind.STOP_REASON.value, NameKind.SKILL.value
+        # The context pool of the clamped, stored token counts, as the priced view sees it.
+        pool = " + ".join(
+            f"{_clamped(c)}::BIGINT" for c in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
+        )
+        rate_on = rate_match_on("rt", "m.model_id", "s.ts", f"({pool})")
         sql = f"""INSERT INTO {TURNS_TABLE}
             SELECT * FROM (
                 SELECT {base} + row_number() OVER (ORDER BY s.ts, s.dedup_key) - 1 AS turn_id,
@@ -197,13 +208,14 @@ class TurnTableWriter:
                     s.is_sidechain, s.is_interrupted, sr.name_id,
                     s.tool_use_count::SMALLINT, s.tool_error_count::SMALLINT,
                     coalesce(s.unattributed_input_tokens, 0), coalesce(s.unattributed_output_tokens, 0),
-                    sk.name_id, ab.bits
+                    sk.name_id, ab.bits, rt.rate_ix
                 FROM {relation} s
                 JOIN {MODELS_TABLE} m ON m.model = s.model
                 JOIN {SESSIONS_TABLE} ss ON ss.session_id = s.session_id
                 LEFT JOIN {NAMES_TABLE} sr ON sr.kind = '{stop}' AND sr.name = s.stop_reason
                 LEFT JOIN {NAMES_TABLE} sk ON sk.kind = '{skill}' AND sk.name = s.attribution_skill
                 JOIN {ASSUMPTION_BITS_TABLE} ab ON ab.src = coalesce(s.assumptions::VARCHAR, '[]')
+                LEFT JOIN {MODEL_RATES_TABLE} rt ON {rate_on}
             ) ORDER BY turn_id"""
         return cur.execute(sql).fetchone()[0]
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -194,33 +195,61 @@ class SessionRollupCache:
 
     The server invalidates the sessions each tick's new turns touched, and any it forgets.
     Polling the engine for changes instead costs ~1 ms per session, 2-3 s a tick over 2.4k.
+
+    Safe to use from several threads (request handlers, the tick, the background warm-up).
+    One lock guards the cache and the generation counters and is never held across an engine
+    read or a rollup build. A session's generation is bumped by ``invalidate`` and ``clear``;
+    a rollup computed while its generation moved is returned to its caller but not stored,
+    so the next ask recomputes it from the newer turns.
     """
 
     def __init__(self, engine: UsageEngine, index: SessionIndex) -> None:
         self._engine = engine
         self._index = index
+        self._lock = threading.Lock()
         self._cache: dict[str, SessionRollup] = {}
+        self._generation: dict[str, int] = {}
+        self._epoch = 0  # bumped by clear(), which invalidates every session at once
 
     def rollup(self, session_id: str) -> SessionRollup:
         return self.rollups([session_id])[0]
 
+    def cached_count(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
     def rollups(self, session_ids: Iterable[str]) -> list[SessionRollup]:
         """Rollups in the order asked; misses are computed ``ROLLUP_BATCH_SESSIONS`` sessions per engine read."""
         ids = list(session_ids)
-        missing = [sid for sid in dict.fromkeys(ids) if sid not in self._cache]
+        with self._lock:
+            have = {sid: self._cache[sid] for sid in ids if sid in self._cache}
+        missing = [sid for sid in dict.fromkeys(ids) if sid not in have]
         for start in range(0, len(missing), ROLLUP_BATCH_SESSIONS):
             batch = missing[start : start + ROLLUP_BATCH_SESSIONS]
+            with self._lock:
+                started = {sid: (self._epoch, self._generation.get(sid, 0)) for sid in batch}
             turns_by_sid = self._engine.session_turns_many(batch)
+            built: dict[str, SessionRollup] = {}
             for sid in batch:
                 session = self._index.session(sid, turns_by_sid.get(sid, []))
                 rollup = build_session_rollup(session)
                 rollup.verdict = compute_verdict(rollup)
-                self._cache[sid] = rollup
-        return [self._cache[sid] for sid in ids]
+                built[sid] = rollup
+            with self._lock:
+                for sid, rollup in built.items():
+                    if started[sid] == (self._epoch, self._generation.get(sid, 0)):
+                        self._cache[sid] = rollup
+            have.update(built)
+        return [have[sid] for sid in ids]
 
     def invalidate(self, session_ids: Iterable[str]) -> None:
-        for sid in session_ids:
-            self._cache.pop(sid, None)
+        with self._lock:
+            for sid in session_ids:
+                self._cache.pop(sid, None)
+                self._generation[sid] = self._generation.get(sid, 0) + 1
 
     def clear(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
+            self._generation.clear()
+            self._epoch += 1
