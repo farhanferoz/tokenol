@@ -146,11 +146,19 @@ class TurnTableWriter:
 
     def write(self, cur, relation: str) -> int:
         """Insert every row of *relation* (models and sessions already in place); return the count."""
+        # A bulk write also returns memory after the name scan and the turns insert: on the
+        # real store (711 k turns) they leave ~800 MB of freed heap that set the start-up
+        # peak (~1.0 GB, against ~750 MB with these two trims).
+        bulk = cur.execute(f"SELECT count(*) FROM {relation}").fetchone()[0] > BULK_INGEST_ROWS
         self._add_names(cur, relation)
+        if bulk:
+            self._release_memory()
         bits = self._assumption_bits(cur, relation)
         base = cur.execute(f"SELECT coalesce(max(turn_id) + 1, 0) FROM {TURNS_TABLE}").fetchone()[0]
         rows = self._insert_turns(cur, relation, base)
-        self._insert_children(cur, relation, base, rows, trim=rows > BULK_INGEST_ROWS)
+        if bulk:
+            self._release_memory()
+        self._insert_children(cur, relation, base, rows, trim=bulk)
         cur.execute(f"DROP TABLE {bits}")
         return rows
 
