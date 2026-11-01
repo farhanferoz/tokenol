@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import engine_sessions, engine_turns, usage_from_sessions
 
 pytest.importorskip("duckdb")
 
@@ -24,11 +25,11 @@ from tokenol.serve.state import (
     _build_turns_and_sessions,
     _recompute_excl_cache_read,
     build_breakdown_tools,
+    build_model_detail,
     build_project_detail,
     build_snapshot_full,
     build_tool_detail,
     derive_delta_turns,
-    legacy_turn_view,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -543,19 +544,23 @@ def test_project_detail_default_range_14d(tmp_path: Path) -> None:
             ("old", old, "o1"),
         ],
     )
-    result = build_project_detail(cwd, sessions, range_key="14d")
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="14d")
     assert result is not None
     assert result["session_count"] == 1
     assert result["range_key"] == "14d"
+    # The window bounds the trend (14 days, today included) and the turns listed, not just the sessions.
+    assert len(result["cache_trend"]) == 14
+    assert [t["session_id"] for t in result["top_turns_by_cost"]] == ["sess-recent"]
 
 
 def test_project_detail_range_all_includes_old_sessions(tmp_path: Path) -> None:
-    """range=all includes sessions regardless of age."""
+    """range=all includes sessions regardless of age; its trend runs from the first turn day, not the epoch."""
     from datetime import date, timedelta
 
     today = date.today()
     recent = (today - timedelta(days=5)).isoformat() + "T10:00:00Z"
-    old = (today - timedelta(days=20)).isoformat() + "T10:00:00Z"
+    old_day = today - timedelta(days=20)
+    old = old_day.isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(
         tmp_path,
@@ -565,9 +570,11 @@ def test_project_detail_range_all_includes_old_sessions(tmp_path: Path) -> None:
             ("old", old, "o1"),
         ],
     )
-    result = build_project_detail(cwd, sessions, range_key="all")
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="all")
     assert result is not None
     assert result["session_count"] == 2
+    trend_days = [point["date"] for point in result["cache_trend"]]
+    assert trend_days == [str(old_day + timedelta(days=i)) for i in range(21)]  # first turn day .. today, zero-filled
 
 
 def test_project_detail_range_1d_scopes_to_today(tmp_path: Path) -> None:
@@ -586,9 +593,12 @@ def test_project_detail_range_1d_scopes_to_today(tmp_path: Path) -> None:
             ("yest", yesterday_ts, "y1"),
         ],
     )
-    result = build_project_detail(cwd, sessions, range_key="1d")
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="1d")
     assert result is not None
     assert result["session_count"] == 1
+    # One day collapses a daily series to a dot, so the trend is hourly: today's one active hour.
+    assert result["cache_trend_unit"] == "hour"
+    assert [point["date"] for point in result["cache_trend"]] == [today_ts.replace("Z", "+00:00")]  # the turn sits on the hour
 
 
 def test_project_detail_range_no_activity_returns_none(tmp_path: Path) -> None:
@@ -598,7 +608,7 @@ def test_project_detail_range_no_activity_returns_none(tmp_path: Path) -> None:
     old = (date.today() - timedelta(days=60)).isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("old", old, "o1")])
-    result = build_project_detail(cwd, sessions, range_key="14d")
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="14d")
     assert result is None
 
 
@@ -608,20 +618,35 @@ def test_project_detail_invalid_range_raises(tmp_path: Path) -> None:
 
     cwd = "/repo/myproject"
     with pytest.raises(ValueError, match="Unknown range"):
-        build_project_detail(cwd, [], range_key="bogus")
+        build_project_detail(cwd, usage_from_sessions([]), range_key="bogus")
 
 
 def test_project_detail_top_turns_have_efficiency_metrics(tmp_path: Path) -> None:
-    """top_turns_by_cost entries include hit_rate, cost_per_kw, ctx_ratio."""
+    """top_turns_by_cost entries include hit_rate, cost_per_kw, ctx_ratio; interrupted turns are never listed."""
     from datetime import date
 
     ts = date.today().isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("s1", ts, "u1")])
-    result = build_project_detail(cwd, sessions, range_key="14d")
+    real = sessions[0].turns[0]
+    # An interrupted turn costing more than the real one: listing it would put it first.
+    sessions[0].turns.append(
+        Turn(
+            dedup_key="ghost",
+            timestamp=real.timestamp + timedelta(minutes=1),
+            session_id=real.session_id,
+            model=real.model,
+            usage=Usage(input_tokens=500_000, output_tokens=100_000),
+            is_sidechain=False,
+            stop_reason=None,
+            is_interrupted=True,
+        )
+    )
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="14d")
     assert result is not None
-    assert result["top_turns_by_cost"], "expected at least one turn"
+    assert [t["session_id"] for t in result["top_turns_by_cost"]] == [real.session_id]
     turn = result["top_turns_by_cost"][0]
+    assert turn["output_tokens"] == 200
     assert "hit_rate" in turn
     assert "cost_per_kw" in turn
     assert "ctx_ratio" in turn
@@ -637,7 +662,7 @@ def test_project_detail_sessions_have_cost_per_kw_and_ctx(tmp_path: Path) -> Non
     ts = date.today().isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("s1", ts, "u1")])
-    result = build_project_detail(cwd, sessions, range_key="14d")
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="14d")
     assert result is not None
     sess = result["sessions"][0]
     assert "cost_per_kw" in sess
@@ -651,7 +676,7 @@ def test_project_detail_cache_trend_key(tmp_path: Path) -> None:
     ts = date.today().isoformat() + "T10:00:00Z"
     cwd = "/repo/myproject"
     sessions = _build_project_sessions(tmp_path, cwd, [("s1", ts, "u1")])
-    result = build_project_detail(cwd, sessions, range_key="14d")
+    result = build_project_detail(cwd, usage_from_sessions(sessions), range_key="14d")
     assert result is not None
     assert "cache_trend" in result
     assert "cache_trend_14d" not in result
@@ -707,7 +732,7 @@ def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None
         assert s.source_file == str(dst), f"{s.session_id} has source_file={s.source_file!r}"
 
 
-# ---- build_tool_detail tests ------------------------------------------
+# ---- build_tool_detail / build_model_detail tests ------------------------------------------
 
 
 def test_build_tool_detail_returns_payload():
@@ -726,14 +751,14 @@ def test_build_tool_detail_returns_payload():
             tool_names=Counter(tools),
         )
 
-    t0 = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
-    t1 = datetime(2026, 4, 14, 11, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc)
+    t0 = datetime.now(tz=timezone.utc) - timedelta(days=3)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
 
     turns = [
         _turn("sA", t0, "claude-opus-4-7", {"Read": 2, "Edit": 1}),
         _turn("sB", t1, "claude-opus-4-7", {"Read": 1, "Bash": 3}, err_count=1),
-        _turn("sC", t2, "claude-sonnet-4-6", {"Grep": 1}),
+        _turn("sC", t2, "claude-sonnet-4-6", {"Grep": 1, "Read": 1}),
     ]
     sessions = [
         Session(session_id="sA", source_file="a.jsonl", is_sidechain=False, cwd="/p/projA", turns=[turns[0]]),
@@ -741,30 +766,34 @@ def test_build_tool_detail_returns_payload():
         Session(session_id="sC", source_file="c.jsonl", is_sidechain=False, cwd="/p/projA", turns=[turns[2]]),
     ]
 
-    detail = build_tool_detail("Read", turns, sessions)
+    detail = build_tool_detail("Read", usage_from_sessions(sessions).queries)
     assert detail["name"] == "Read"
-    assert detail["total_invocations"] == 3
+    assert detail["total_invocations"] == 4
 
     by_project = {p["project_label"]: p for p in detail["by_project"]}
     assert set(by_project.keys()) == {"projA", "projB"}
-    assert by_project["projA"]["invocations"] == 2
+    # projA spans two models (sA on opus, sC on sonnet): its row folds both, with the newest call.
+    assert by_project["projA"]["invocations"] == 3
     assert by_project["projB"]["invocations"] == 1
     assert by_project["projA"]["cwd_b64"]
-    assert by_project["projA"]["last_active"] == t0.isoformat()
+    assert by_project["projA"]["last_active"] == t2.isoformat()
     invs = [p["invocations"] for p in detail["by_project"]]
     assert invs == sorted(invs, reverse=True) or invs == sorted([p["cost_usd"] for p in detail["by_project"]], reverse=True)  # cost-sorted is the canonical order
 
     by_model = {m["name"]: m for m in detail["by_model"]}
-    assert set(by_model.keys()) == {"claude-opus-4-7"}
+    assert set(by_model.keys()) == {"claude-opus-4-7", "claude-sonnet-4-6"}
     assert by_model["claude-opus-4-7"]["invocations"] == 3
+    assert by_model["claude-sonnet-4-6"]["invocations"] == 1
 
     sc = detail["scorecards"]
-    assert sc["invocations"] == 3
-    assert "cost_usd" in sc and "output_tokens" in sc and "top_project" in sc
+    assert sc["invocations"] == 4
+    assert sc["invocations_7d"] == 4  # all four calls are within the last seven days
+    assert "cost_usd" in sc and "output_tokens" in sc
+    assert sc["top_project"]["name"] == "projA"  # no cost anywhere: the tie goes to the first label
 
 
 def test_build_tool_detail_unknown_returns_none():
-    assert build_tool_detail("NoSuchTool", [], []) is None
+    assert build_tool_detail("NoSuchTool", usage_from_sessions([]).queries) is None
 
 
 def test_build_tool_detail_excludes_interrupted():
@@ -784,7 +813,7 @@ def test_build_tool_detail_excludes_interrupted():
         tool_names=Counter({"Read": 1}),
     )
     sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p", turns=[interrupted])]
-    assert build_tool_detail("Read", [interrupted], sessions) is None
+    assert build_tool_detail("Read", usage_from_sessions(sessions).queries) is None
 
 
 def test_build_tool_detail_includes_linger_only_turns():
@@ -797,42 +826,55 @@ def test_build_tool_detail_includes_linger_only_turns():
 
     t0 = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
     t1 = datetime(2026, 4, 14, 11, 0, tzinfo=timezone.utc)
+    invoke_usage = Usage(input_tokens=10, output_tokens=10)
+    linger_usage = Usage(input_tokens=50, output_tokens=5)
 
-    # Turn 0: invokes Read (cost + names).
+    # Turn 0: invokes Read (cost + names); Read owns all of the output.
     invoke = Turn(
         dedup_key="k0",
         timestamp=t0,
         session_id="s1",
         model="claude-opus-4-7",
-        usage=Usage(input_tokens=10, output_tokens=10),
+        usage=invoke_usage,
         is_sidechain=False,
         stop_reason="tool_use",
-        cost_usd=0.05,
         tool_use_count=1,
         tool_names=Counter({"Read": 1}),
-        tool_costs={"Read": ToolCost(tool_name="Read", output_tokens=10, cost_usd=0.05)},
+        tool_costs={"Read": ToolCost(tool_name="Read", output_tokens=10)},
     )
     # Turn 1: no fresh invocation, but Read result lingers in input bytes →
-    # cost attributed to Read with no entry in tool_names.
+    # cost attributed to Read with no entry in tool_names; Read owns 40 of the 50 input tokens.
     linger = Turn(
         dedup_key="k1",
         timestamp=t1,
         session_id="s1",
         model="claude-opus-4-7",
-        usage=Usage(input_tokens=50, output_tokens=5),
+        usage=linger_usage,
         is_sidechain=False,
         stop_reason="end_turn",
-        cost_usd=0.04,
         tool_use_count=0,
         tool_names=Counter(),
-        tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40, cost_usd=0.03)},
+        tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40)},
     )
     sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p/a", turns=[invoke, linger])]
 
-    detail = build_tool_detail("Read", [invoke, linger], sessions)
+    detail = build_tool_detail("Read", usage_from_sessions(sessions).queries)
     assert detail is not None
-    # Total cost reflects both the invocation slice and the linger slice.
-    assert detail["scorecards"]["cost_usd"] == 0.05 + 0.03
+    # Total cost reflects both the invocation slice and the linger slice (the engine prices the shares).
+    invoke_slice = cost_for_turn("claude-opus-4-7", invoke_usage, at=t0).output_usd
+    linger_slice = 0.8 * cost_for_turn("claude-opus-4-7", linger_usage, at=t1).input_usd
+    assert detail["scorecards"]["cost_usd"] == pytest.approx(invoke_slice + linger_slice)
+    assert detail["by_project"][0]["cost_usd"] == pytest.approx(invoke_slice + linger_slice)
+    everything = (
+        cost_for_turn("claude-opus-4-7", invoke_usage, at=t0).total_usd
+        + cost_for_turn("claude-opus-4-7", linger_usage, at=t1).total_usd
+    )
+    assert detail["scorecards"]["share_of_total"] == pytest.approx((invoke_slice + linger_slice) / everything)
+    assert detail["scorecards"]["top_project"] == {
+        "name": "a",
+        "cost_usd": pytest.approx(invoke_slice + linger_slice),
+        "share": pytest.approx(1.0),
+    }
     # Invocations counted from tool_names only; linger turn doesn't bump it.
     assert detail["total_invocations"] == 1
 
@@ -841,64 +883,47 @@ def test_build_tool_detail_rejects_sentinels():
     """The cost-attribution sentinels are not real tools; tool detail must 404
     rather than render a bogus page (which would have happened before the
     sentinel rejection was added at the entry point)."""
-    from tokenol.serve.state import build_tool_detail as _build
+    queries = usage_from_sessions([]).queries
+    assert build_tool_detail("__unattributed__", queries) is None
+    assert build_tool_detail("__unknown__", queries) is None
 
-    assert _build("__unattributed__", [], []) is None
-    assert _build("__unknown__", [], []) is None
 
-
-def test_accumulate_tool_costs_union_includes_linger_only():
-    """_accumulate_tool_costs must surface tools that appear in tool_costs even
-    when they're absent from tool_names — without this, project/model by_tool
-    rollups silently drop linger-only attribution."""
+def test_model_detail_by_tool_keeps_linger_only_tools_and_hides_internal_rows():
+    """A tool with cost but no call (linger-only), and one with a call but no cost, both get a row on the model page; the
+    Skill tool (owned by the Skill dimension) and the __unknown__ residue (folded into
+    __unattributed__) never do."""
     from tokenol.model.events import ToolCost
-    from tokenol.serve.state import _accumulate_tool_costs
 
     ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
-    linger = Turn(
-        dedup_key="k",
-        timestamp=ts,
-        session_id="s1",
-        model="claude-opus-4-7",
-        usage=Usage(input_tokens=50, output_tokens=5),
-        is_sidechain=False,
-        stop_reason="end_turn",
-        cost_usd=0.04,
-        tool_names=Counter(),
-        tool_costs={"Read": ToolCost(tool_name="Read", input_tokens=40, cost_usd=0.03)},
-    )
-    cost, invs, last = _accumulate_tool_costs([linger])
-    assert cost["Read"] == 0.03
-    # Invocations 0 (no tool_names entry) but the tool is still represented.
-    assert invs.get("Read", 0) == 0
-    # last_active populated from the tool_costs pass so callers can iterate the
-    # union without a KeyError.
-    assert "Read" in last
-
-
-def test_accumulate_tool_costs_folds_unknown_into_unattributed():
-    """The __unknown__ sentinel (unmatched tool_result bytes) must not surface
-    as a real tool — it gets folded into __unattributed__ so callers' filter
-    drops it from project/model by_tool rollups."""
-    from tokenol.model.events import ToolCost
-    from tokenol.serve.state import _accumulate_tool_costs
-
-    ts = datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc)
+    usage = Usage(input_tokens=50, output_tokens=5)
     turn = Turn(
         dedup_key="k",
         timestamp=ts,
         session_id="s1",
         model="claude-opus-4-7",
-        usage=Usage(input_tokens=50, output_tokens=5),
+        usage=usage,
         is_sidechain=False,
         stop_reason="end_turn",
-        cost_usd=0.02,
-        tool_names=Counter(),
-        tool_costs={"__unknown__": ToolCost(tool_name="__unknown__", input_tokens=20, cost_usd=0.02)},
+        tool_names=Counter({"Skill": 1, "Edit": 2, "Glob": 1}),  # Glob: a call with no cost entry
+        tool_costs={
+            "Read": ToolCost(tool_name="Read", input_tokens=20),
+            "Edit": ToolCost(tool_name="Edit", input_tokens=5),
+            "Skill": ToolCost(tool_name="Skill", input_tokens=5),
+            "__unknown__": ToolCost(tool_name="__unknown__", input_tokens=10),
+        },
     )
-    cost, _invs, _last = _accumulate_tool_costs([turn])
-    assert "__unknown__" not in cost
-    assert cost["__unattributed__"] == 0.02
+    sessions = [Session(session_id="s1", source_file="s.jsonl", is_sidechain=False, cwd="/p/a", turns=[turn])]
+
+    detail = build_model_detail("opus-4-7", usage_from_sessions(sessions).queries)
+    rows = {r["name"]: r for r in detail["by_tool"]}
+    assert set(rows) == {"Read", "Edit", "Glob"}
+    input_usd = cost_for_turn("claude-opus-4-7", usage, at=ts).input_usd
+    assert rows["Read"]["cost_usd"] == pytest.approx(0.4 * input_usd)
+    # No call recorded, but the tool is still represented.
+    assert rows["Read"]["invocations"] == 0
+    assert rows["Edit"]["invocations"] == 2
+    assert (rows["Glob"]["cost_usd"], rows["Glob"]["invocations"]) == (0.0, 1)
+    assert [r["name"] for r in detail["by_tool"]] == ["Read", "Edit", "Glob"]  # costliest first
 
 
 # ---- derive_delta_turns tests ------------------------------------------
@@ -1059,8 +1084,7 @@ def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
             cache = ParseCache()
             r1 = build_snapshot_full(cache, history_store=store)
             # Force-flush whatever the broadcaster would normally batch.
-            held = legacy_turn_view(cache.usage)
-            store.flush(turns=held.turns, sessions=held.sessions)
+            store.flush(turns=engine_turns(cache.usage), sessions=engine_sessions(cache.usage))
             first_sessions = {i.session_id for i in cache.usage.index.all()}
 
         # Delete the live JSONLs.

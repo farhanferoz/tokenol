@@ -6,10 +6,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from conftest import engine_sessions, engine_turns
 
 import tokenol.serve.state as _state_mod
 from tokenol.serve.app import ServerConfig, create_app
-from tokenol.serve.state import legacy_turn_view
+from tokenol.serve.state import encode_cwd
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -677,6 +678,65 @@ async def test_search_cwd_prefix(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_day_page_and_search_prefixes_over_three_sessions(tmp_path: Path) -> None:
+    """Four sessions over two days, one below another's directory: the day page's hours and rows, and every search prefix."""
+    dst = tmp_path / "projects" / "sess-multi.jsonl"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
+    # A fourth session, in a directory below projA, the day before: it groups under projA as a project,
+    # and the 14th must not list it.
+    (tmp_path / "projects" / "sess-d.jsonl").write_text(
+        '{"type":"system","timestamp":"2026-04-13T09:00:00Z","sessionId":"sess-d","cwd":"/home/u/projA/sub"}\n'
+        '{"type":"assistant","timestamp":"2026-04-13T09:01:00Z","sessionId":"sess-d","requestId":"req-d",'
+        '"uuid":"evt-d","isSidechain":false,"model":"claude-opus-4-7","message":{"id":"msg-d","role":"assistant",'
+        '"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,'
+        '"cache_creation_input_tokens":0}}}\n'
+    )
+
+    from httpx import ASGITransport, AsyncClient
+
+    with _mock_dirs(tmp_path):
+        app = create_app(ServerConfig())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            day = (await client.get("/api/day/2026-04-14")).json()
+            empty_day = await client.get("/api/day/2026-04-12")
+            found = {
+                q: (await client.get("/api/search", params={"q": q})).json()["hits"]
+                for q in ("session:sess-b", "cwd:/home/u/projA", "model:sonnet", "date:2026-04", "verdict:ok", "proja")
+            }
+
+    assert empty_day.status_code == 404
+    hours = day["hourly"]
+    assert [h["turns"] for h in hours[9:13]] == [0, 2, 1, 1]
+    assert [h["model_mix"] for h in hours[9:13]] == [
+        {},
+        {"claude-opus-4-7": 2},
+        {"claude-opus-4-7": 1},
+        {"claude-sonnet-4-6": 1},
+    ]
+    assert day["total_cost"] == pytest.approx(sum(h["cost_usd"] for h in hours))
+    assert day["total_cost"] > 0
+    costs = [r["cost_usd"] for r in day["top_sessions"]]
+    assert {r["id"] for r in day["top_sessions"]} == {"sess-a", "sess-b", "sess-c"}
+    assert costs == sorted(costs, reverse=True)
+    assert [p["cwd"] for p in day["top_projects"]][0] == "/home/u/projA"
+
+    def hrefs(query: str, kind: str) -> list[str]:
+        return [h["href"] for h in found[query] if h["kind"] == kind]
+
+    assert hrefs("session:sess-b", "session") == ["/session/sess-b"]
+    # sess-a, sess-c and the nested sess-d are one project.
+    assert hrefs("cwd:/home/u/projA", "project") == [f"/project/{encode_cwd('/home/u/projA')}"]
+    assert hrefs("model:sonnet", "model") == ["/model/sonnet-4-6"]
+    assert hrefs("date:2026-04", "day") == ["/day/2026-04-13", "/day/2026-04-14"]
+    assert sorted(hrefs("verdict:ok", "session")) == [f"/session/sess-{c}" for c in "abcd"]
+    assert all(h["label"].endswith("— OK") for h in found["verdict:ok"])
+    # Free text matches each session's own cwd, so the nested directory is a project of its own here.
+    assert sorted(hrefs("proja", "session")) == ["/session/sess-a", "/session/sess-c", "/session/sess-d"]
+    assert sorted(hrefs("proja", "project")) == sorted(f"/project/{encode_cwd(c)}" for c in ("/home/u/projA", "/home/u/projA/sub"))
+
+
+@pytest.mark.asyncio
 async def test_search_empty_query(tmp_path: Path) -> None:
     """GET /api/search with empty q returns empty hits."""
     from httpx import ASGITransport, AsyncClient
@@ -1071,9 +1131,9 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     assert isinstance(p["output_cost"], (int, float)) and p["output_cost"] >= 0
 
     # Oracle cross-check: per-project token sums match raw snapshot totals.
-    snap = legacy_turn_view(app.state.usage)
-    expected_input = sum(t.usage.input_tokens for s in snap.sessions for t in s.turns if not t.is_interrupted)
-    expected_output = sum(t.usage.output_tokens for s in snap.sessions for t in s.turns if not t.is_interrupted)
+    sessions = engine_sessions(app.state.usage)
+    expected_input = sum(t.usage.input_tokens for s in sessions for t in s.turns if not t.is_interrupted)
+    expected_output = sum(t.usage.output_tokens for s in sessions for t in s.turns if not t.is_interrupted)
     assert sum(p["input"] for p in data["projects"]) == expected_input
     assert sum(p["output"] for p in data["projects"]) == expected_output
 
@@ -1081,8 +1141,8 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     # cost_for_turn() applied to each non-interrupted turn.
     from tokenol.metrics.cost import cost_for_turn
 
-    expected_input_cost = sum(cost_for_turn(t.model, t.usage).input_usd for s in snap.sessions for t in s.turns if not t.is_interrupted)
-    expected_output_cost = sum(cost_for_turn(t.model, t.usage).output_usd for s in snap.sessions for t in s.turns if not t.is_interrupted)
+    expected_input_cost = sum(cost_for_turn(t.model, t.usage).input_usd for s in sessions for t in s.turns if not t.is_interrupted)
+    expected_output_cost = sum(cost_for_turn(t.model, t.usage).output_usd for s in sessions for t in s.turns if not t.is_interrupted)
     assert abs(sum(p["input_cost"] for p in data["projects"]) - expected_input_cost) < 1e-9
     assert abs(sum(p["output_cost"] for p in data["projects"]) - expected_output_cost) < 1e-9
 
@@ -1147,9 +1207,9 @@ async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
         assert billable == sorted(billable, reverse=True)
 
         # Oracle cross-check: sums of per-model input/output match raw totals.
-        snap = legacy_turn_view(app.state.usage)
-        expected_input = sum(t.usage.input_tokens for t in snap.turns if not t.is_interrupted)
-        expected_output = sum(t.usage.output_tokens for t in snap.turns if not t.is_interrupted)
+        turns = engine_turns(app.state.usage)
+        expected_input = sum(t.usage.input_tokens for t in turns if not t.is_interrupted)
+        expected_output = sum(t.usage.output_tokens for t in turns if not t.is_interrupted)
         assert sum(mm["input"] for mm in data["models"]) == expected_input
         assert sum(mm["output"] for mm in data["models"]) == expected_output
 
@@ -1157,7 +1217,7 @@ async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
         # to each non-interrupted turn.
         from tokenol.metrics.cost import cost_for_turn
 
-        expected_cost = sum(cost_for_turn(t.model, t.usage).total_usd for t in snap.turns if not t.is_interrupted)
+        expected_cost = sum(cost_for_turn(t.model, t.usage).total_usd for t in turns if not t.is_interrupted)
         assert abs(cost_total - expected_cost) < 1e-9
 
 
@@ -1294,7 +1354,11 @@ async def test_api_tool_detail_404_on_unknown(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None:
-    """Regression: /api/hourly must track the broadcaster, not stale app.state.snapshot_result."""
+    """Regression: /api/hourly must track the broadcaster, not stale app.state.snapshot_result.
+
+    The same tick must also reach the per-session pieces: the day page's session rows come from
+    the rollup cache (warm after the first request), which the tick has to invalidate.
+    """
     import asyncio
     from datetime import datetime, timezone
 
@@ -1335,6 +1399,8 @@ async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None
                 resp = await client.get(f"/api/hourly/{target_date}?metric=cost_per_kw")
                 turns_before = sum(p["turns"] for s in resp.json()["series"] for p in s["points"])
                 assert turns_before == 2, f"fixture has 2 assistant turns, /api/hourly saw {turns_before}"
+                day_before = (await client.get(f"/api/day/{target_date}")).json()
+                assert [r["turns"] for r in day_before["top_sessions"]] == [2]
 
             sess_path.write_bytes(sess_path.read_bytes() + _turn_line("evt-003", 10, 30))
 
@@ -1353,6 +1419,10 @@ async def test_api_hourly_reflects_broadcaster_freshness(tmp_path: Path) -> None
                 resp = await client.get(f"/api/hourly/{target_date}?metric=cost_per_kw")
                 turns_after = sum(p["turns"] for s in resp.json()["series"] for p in s["points"])
                 assert turns_after == 3, f"/api/hourly returned stale turns ({turns_after}); expected 3 after appending one turn"
+                day_after = (await client.get(f"/api/day/{target_date}")).json()
+                assert [r["turns"] for r in day_after["top_sessions"]] == [3], "day page kept a stale session rollup"
+                assert day_after["total_cost"] > day_before["total_cost"]
+                assert (await client.get("/api/session/sess-001")).json()["totals"]["turns"] == 3
         finally:
             await agen.aclose()
 

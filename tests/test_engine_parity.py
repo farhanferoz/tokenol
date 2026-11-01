@@ -33,23 +33,14 @@ from test_engine_ingest import (
 
 from tokenol.engine import SessionInfo, UsageEngine
 from tokenol.engine.filters import GroupKey, InterruptedPolicy, SearchField, TurnFilter
-from tokenol.engine.queries import UsageQueries
+from tokenol.engine.queries import SkillDetail, TopTurn, UsageQueries
 from tokenol.engine.sessions import grouped_project_cwds
 from tokenol.enums import AttributionMode
 from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
 from tokenol.metrics.cost import cache_saved_usd, cost_for_turn, rollup_by_date, rollup_by_hour
-from tokenol.metrics.rollups import (
-    build_model_rollups,
-    build_skill_cost_daily,
-    build_tool_cost_daily,
-)
+from tokenol.metrics.rollups import build_model_rollups
 from tokenol.model.events import Session, Turn, Usage
-from tokenol.serve.state import (
-    _accumulate_skill_costs,
-    _accumulate_tool_costs,
-    _short_model,
-    build_tool_detail,
-)
+from tokenol.serve.state import _short_model
 
 REL = 1e-9
 ABS = 1e-12  # sums that cancel to ~0 differ by rounding only
@@ -239,6 +230,78 @@ _SKILL_TOTALS_WANT = {'all': (1.1770500000000004, 288090.0, 59950.0), 'since': (
 
 _BILLABLE_WANT = {'all': (256212.0, 288090.0), 'since': (215082.0, 240570.0)}
 
+# Frozen from the Python functions the serve layer used before Task 7 converted them
+# (`_accumulate_tool_costs`, `build_tool_detail`, `_accumulate_skill_costs`, `build_skill_detail`,
+# `build_tool_cost_daily`, `build_skill_cost_daily`), run over this fixture. The engine side of each
+# case is unchanged. Daily lists hold the non-zero days; the leading number is the 30-day length.
+_TOOL_ACCUMULATE_WANT = ({'Bash': 0.055804375,
+  'Edit': 0.037520625,
+  'Read': 0.02164875,
+  '__unattributed__': 0.0054121875,
+  'mcp__sé,rver__"do\nit"': 0.010824375},
+ {'Bash': 30, 'Grep': 12, 'Read': 11},
+ {'Bash': '2026-05-05T23:15:00+00:00',
+  'Edit': '2026-05-05T23:15:00+00:00',
+  'Grep': '2026-05-05T23:15:00+00:00',
+  'Read': '2026-05-05T23:12:00+00:00',
+  'mcp__sé,rver__"do\nit"': '2026-05-05T23:12:00+00:00'})
+
+_TOOL_DETAIL_WANT = {
+    'Bash': {'by_model': {'claude-haiku-4-5': (0.013495, 10), 'claude-sonnet-4-6': (0.04215000000000001, 14)},
+             'by_project': {'"quo,te"\nnext line': (0.017325, 6, '2026-05-05T23:15:00+00:00'),
+                            '(unknown)': (0.006215, 6, '2026-05-05T13:09:00+00:00'),
+                            'one': (0.017292500000000002, 8, '2026-05-05T23:12:00+00:00'),
+                            'two': (0.0148125, 4, '2026-05-05T00:03:00+00:00')},
+             'invocations': 24,
+             'output_tokens': 2082.0,
+             'total_cost': 0.055645},
+    'Grep': {'by_model': {'claude-haiku-4-5': (0.0, 5), 'claude-sonnet-4-6': (0.0, 7)},
+             'by_project': {'"quo,te"\nnext line': (0.0, 3, '2026-05-05T23:15:00+00:00'),
+                            '(unknown)': (0.0, 3, '2026-05-05T13:09:00+00:00'),
+                            'one': (0.0, 4, '2026-05-04T23:57:00+00:00'),
+                            'two': (0.0, 2, '2026-05-05T00:03:00+00:00')},
+             'invocations': 12,
+             'output_tokens': 0.0,
+             'total_cost': 0.0},
+    'Edit': {'by_model': {'claude-haiku-4-5': (0.008355, 0), 'claude-sonnet-4-6': (0.02907, 0)},
+             'by_project': {'"quo,te"\nnext line': (0.014175, 0, '2026-05-05T23:15:00+00:00'),
+                            '(unknown)': (0.005084999999999999, 0, '2026-05-05T13:09:00+00:00'),
+                            'one': (0.0105375, 0, '2026-05-04T23:57:00+00:00'),
+                            'two': (0.007627499999999999, 0, '2026-05-05T00:03:00+00:00')},
+             'invocations': 0,
+             'output_tokens': 1422.0,
+             'total_cost': 0.037425},
+}
+
+_SKILLS_WANT = {
+    'all': ({'brainstorm': 0.14925000000000002, 'skill,"é"\nx': 0.1575},
+            {'brainstorm': 11},
+            {'brainstorm': '2026-05-05T23:15:00+00:00', 'skill,"é"\nx': '2026-05-05T13:10:00+00:00'}),
+    'since': ({'brainstorm': 0.11400000000000002, 'skill,"é"\nx': 0.11399999999999999},
+              {'brainstorm': 6},
+              {'brainstorm': '2026-05-05T23:15:00+00:00', 'skill,"é"\nx': '2026-05-05T13:10:00+00:00'}),
+}
+
+_TOOL_DAILY_WANT = (30, [('2026-05-01', 0.00509875), ('2026-05-02', 0.01093875), ('2026-05-03', 0.008815),
+                         ('2026-05-04', 0.021963749999999997), ('2026-05-05', 0.00882875)])
+_SKILL_DAILY_WANT = (30, [('2026-05-01', 0.018), ('2026-05-02', 0.01725), ('2026-05-03', 0.0405),
+                          ('2026-05-05', 0.07350000000000001)])
+
+_SKILL_DETAIL_WANT = {
+    SKILL: {'by_model': {'claude-sonnet-4-6': 0.14925000000000002},
+            'by_project': {'"quo,te"\nnext line': (0.14925000000000002, '2026-05-05T23:15:00+00:00')},
+            'invocations': 11,
+            'output_tokens': 2650.0,
+            'split': {'inline_usd': 0.14925000000000002, 'subagent_usd': 0.0},
+            'total_cost': 0.14925000000000002},
+    HOSTILE_SKILL: {'by_model': {'claude-sonnet-4-6': 0.1575},
+                    'by_project': {'"quo,te"\nnext line': (0.1575, '2026-05-05T13:10:00+00:00')},
+                    'invocations': 0,
+                    'output_tokens': 2800.0,
+                    'split': {'inline_usd': 0.081, 'subagent_usd': 0.0765},
+                    'total_cost': 0.1575},
+}
+
 
 class Fixture:
     def __init__(self) -> None:
@@ -371,20 +434,18 @@ def _breakdown_tools(fx: Fixture, mode: AttributionMode, since: date | None, cas
 
 
 def _tool_accumulate(fx: Fixture):
-    cost, invs, last = _accumulate_tool_costs(fx.turns)
     got = fx.q.tool_costs(TurnFilter(interrupted=INCLUDE), AttributionMode.PRORATA)
     mine_cost = dict(got.cost_by_tool)
     if got.unknown_usd:
         mine_cost[UNATTRIBUTED_TOOL] = got.unknown_usd
-    return (mine_cost, got.calls_by_tool, got.last_seen), (dict(cost), dict(invs), last)
+    mine_last = {name: moment.isoformat() for name, moment in got.last_seen.items()}
+    return (mine_cost, got.calls_by_tool, mine_last), _TOOL_ACCUMULATE_WANT
 
 
 def _tool_detail(fx: Fixture, tool: str):
     cutoff = BASE + timedelta(days=3)
-    f = TurnFilter(interrupted=EXCLUDE)
-    payload = build_tool_detail(tool, fx.pick(), fx.sessions)
-    rows = fx.q.tool_detail_rows(f, tool, recent_since=cutoff)
-    assert payload is not None and rows
+    rows = fx.q.tool_detail_rows(TurnFilter(interrupted=EXCLUDE), tool, recent_since=cutoff)
+    assert rows
     by_project: dict[str, tuple[float, int, str]] = {}
     by_model: dict[str, tuple[float, int]] = {}
     for r in rows:
@@ -398,26 +459,66 @@ def _tool_detail(fx: Fixture, tool: str):
         "invocations": sum(r.invocations for r in rows),
         "by_project": {p.rsplit("/", 1)[-1] if p != "(unknown)" else p: v for p, v in by_project.items()},
         "by_model": by_model,
-        "recent": sum(r.recent_invocations for r in rows),
     }
-    sc = payload["scorecards"]
-    want = {
-        "total_cost": sc["cost_usd"],
-        "output_tokens": sc["output_tokens"],
-        "invocations": sc["invocations"],
-        "by_project": {r["project_label"]: (r["cost_usd"], r["invocations"], r["last_active"]) for r in payload["by_project"]},
-        "by_model": {r["name"]: (r["cost_usd"], r["invocations"]) for r in payload["by_model"]},
-        "recent": sum(t.tool_names.get(tool, 0) for t in fx.pick(policy=EXCLUDE) if t.timestamp >= cutoff),
-    }
+    want = dict(_TOOL_DETAIL_WANT[tool])
+    # The recent-call window moves with the clock in the old payload, so it is checked live.
+    mine["recent"] = sum(r.recent_invocations for r in rows)
+    want["recent"] = sum(t.tool_names.get(tool, 0) for t in fx.pick(policy=EXCLUDE) if t.timestamp >= cutoff)
     return mine, want
 
 
 def _skills(fx: Fixture, since: date | None, case: str):
-    cost, invs, last = _accumulate_skill_costs(fx.pick(since=since, policy=EXCLUDE))
     got = fx.q.skill_costs(TurnFilter(since=since, interrupted=EXCLUDE))
-    mine = (got.cost_by_skill, got.invocations_by_skill, got.last_active,
+    mine = (got.cost_by_skill, got.invocations_by_skill, {k: v.isoformat() for k, v in got.last_active.items()},
             got.total_cost, got.total_billable_tokens, got.skill_billable_tokens)
-    return mine, (dict(cost), dict(invs), last, *_SKILL_TOTALS_WANT[case])
+    cost, invs, last = _SKILLS_WANT[case]
+    return mine, (cost, invs, last, *_SKILL_TOTALS_WANT[case])
+
+
+def _skill_detail(fx: Fixture, skill: str):
+    cutoff = BASE + timedelta(days=3)
+    detail = fx.q.skill_detail(TurnFilter(interrupted=EXCLUDE), skill, recent_since=cutoff)
+    assert detail.rows
+    by_project: dict[str, tuple[float, str]] = {}
+    by_model: dict[str, float] = {}
+    for r in detail.rows:
+        cost, last = by_project.get(r.project, (0.0, ""))
+        by_project[r.project] = (cost + r.cost_usd, max(last, r.last_active.isoformat()))
+        by_model[r.model] = by_model.get(r.model, 0.0) + r.cost_usd
+    mine = {
+        "total_cost": sum(r.cost_usd for r in detail.rows),
+        "output_tokens": sum(r.output_tokens for r in detail.rows),
+        "invocations": detail.invocations,
+        "split": {
+            "inline_usd": sum(r.inline_usd for r in detail.rows),
+            "subagent_usd": sum(r.subagent_usd for r in detail.rows),
+        },
+        "by_project": {p.rsplit("/", 1)[-1] if p != "(unknown)" else p: v for p, v in by_project.items()},
+        "by_model": by_model,
+    }
+    # The recent-call window moves with the clock in the old payload, so it is checked live.
+    mine["recent"] = detail.recent_invocations
+    want = dict(_SKILL_DETAIL_WANT[skill])
+    want["recent"] = sum(t.skill_names.get(skill, 0) for t in fx.pick(policy=EXCLUDE) if t.timestamp >= cutoff)
+    return mine, want
+
+
+def _top_turns(fx: Fixture, projects: tuple[str, ...], n: int):
+    got = fx.q.top_turns_by_cost(TurnFilter(projects=projects, interrupted=EXCLUDE), n)
+    # Cost-descending; the stable sort keeps arrival order, which is the engine's turn-id order.
+    ranked = sorted(fx.pick(projects=projects, policy=EXCLUDE), key=lambda t: t.cost_usd, reverse=True)[:n]
+    want = [
+        TopTurn(
+            t.timestamp, t.session_id, t.model, t.cost_usd, t.usage.input_tokens, t.usage.output_tokens,
+            t.usage.cache_read_input_tokens, t.usage.cache_creation_input_tokens,
+        )
+        for t in ranked
+    ]
+    return got, want
+
+
+def _daily_cost_rows(rows) -> tuple[int, list[tuple[str, float]]]:
+    return len(rows), [(r.date.isoformat(), r.cost_usd) for r in rows if r.cost_usd]
 
 
 # Frozen from the Python `_build_recent_activity` before it was converted to read the engine
@@ -494,14 +595,30 @@ def _cases(fx: Fixture) -> dict[str, Callable[[], tuple]]:
         "tool-detail-no-cost-entry": lambda: _tool_detail(fx, "Grep"),
         "tool-detail-no-call": lambda: _tool_detail(fx, "Edit"),
         "tool-cost-daily": lambda: (
-            fx.q.tool_cost_daily(TurnFilter(interrupted=EXCLUDE), "Bash", today=LAST_DAY),
-            build_tool_cost_daily(fx.pick(), tool_name="Bash", today=LAST_DAY),
+            _daily_cost_rows(fx.q.tool_cost_daily(TurnFilter(interrupted=EXCLUDE), "Bash", today=LAST_DAY)),
+            _TOOL_DAILY_WANT,
         ),
         "skills": lambda: _skills(fx, None, "all"),
         "skills-since": lambda: _skills(fx, mid, "since"),
         "skill-cost-daily": lambda: (
-            fx.q.skill_cost_daily(TurnFilter(interrupted=EXCLUDE), SKILL, today=LAST_DAY),
-            build_skill_cost_daily(fx.pick(), skill_name=SKILL, today=LAST_DAY),
+            _daily_cost_rows(fx.q.skill_cost_daily(TurnFilter(interrupted=EXCLUDE), SKILL, today=LAST_DAY)),
+            _SKILL_DAILY_WANT,
+        ),
+        "skill-detail": lambda: _skill_detail(fx, SKILL),
+        "skill-detail-sidechain-split": lambda: _skill_detail(fx, HOSTILE_SKILL),
+        "skill-detail-unknown": lambda: (
+            fx.q.skill_detail(TurnFilter(interrupted=EXCLUDE), "no-such-skill"),
+            SkillDetail(0, 0, []),
+        ),
+        "top-turns-by-cost": lambda: _top_turns(fx, ("/p/one",), 1000),
+        "top-turns-by-cost-limited": lambda: _top_turns(fx, (), 3),
+        "session-ids": lambda: (
+            fx.q.session_ids(TurnFilter(since=mid, until=mid)),
+            sorted({t.session_id for t in fx.pick(since=mid, until=mid)}),
+        ),
+        "session-ids-project": lambda: (
+            fx.q.session_ids(TurnFilter(projects=("/p/one",))),
+            sorted({t.session_id for t in fx.pick(projects=("/p/one",))}),
         ),
         "billable-totals": lambda: (
             fx.q.billable_totals(TurnFilter(interrupted=EXCLUDE)),

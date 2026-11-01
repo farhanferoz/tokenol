@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from tokenol.metrics.rollups import SessionRollup, build_session_rollup
 from tokenol.metrics.verdicts import compute_verdict
-from tokenol.model.events import Session
+from tokenol.model.events import Session, Turn
 
 if TYPE_CHECKING:
     from tokenol.engine.engine import UsageEngine
@@ -148,6 +148,18 @@ class SessionIndex:
             )
         return list(self._ordered)
 
+    def session(self, session_id: str, turns: list[Turn]) -> Session:
+        """The ``Session`` of *session_id* holding *turns*; an id the index lacks has empty metadata."""
+        info = self._infos.get(session_id)
+        return Session(
+            session_id=session_id,
+            source_file=info.source_file if info else "",
+            is_sidechain=info.is_sidechain if info else False,
+            cwd=info.cwd if info else None,
+            turns=turns,
+            archived=self.archived(session_id),
+        )
+
     def set_live_paths(self, paths: Iterable[Path | str]) -> None:
         """The JSONL files present now; a session whose file is not among them is archived."""
         self._live_ids = frozenset(Path(p).stem for p in paths)
@@ -188,15 +200,7 @@ class SessionRollupCache:
         if missing:
             turns_by_sid = self._engine.session_turns_many(missing)
             for sid in missing:
-                info = self._index.get(sid)
-                session = Session(
-                    session_id=sid,
-                    source_file=info.source_file if info else "",
-                    is_sidechain=info.is_sidechain if info else False,
-                    cwd=info.cwd if info else None,
-                    turns=turns_by_sid.get(sid, []),
-                    archived=self._index.archived(sid),
-                )
+                session = self._index.session(sid, turns_by_sid.get(sid, []))
                 rollup = build_session_rollup(session)
                 rollup.verdict = compute_verdict(rollup)
                 self._cache[sid] = rollup

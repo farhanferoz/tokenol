@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import engine_sessions, engine_turns
 
 pytest.importorskip("duckdb")
 
@@ -14,7 +15,7 @@ import tokenol.ingest.discovery as _disc_mod
 import tokenol.serve.state as _state_mod
 from tokenol.engine import UsageContext
 from tokenol.persistence.store import HistoryStore
-from tokenol.serve.state import ParseCache, build_snapshot_full, legacy_turn_view
+from tokenol.serve.state import ParseCache, build_snapshot_full
 
 
 def _write_session(proj_dir: Path, sid: str, cwd: str, model: str, ts_iso: str, uid: str) -> None:
@@ -87,8 +88,7 @@ def test_jsonl_deletion_preserves_snapshot(tmp_path: Path) -> None:
             cache = ParseCache()
             r1 = build_snapshot_full(cache, history_store=store)
             # Force-flush whatever the broadcaster would normally batch.
-            held = legacy_turn_view(cache.usage)
-            store.flush(turns=held.turns, sessions=held.sessions)
+            store.flush(turns=engine_turns(cache.usage), sessions=engine_sessions(cache.usage))
 
         # Delete one JSONL — sid-A should become archived; sid-B stays live.
         (proj / "sid-A.jsonl").unlink()
@@ -106,7 +106,7 @@ def test_jsonl_deletion_preserves_snapshot(tmp_path: Path) -> None:
             assert r1.payload[k] == r2.payload[k], f"divergence in {k}"
 
         # sid-A is archived (no live JSONL); sid-B is not.
-        sids = {s.session_id: s for s in legacy_turn_view(cache2.usage).sessions}
+        sids = {s.session_id: s for s in engine_sessions(cache2.usage)}
         assert sids["sid-A"].archived is True, "sid-A should be archived after JSONL deletion"
         assert sids["sid-B"].archived is False, "sid-B has live JSONL — must not be archived"
     finally:

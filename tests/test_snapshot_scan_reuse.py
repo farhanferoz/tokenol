@@ -14,12 +14,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import engine_sessions, engine_turns
+
 from tokenol.serve import state as state_mod
 from tokenol.serve.state import (
     ParseCache,
     build_snapshot_full,
     compute_active_keys,
-    legacy_turn_view,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -62,10 +63,12 @@ def test_result_is_identical_with_and_without_precomputed_keys(tmp_path, monkeyp
     build_snapshot_full(with_keys_cache, all_projects=False, active_keys=keys)
     build_snapshot_full(without_cache, all_projects=False)
 
-    with_keys, without = legacy_turn_view(with_keys_cache.usage), legacy_turn_view(without_cache.usage)
-    assert len(with_keys.turns) == len(without.turns)
-    assert [t.dedup_key for t in with_keys.turns] == [t.dedup_key for t in without.turns]
-    assert {s.session_id for s in with_keys.sessions} == {s.session_id for s in without.sessions}
+    with_keys, without = engine_turns(with_keys_cache.usage), engine_turns(without_cache.usage)
+    assert len(with_keys) == len(without)
+    assert [t.dedup_key for t in with_keys] == [t.dedup_key for t in without]
+    assert {s.session_id for s in engine_sessions(with_keys_cache.usage)} == {
+        s.session_id for s in engine_sessions(without_cache.usage)
+    }
 
 
 def test_new_file_is_still_picked_up_on_the_next_tick(tmp_path, monkeypatch) -> None:
@@ -75,7 +78,7 @@ def test_new_file_is_still_picked_up_on_the_next_tick(tmp_path, monkeypatch) -> 
 
     cache = ParseCache()
     build_snapshot_full(cache, all_projects=False, active_keys=compute_active_keys(all_projects=False))
-    first = legacy_turn_view(cache.usage)
+    first = engine_turns(cache.usage)
 
     # Distinct ids: a byte copy would dedup against the first file and prove nothing.
     second_text = (
@@ -88,6 +91,6 @@ def test_new_file_is_still_picked_up_on_the_next_tick(tmp_path, monkeypatch) -> 
     )
     (root / "projects" / "sess-002.jsonl").write_text(second_text)
     build_snapshot_full(cache, all_projects=False, active_keys=compute_active_keys(all_projects=False))
-    second = legacy_turn_view(cache.usage)
+    second = engine_turns(cache.usage)
 
-    assert len(second.turns) > len(first.turns), "a newly added file was not picked up"
+    assert len(second) > len(first), "a newly added file was not picked up"

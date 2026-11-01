@@ -45,8 +45,8 @@ from tokenol.engine.queries import (
     Totals,
     UsageQueries,
 )
-from tokenol.engine.sessions import SessionInfo, grouped_project_cwds
-from tokenol.enums import AssumptionTag, BlowUpVerdict, PriceStatus
+from tokenol.engine.sessions import SessionInfo
+from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict, PriceStatus
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import (
     SKILL_TOOL,
@@ -72,10 +72,9 @@ from tokenol.metrics.context import (
 )
 from tokenol.metrics.cost import (
     DailyRollup,
+    HourlyRollup,
     TurnCost,
     cost_for_turn,
-    rollup_by_date,
-    rollup_by_hour,
 )
 from tokenol.metrics.cost import price_status as model_price_status
 from tokenol.metrics.history import baseline_median, trailing_median
@@ -83,14 +82,9 @@ from tokenol.metrics.rollups import (
     ModelRollup,
     SessionRollup,
     _rank_dict_with_others,
-    build_model_rollups,
     build_project_rollups,
-    build_session_rollup,
-    build_skill_cost_daily,
-    build_tool_cost_daily,
 )
 from tokenol.metrics.thresholds import DEFAULTS
-from tokenol.metrics.verdicts import compute_verdict
 from tokenol.model.events import EMPTY_ASSUMPTIONS, RawEvent, Session, Turn, Usage
 from tokenol.model.pricing import FAMILY_FALLBACKS, context_window
 
@@ -417,40 +411,6 @@ class SnapshotResult:
     payload: dict
 
 
-@dataclass(frozen=True)
-class LegacyTurnView:
-    """Every turn and session as Python objects, for the endpoints not yet migrated.
-
-    TRANSITIONAL: deleted by Task 7, when the last reader of ``.turns`` / ``.sessions``
-    moves to the engine's queries.
-    """
-
-    turns: list[Turn]  # time order
-    sessions: list[Session]  # SessionIndex.all() order, each holding its own turns
-
-
-def legacy_turn_view(usage: UsageContext) -> LegacyTurnView:
-    """Materialise every session's turns from the engine in one batched read.
-
-    TRANSITIONAL: deleted by Task 7.
-    """
-    infos = usage.index.all()
-    turns_by_sid = usage.engine.session_turns_many(info.session_id for info in infos)
-    sessions = [
-        Session(
-            session_id=info.session_id,
-            source_file=info.source_file,
-            is_sidechain=info.is_sidechain,
-            cwd=info.cwd,
-            turns=turns_by_sid.get(info.session_id, []),
-            archived=usage.index.archived(info.session_id),
-        )
-        for info in infos
-    ]
-    turns = sorted((t for s in sessions for t in s.turns), key=lambda t: t.timestamp)
-    return LegacyTurnView(turns=turns, sessions=sessions)
-
-
 def encode_cwd(cwd: str) -> str:
     """Encode a filesystem path to a URL-safe base64 string (no padding)."""
     return base64.urlsafe_b64encode(cwd.encode()).rstrip(b"=").decode()
@@ -520,35 +480,6 @@ def _projects_in_window(rollups: list[SessionRollup], since: date) -> list[dict]
                 "interrupted_turn_rate": pr.interrupted_turn_rate,
                 "verdict_mix": pr.verdict_mix,
                 "flagged": pr.flagged,
-            }
-        )
-    return result
-
-
-def _models_in_window(turns: list[Turn], since: date) -> list[dict]:
-    scoped = [t for t in turns if t.timestamp.date() >= since]
-    result = []
-    for mr in build_model_rollups(scoped):
-        sidechain_ratio = mr.sidechain_turns / mr.turns if mr.turns > 0 else 0.0
-        interrupted_turn_rate = mr.interrupted_turns / mr.turns if mr.turns > 0 else 0.0
-        result.append(
-            {
-                "model": mr.model,
-                "cost_usd": mr.cost_usd,
-                "turns": mr.turns,
-                "input_tokens": mr.input_tokens,
-                "output_tokens": mr.output_tokens,
-                "cache_read_tokens": mr.cache_read_tokens,
-                "cache_creation_tokens": mr.cache_creation_tokens,
-                "tool_error_rate": tool_error_rate(mr.tool_error_count, mr.tool_use_count) or 0.0,
-                "sidechain_ratio": sidechain_ratio,
-                "interrupted_turn_rate": interrupted_turn_rate,
-                "cost_breakdown": {
-                    "input_usd": mr.input_usd,
-                    "output_usd": mr.output_usd,
-                    "cache_read_usd": mr.cache_read_usd,
-                    "cache_creation_usd": mr.cache_creation_usd,
-                },
             }
         )
     return result
@@ -1405,79 +1336,79 @@ def build_recent_activity_panel(queries: UsageQueries, now: datetime, window_min
     return _build_recent_activity(queries, now, window_minutes)
 
 
-def build_model_detail(
-    name: str,
-    turns: list[Turn],
-    sessions: list[Session],
-) -> dict | None:
-    model_turns = [t for t in turns if t.model == name or _short_model(t.model) == name]
-    if not model_turns:
+def _by_tool_rows(tool_costs: ToolCosts, *, with_last_active: bool) -> list[dict]:
+    """Per-tool rows of a model or project page: cost and calls, costliest first (ties by name).
+
+    ``last_active`` is the newest turn with either a cost entry or a call (``last_seen``).
+    """
+    rows = []
+    for name in set(tool_costs.cost_by_tool) | set(tool_costs.calls_by_tool):
+        row = {
+            "name": name,
+            "cost_usd": tool_costs.cost_by_tool.get(name, 0.0),
+            "invocations": tool_costs.calls_by_tool.get(name, 0),
+        }
+        if with_last_active:
+            seen = tool_costs.last_seen.get(name)
+            row["last_active"] = seen.isoformat() if seen else None
+        rows.append(row)
+    rows.sort(key=lambda r: (-r["cost_usd"], r["name"]))
+    return rows
+
+
+def _by_skill_rows(skill_costs: SkillCosts, *, with_last_active: bool) -> list[dict]:
+    """Per-skill rows of a model or project page: attributed cost and calls, costliest first (ties by name)."""
+    rows = []
+    for name, cost in skill_costs.cost_by_skill.items():
+        row = {"name": name, "cost_usd": cost, "invocations": skill_costs.invocations_by_skill.get(name, 0)}
+        if with_last_active:
+            seen = skill_costs.last_active.get(name)
+            row["last_active"] = seen.isoformat() if seen else None
+        rows.append(row)
+    rows.sort(key=lambda r: (-r["cost_usd"], r["name"]))
+    return rows
+
+
+def build_model_detail(name: str, queries: UsageQueries) -> dict | None:
+    """Build the model drill-down payload for GET /api/model/{name}.
+
+    *name* is a full model id or its short name; every full id it matches is one model here.
+    """
+    models = tuple(m for m in queries.distinct_values(SearchField.MODEL, TurnFilter()) if name in (m, _short_model(m)))
+    if not models:
         return None
-
-    rollups = build_model_rollups(model_turns)
-    mr = rollups[0] if rollups else None
-
-    cwd_by_sid = grouped_project_cwds(sessions)
-    proj_costs: defaultdict[str, float] = defaultdict(float)
-    proj_turn_counts: defaultdict[str, int] = defaultdict(int)
-    proj_last_turn: dict[str, Turn] = {}
-    for t in model_turns:
-        cwd = cwd_by_sid.get(t.session_id, "(unknown)")
-        proj_costs[cwd] += t.cost_usd
-        proj_turn_counts[cwd] += 1
-        if cwd not in proj_last_turn or t.timestamp > proj_last_turn[cwd].timestamp:
-            proj_last_turn[cwd] = t
+    f = TurnFilter(models=models)
+    # Only the costliest model's split is shown when a short name matches several full ids.
+    mr = queries.model_rollups(f)[0]
+    totals = queries.totals(f)
 
     projects = sorted(
-        [
+        (
             {
                 "cwd": cwd,
                 "cwd_b64": encode_cwd(cwd),
-                "cost": proj_costs[cwd],
-                "turns": proj_turn_counts[cwd],
-                "last_active": proj_last_turn[cwd].timestamp.isoformat() if cwd in proj_last_turn else None,
+                "cost": b.total_cost,
+                "turns": b.turns,
+                "last_active": b.last_ts.isoformat() if b.last_ts else None,
             }
-            for cwd in proj_costs
-        ],
-        key=lambda x: -x["cost"],
-    )
-
-    tool_cost, tool_invs, _ = _accumulate_tool_costs(model_turns, with_last_active=False)
-
-    by_tool = sorted(
-        [
-            {
-                "name": tname,
-                "cost_usd": tool_cost.get(tname, 0.0),
-                "invocations": tool_invs.get(tname, 0),
-            }
-            for tname in (set(tool_cost) | set(tool_invs))
-            if tname != UNATTRIBUTED_TOOL
-        ],
-        key=lambda r: -r["cost_usd"],
-    )
-
-    skill_cost, skill_invs, _ = _accumulate_skill_costs(model_turns, with_last_active=False)
-    by_skill = sorted(
-        [{"name": s, "cost_usd": skill_cost[s], "invocations": skill_invs.get(s, 0)} for s in skill_cost],
-        key=lambda r: -r["cost_usd"],
+            for cwd, b in queries.bucket(f, GroupKey.PROJECT).items()
+        ),
+        key=lambda p: (-p["cost"], p["cwd"]),
     )
 
     return {
         "name": name,
-        "total_cost": sum(t.cost_usd for t in model_turns),
-        "total_turns": len(model_turns),
+        "total_cost": totals.cost_usd,
+        "total_turns": totals.turns,
         "cost_breakdown": {
             "input_usd": mr.input_usd,
             "output_usd": mr.output_usd,
             "cache_read_usd": mr.cache_read_usd,
             "cache_creation_usd": mr.cache_creation_usd,
-        }
-        if mr
-        else None,
+        },
         "projects_using_model": projects,
-        "by_tool": by_tool,
-        "by_skill": by_skill,
+        "by_tool": _by_tool_rows(queries.tool_costs(f, AttributionMode.PRORATA), with_last_active=False),
+        "by_skill": _by_skill_rows(queries.skill_costs(_excluding_interrupted(f)), with_last_active=False),
     }
 
 
@@ -1537,23 +1468,6 @@ def build_breakdown_tools(tool_costs: ToolCosts) -> list[dict]:
     return ranked
 
 
-def build_breakdown_skills(turns: list[Turn], top_n: int = _BREAKDOWN_TOP_N) -> list[dict]:
-    """Build the ranked skill list for GET /api/breakdown/skills.
-
-    Skill cost is turn-level: a turn's full cost_usd is credited to its
-    `attribution_skill` (which tags both inline main-thread work and sidechain
-    sub-agents). Unlike tools there is no byte-share split and no
-    `__unattributed__` row — turns with no skill are simply excluded, since the
-    vast majority of normal interactive work runs under no skill.
-
-    Returns top-`top_n` skills by cost + a collapsed `other` tail row.
-    `invocations` come from Skill-tool trigger blocks (`skill_names`).
-    """
-    # Same accumulation (and same interrupted-turn handling) the model/project
-    # detail pages use, so the Skill Mix panel can't drift from them.
-    return _rank_skill_costs(*_accumulate_skill_costs(turns), top_n=top_n)
-
-
 def _rank_skill_costs(
     cost_by_skill: dict[str, float],
     inv_by_skill: dict[str, int],
@@ -1600,68 +1514,6 @@ def build_skill_breakdown(skill_costs: SkillCosts, top_n: int = _BREAKDOWN_TOP_N
     }
 
 
-def _accumulate_tool_costs(
-    turns: list[Turn],
-    *,
-    with_last_active: bool = True,
-) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
-    """Walk *turns* and aggregate per-tool cost, invocations, and last_active.
-
-    ``__unknown__`` (unmatched tool_result bytes) is folded into the
-    ``__unattributed__`` cost bucket so it never surfaces as a separate tool.
-    ``last_active`` is populated for any tool with either cost or invocations
-    so callers can iterate ``set(cost) | set(invs)`` without KeyError.
-    """
-    cost: defaultdict[str, float] = defaultdict(float)
-    invs: defaultdict[str, int] = defaultdict(int)
-    last: dict[str, datetime] = {}
-    for t in turns:
-        for name, tc in t.tool_costs.items():
-            if name == SKILL_TOOL:
-                continue  # owned by the Skill dimension; /tool/Skill 404s
-            if name == UNKNOWN_TOOL:
-                cost[UNATTRIBUTED_TOOL] += tc.cost_usd
-            else:
-                cost[name] += tc.cost_usd
-            if with_last_active and name != UNKNOWN_TOOL and (name not in last or t.timestamp > last[name]):
-                last[name] = t.timestamp
-        for name, count in t.tool_names.items():
-            if name == SKILL_TOOL:
-                continue
-            invs[name] += count
-            if with_last_active and (name not in last or t.timestamp > last[name]):
-                last[name] = t.timestamp
-    return cost, invs, last
-
-
-def _accumulate_skill_costs(
-    turns: list[Turn],
-    *,
-    with_last_active: bool = True,
-) -> tuple[dict[str, float], dict[str, int], dict[str, datetime]]:
-    """Group attributed turns' full cost_usd by skill. invocations from skill_names.
-
-    Interrupted turns are skipped (they carry zero cost but can still carry a
-    stray skill tag), so every caller — Skill Mix, skill detail, and the
-    model/project ``by_skill`` bars — agrees on which turns count.
-    """
-    cost: defaultdict[str, float] = defaultdict(float)
-    invs: defaultdict[str, int] = defaultdict(int)
-    last: dict[str, datetime] = {}
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        for name, count in t.skill_names.items():
-            invs[name] += count
-        skill = t.attribution_skill
-        if not skill:
-            continue
-        cost[skill] += t.cost_usd
-        if with_last_active and (skill not in last or t.timestamp > last[skill]):
-            last[skill] = t.timestamp
-    return cost, invs, last
-
-
 def estimated_models(models: Iterable[str]) -> list[dict]:
     """Models among *models* that are missing from the price list, and what each is priced as.
 
@@ -1694,203 +1546,133 @@ def _invoked_without_cost(
     return {"skills": len(no_cost), "uses": sum(no_cost.values())}
 
 
-def build_tool_detail(
-    name: str,
-    turns: list[Turn],
-    sessions: list[Session],
-) -> dict | None:
+def _cwd_label(cwd: str) -> str:
+    return cwd.rsplit("/", 1)[-1] if cwd != UNKNOWN_LABEL else UNKNOWN_LABEL
+
+
+def _detail_lists(rows: Iterable[tuple[str, str, float, int, datetime]]) -> tuple[list[dict], list[dict]]:
+    """The ``by_project`` and ``by_model`` lists of a tool or skill page, costliest first, uncapped.
+
+    *rows* are ``(project, model, cost, invocations, last_active)``, one per (project, model) pair.
+    """
+    by_cwd: dict[str, tuple[float, int, datetime]] = {}
+    by_model: dict[str, tuple[float, int]] = {}
+    for cwd, model, cost, invocations, last in rows:
+        old_cost, old_invs, old_last = by_cwd.get(cwd, (0.0, 0, last))
+        by_cwd[cwd] = (old_cost + cost, old_invs + invocations, max(old_last, last))
+        old_cost, old_invs = by_model.get(model, (0.0, 0))
+        by_model[model] = (old_cost + cost, old_invs + invocations)
+    by_project = sorted(
+        (
+            {
+                "cwd_b64": encode_cwd(cwd) if cwd != UNKNOWN_LABEL else None,
+                "project_label": _cwd_label(cwd),
+                "cost_usd": cost,
+                "invocations": invocations,
+                "last_active": last.isoformat(),
+            }
+            for cwd, (cost, invocations, last) in by_cwd.items()
+        ),
+        key=lambda r: (-r["cost_usd"], r["project_label"], r["cwd_b64"] or ""),
+    )
+    by_model_rows = sorted(
+        ({"name": m, "cost_usd": cost, "invocations": invs} for m, (cost, invs) in by_model.items()),
+        key=lambda r: (-r["cost_usd"], r["name"]),
+    )
+    return by_project, by_model_rows
+
+
+def _top_project(by_project: list[dict], total_cost: float) -> dict:
+    """The costliest project of a tool or skill page, with its share of that tool's or skill's cost."""
+    if not by_project:
+        return {"name": "—", "cost_usd": 0.0, "share": 0.0}
+    top = by_project[0]
+    return {
+        "name": top["project_label"] if top["cwd_b64"] else "—",
+        "cost_usd": top["cost_usd"],
+        "share": top["cost_usd"] / total_cost if total_cost > 0 else 0.0,
+    }
+
+
+def _detail_window_start() -> datetime:
+    """Start (UTC midnight) of the last seven days, today included: the "calls in 7 days" window."""
+    today = datetime.now(tz=timezone.utc).date()
+    return datetime.combine(today - timedelta(days=_RECENT_DAYS - 1), datetime.min.time(), tzinfo=timezone.utc)
+
+
+def build_tool_detail(name: str, queries: UsageQueries) -> dict | None:
     """Build the tool drill-down payload for GET /api/tool/{name}."""
     if name in (UNATTRIBUTED_TOOL, UNKNOWN_TOOL, SKILL_TOOL):
         return None
-    tool_turns = [t for t in turns if not t.is_interrupted and (name in t.tool_costs or t.tool_names.get(name, 0) > 0)]
-    if not tool_turns:
+    billable = TurnFilter(interrupted=InterruptedPolicy.EXCLUDE)
+    rows = queries.tool_detail_rows(billable, name, recent_since=_detail_window_start())
+    if not rows:
         return None
 
-    cwd_by_sid = grouped_project_cwds(sessions)
-
-    total_cost = 0.0
-    total_output_tokens = 0.0
-    total_invocations = 0
-    proj_cost: defaultdict[str, float] = defaultdict(float)
-    proj_invs: defaultdict[str, int] = defaultdict(int)
-    proj_last: dict[str, datetime] = {}
-    model_cost: defaultdict[str, float] = defaultdict(float)
-    model_invs: defaultdict[str, int] = defaultdict(int)
-
-    for t in tool_turns:
-        tc = t.tool_costs.get(name)
-        if tc:
-            total_cost += tc.cost_usd
-            total_output_tokens += tc.output_tokens
-        invs = t.tool_names.get(name, 0)
-        total_invocations += invs
-        cwd = cwd_by_sid.get(t.session_id, "(unknown)")
-        proj_cost[cwd] += tc.cost_usd if tc else 0.0
-        proj_invs[cwd] += invs
-        if cwd not in proj_last or t.timestamp > proj_last[cwd]:
-            proj_last[cwd] = t.timestamp
-        model = t.model or "(unknown)"
-        model_cost[model] += tc.cost_usd if tc else 0.0
-        model_invs[model] += invs
-
-    grand_total_cost = sum(tt.cost_usd for tt in turns if not tt.is_interrupted)
-
-    top_cwd = max(proj_cost.items(), key=lambda kv: kv[1], default=("(unknown)", 0.0))
-    top_project = {
-        "name": top_cwd[0].rsplit("/", 1)[-1] if top_cwd[0] != "(unknown)" else "—",
-        "cost_usd": top_cwd[1],
-        "share": top_cwd[1] / total_cost if total_cost > 0 else 0.0,
-    }
-
-    today_utc = datetime.now(tz=timezone.utc).date()
-    seven_days_ago_ts = datetime.combine(today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc)
-    invs_7d = sum(t.tool_names.get(name, 0) for t in tool_turns if t.timestamp >= seven_days_ago_ts)
-
-    # Pass the already-filtered tool_turns so daily aggregation doesn't walk
-    # the full corpus on every /api/tool/{name} request.
-    daily = build_tool_cost_daily(tool_turns, tool_name=name, days=30)
-
-    # Cap by_project / by_model lists at top 50 entries to bound payload size
-    # for users with many projects or model variations. Rare-enough rows
-    # rendered as a single "other" footer would lose their click-through, so
-    # we hard-truncate instead.
-    by_project_full = sorted(
-        [
-            {
-                "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
-                "project_label": cwd.rsplit("/", 1)[-1] if cwd != "(unknown)" else "(unknown)",
-                "cost_usd": proj_cost[cwd],
-                "invocations": proj_invs[cwd],
-                "last_active": proj_last[cwd].isoformat(),
-            }
-            for cwd in proj_cost
-        ],
-        key=lambda r: (-r["cost_usd"], r["project_label"]),
+    total_cost = sum(r.cost_usd for r in rows)
+    total_invocations = sum(r.invocations for r in rows)
+    by_project, by_model = _detail_lists(
+        (r.project, r.model, r.cost_usd, r.invocations, r.last_active) for r in rows
     )
-    by_project = by_project_full[:50]
-    by_model_full = sorted(
-        [{"name": m, "cost_usd": model_cost[m], "invocations": model_invs[m]} for m in model_cost],
-        key=lambda r: (-r["cost_usd"], r["name"]),
-    )
-    by_model = by_model_full[:50]
+    grand_total_cost = queries.totals(billable).cost_usd
+    daily = queries.tool_cost_daily(billable, name)
 
     return {
         "name": name,
         "total_invocations": total_invocations,
         "scorecards": {
             "cost_usd": total_cost,
-            "output_tokens": total_output_tokens,
+            "output_tokens": sum(r.output_tokens for r in rows),
             "invocations": total_invocations,
-            "invocations_7d": invs_7d,
+            "invocations_7d": sum(r.recent_invocations for r in rows),
             "share_of_total": (total_cost / grand_total_cost) if grand_total_cost else 0.0,
-            "top_project": top_project,
+            "top_project": _top_project(by_project, total_cost),
         },
         "daily_cost": [{"date": d.date.isoformat(), "cost_usd": d.cost_usd} for d in daily],
-        "by_project": by_project,
-        "by_model": by_model,
+        # Capped so a user with many projects or model variants keeps a bounded payload; rows
+        # folded into an "other" footer would lose their click-through, so the tail is dropped.
+        "by_project": by_project[:_DETAIL_LIST_LIMIT],
+        "by_model": by_model[:_DETAIL_LIST_LIMIT],
     }
 
 
-def build_skill_detail(
-    name: str,
-    turns: list[Turn],
-    sessions: list[Session],
-) -> dict | None:
+def build_skill_detail(name: str, queries: UsageQueries) -> dict | None:
     """Build the skill drill-down payload for GET /api/skill/{name}.
 
-    Cost/tokens/by_model/by_project/daily come from turns attributed to the
-    skill (turn-level: full cost_usd each). Invocations come from Skill-tool
-    trigger blocks across all turns. `split` partitions attributed cost into
-    inline (main-thread) vs sub-agent (sidechain) — the dimension's headline.
+    Cost, tokens, by_model, by_project and the daily series come from the turns attributed to
+    the skill (turn-level: each turn's full cost). Invocations come from Skill-tool trigger
+    blocks across all turns. ``split`` partitions the attributed cost into inline (main thread)
+    and sub-agent (sidechain), the dimension's headline.
     """
-    cwd_by_sid = grouped_project_cwds(sessions)
-    today_utc = datetime.now(tz=timezone.utc).date()
-    seven_days_ago_ts = datetime.combine(today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc)
-
-    # Single pass over the corpus: invocations (from the trigger turns, which
-    # are usually NOT in `attributed`) and grand_total_cost span all turns,
-    # while the cost/token/project/model tallies are confined to `attributed`.
-    attributed: list[Turn] = []
-    total_cost = 0.0
-    total_output_tokens = 0.0
-    inline_usd = 0.0
-    subagent_usd = 0.0
-    invocations = 0
-    invs_7d = 0
-    grand_total_cost = 0.0
-    proj_cost: defaultdict[str, float] = defaultdict(float)
-    proj_last: dict[str, datetime] = {}
-    model_cost: defaultdict[str, float] = defaultdict(float)
-
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        grand_total_cost += t.cost_usd
-        n = t.skill_names.get(name, 0)
-        if n:
-            invocations += n
-            if t.timestamp >= seven_days_ago_ts:
-                invs_7d += n
-        if t.attribution_skill != name:
-            continue
-        attributed.append(t)
-        total_cost += t.cost_usd
-        total_output_tokens += t.usage.output_tokens
-        if t.is_sidechain:
-            subagent_usd += t.cost_usd
-        else:
-            inline_usd += t.cost_usd
-        cwd = cwd_by_sid.get(t.session_id, "(unknown)")
-        proj_cost[cwd] += t.cost_usd
-        if cwd not in proj_last or t.timestamp > proj_last[cwd]:
-            proj_last[cwd] = t.timestamp
-        model_cost[t.model or "(unknown)"] += t.cost_usd
-
-    if not attributed and invocations == 0:
+    billable = TurnFilter(interrupted=InterruptedPolicy.EXCLUDE)
+    detail = queries.skill_detail(billable, name, recent_since=_detail_window_start())
+    if not detail.rows and detail.invocations == 0:
         return None
 
-    top_cwd = max(proj_cost.items(), key=lambda kv: kv[1], default=("(unknown)", 0.0))
-    top_project = {
-        "name": top_cwd[0].rsplit("/", 1)[-1] if top_cwd[0] != "(unknown)" else "—",
-        "cost_usd": top_cwd[1],
-        "share": top_cwd[1] / total_cost if total_cost > 0 else 0.0,
-    }
-
-    daily = build_skill_cost_daily(attributed, skill_name=name, days=30)
-
-    by_project = sorted(
-        [
-            {
-                "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
-                "project_label": cwd.rsplit("/", 1)[-1] if cwd != "(unknown)" else "(unknown)",
-                "cost_usd": proj_cost[cwd],
-                "invocations": 0,
-                "last_active": proj_last[cwd].isoformat(),
-            }
-            for cwd in proj_cost
-        ],
-        key=lambda r: (-r["cost_usd"], r["project_label"]),
-    )[:50]
-    by_model = sorted(
-        [{"name": m, "cost_usd": model_cost[m], "invocations": 0} for m in model_cost],
-        key=lambda r: (-r["cost_usd"], r["name"]),
-    )[:50]
+    total_cost = sum((r.cost_usd for r in detail.rows), 0.0)
+    # A skill's per-pair rows carry no invocations: its calls sit on turns it is not attributed to.
+    by_project, by_model = _detail_lists((r.project, r.model, r.cost_usd, 0, r.last_active) for r in detail.rows)
+    grand_total_cost = queries.totals(billable).cost_usd
+    daily = queries.skill_cost_daily(billable, name)
 
     return {
         "name": name,
-        "total_invocations": invocations,
+        "total_invocations": detail.invocations,
         "scorecards": {
             "cost_usd": total_cost,
-            "output_tokens": total_output_tokens,
-            "invocations": invocations,
-            "invocations_7d": invs_7d,
+            "output_tokens": float(sum(r.output_tokens for r in detail.rows)),
+            "invocations": detail.invocations,
+            "invocations_7d": detail.recent_invocations,
             "share_of_total": (total_cost / grand_total_cost) if grand_total_cost else 0.0,
-            "top_project": top_project,
+            "top_project": _top_project(by_project, total_cost),
         },
-        "split": {"inline_usd": inline_usd, "subagent_usd": subagent_usd},
+        "split": {
+            "inline_usd": sum((r.inline_usd for r in detail.rows), 0.0),
+            "subagent_usd": sum((r.subagent_usd for r in detail.rows), 0.0),
+        },
         "daily_cost": [{"date": d.date.isoformat(), "cost_usd": d.cost_usd} for d in daily],
-        "by_project": by_project,
-        "by_model": by_model,
+        "by_project": by_project[:_DETAIL_LIST_LIMIT],
+        "by_model": by_model[:_DETAIL_LIST_LIMIT],
     }
 
 
@@ -1904,20 +1686,17 @@ def _str_score(target: str, query: str) -> float:
     return 0.0
 
 
-def build_search_results(
-    query: str,
-    turns: list[Turn],
-    sessions: list[Session],
-) -> dict:
+def build_search_results(query: str, usage: UsageContext) -> dict:
     q = query.lower().strip()
     hits: list[dict] = []
+    sessions = usage.index.all()
 
     if q.startswith("session:"):
         val = q[8:].strip()
         for s in sessions:
             score = _str_score(s.session_id.lower(), val)
             if score > 0:
-                cwd = s.cwd or "(unknown)"
+                cwd = s.cwd or UNKNOWN_LABEL
                 hits.append(
                     {
                         "kind": "session",
@@ -1930,9 +1709,9 @@ def build_search_results(
     elif q.startswith("cwd:"):
         val = q[4:].strip()
         seen: set[str] = set()
-        cwd_by_sid = grouped_project_cwds(sessions)
+        cwd_by_sid = usage.index.project_map()
         for s in sessions:
-            cwd = cwd_by_sid.get(s.session_id, "(unknown)")
+            cwd = cwd_by_sid.get(s.session_id, UNKNOWN_LABEL)
             if cwd in seen:
                 continue
             score = _str_score(cwd.lower(), val)
@@ -1949,55 +1728,32 @@ def build_search_results(
 
     elif q.startswith("model:"):
         val = q[6:].strip()
-        seen = set()
-        for t in turns:
-            if not t.model or t.model in seen:
-                continue
-            score = _str_score(t.model.lower(), val)
+        for model in usage.queries.distinct_values(SearchField.MODEL, TurnFilter()):
+            score = _str_score(model.lower(), val)
             if score == 0:
-                score = _str_score(_short_model(t.model).lower(), val)
+                score = _str_score(_short_model(model).lower(), val)
             if score > 0:
-                seen.add(t.model)
-                short = _short_model(t.model)
-                hits.append(
-                    {
-                        "kind": "model",
-                        "label": short,
-                        "href": f"/model/{short}",
-                        "score": score,
-                    }
-                )
+                short = _short_model(model)
+                hits.append({"kind": "model", "label": short, "href": f"/model/{short}", "score": score})
 
     elif q.startswith("date:"):
         val = q[5:].strip()
-        seen = set()
-        for t in turns:
-            d = str(t.timestamp.date())
-            if d in seen:
-                continue
-            score = _str_score(d, val)
+        for day in usage.queries.distinct_values(SearchField.DATE, TurnFilter()):
+            score = _str_score(day, val)
             if score > 0:
-                seen.add(d)
-                hits.append(
-                    {
-                        "kind": "day",
-                        "label": d,
-                        "href": f"/day/{d}",
-                        "score": score,
-                    }
-                )
+                hits.append({"kind": "day", "label": day, "href": f"/day/{day}", "score": score})
 
     elif q.startswith("verdict:"):
         val = q[8:].strip()
-        for s in sessions:
-            sr = build_session_rollup(s)
-            v = compute_verdict(sr)
-            if _str_score(v.value.lower(), val) > 0:
-                cwd = s.cwd or "(unknown)"
+        # Every session's verdict: the first call computes and caches them all.
+        rollups = usage.rollups.rollups([s.session_id for s in sessions])
+        for s, sr in zip(sessions, rollups, strict=True):
+            if _str_score(sr.verdict.value.lower(), val) > 0:
+                cwd = s.cwd or UNKNOWN_LABEL
                 hits.append(
                     {
                         "kind": "session",
-                        "label": f"{cwd.split('/')[-1]} — {v.value}",
+                        "label": f"{cwd.split('/')[-1]} — {sr.verdict.value}",
                         "href": f"/session/{s.session_id}",
                         "score": 1.0,
                     }
@@ -2006,7 +1762,7 @@ def build_search_results(
     else:
         seen_cwds: set[str] = set()
         for s in sessions:
-            cwd = s.cwd or "(unknown)"
+            cwd = s.cwd or UNKNOWN_LABEL
             score_cwd = _str_score(cwd.lower(), q)
             score_sid = _str_score(s.session_id.lower(), q)
             score = max(score_cwd, score_sid)
@@ -2031,13 +1787,23 @@ def build_search_results(
                     )
 
     hits.sort(key=lambda h: -h["score"])
-    return {"hits": hits[:20], "query": query}
+    return {"hits": hits[:_SEARCH_HIT_LIMIT], "query": query}
 
 
 # ---------------------------------------------------------------------------
 # Drilldown builders
 # ---------------------------------------------------------------------------
 
+
+# Page sizes and windows of the drill-down payloads.
+_TOP_TURNS_PER_PROJECT = 20
+_DETAIL_LIST_LIMIT = 50  # by_project / by_model rows on a tool or skill page
+_RECENT_DAYS = 7  # the "calls in 7 days" window, today included
+_SEARCH_HIT_LIMIT = 20
+_DAY_TREND_DAYS = 90  # the daily series the day page's 7-day median reads
+_DAY_ANOMALY_RATIO = 2.0  # a day costing this many times the trailing median is flagged
+_DAY_TOP_SESSIONS = 20
+_DAY_TOP_PROJECTS = 10
 
 _RANGE_DAYS: dict[str, int | None] = {
     "1d": 0,
@@ -2048,32 +1814,48 @@ _RANGE_DAYS: dict[str, int | None] = {
 }
 
 
-def build_project_detail(
-    cwd: str,
-    all_sessions: list[Session],
-    range_key: str = "14d",
-) -> dict | None:
+def _trend_point(unit_start: str, r: DailyRollup | HourlyRollup) -> dict:
+    return {
+        "date": unit_start,
+        "hit_rate": cache_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens) or 0.0,
+        "cost_usd": r.cost_usd,
+    }
+
+
+def _project_cache_trend(
+    queries: UsageQueries, f: TurnFilter, today: date, *, hourly: bool
+) -> tuple[list[dict], str]:
+    """The project page's cache-efficiency series and its unit.
+
+    A one-day range collapses a daily series to one or two points (a flat line or a dot), so it
+    gets hourly buckets instead. Any other range is daily and zero-filled from its first day
+    (for "all": the project's first turn day, not the epoch) to today.
+    """
+    if hourly:
+        return [_trend_point(r.hour.isoformat(), r) for r in queries.hourly(f, target_date=today)], "hour"
+    first_day = f.since or queries.earliest_date(f)
+    return [_trend_point(str(r.date), r) for r in queries.daily(f, fill_since=first_day)], "day"
+
+
+def build_project_detail(cwd: str, usage: UsageContext, range_key: str = "14d") -> dict | None:
     """Build the project drill-down payload for GET /api/project/{cwd_b64}."""
     if range_key not in _RANGE_DAYS:
         raise ValueError(f"Unknown range: {range_key!r}")
+    queries = usage.queries
 
     today_date = datetime.now(tz=timezone.utc).date()
     days_back = _RANGE_DAYS[range_key]
-    since = (today_date - timedelta(days=days_back)) if days_back is not None else date.min
+    since = (today_date - timedelta(days=days_back)) if days_back is not None else None
 
-    cwd_by_sid = grouped_project_cwds(all_sessions)
-    project_sessions = [s for s in all_sessions if cwd_by_sid.get(s.session_id) == cwd]
-    if not project_sessions:
+    cwd_by_sid = usage.index.project_map()
+    project_ids = [s.session_id for s in usage.index.all() if cwd_by_sid.get(s.session_id) == cwd]
+    if not project_ids:
         return None
 
-    rollups = []
-    for s in project_sessions:
-        sr = build_session_rollup(s)
-        sr.verdict = compute_verdict(sr)
-        rollups.append(sr)
-
-    # Scope rollups and turns to the selected window.
-    scoped_rollups = [sr for sr in rollups if sr.last_ts.date() >= since]
+    # Scope rollups to the sessions that were last active in the window.
+    scoped_rollups = [
+        sr for sr in usage.rollups.rollups(project_ids) if since is None or sr.last_ts.date() >= since
+    ]
     if not scoped_rollups:
         return None
 
@@ -2081,33 +1863,8 @@ def build_project_detail(
     prs = build_project_rollups(scoped_rollups)
     pr = prs[0] if prs else None
 
-    project_turns = [t for s in project_sessions for t in s.turns if t.timestamp.date() >= since]
-    # Daily buckets collapse to 1-2 points on range=1d, which makes the cache-
-    # efficiency trend chart unusable (straight flat line or a single dot).
-    # Switch to hourly buckets for 1d so the reader sees the intraday curve.
-    cache_trend = []
-    cache_trend_unit = "day"
-    if range_key == "1d":
-        cache_trend_unit = "hour"
-        hourly_rollups = rollup_by_hour(project_turns, target_date=today_date, fill_day=False)
-        for r in hourly_rollups:
-            cache_trend.append(
-                {
-                    "date": r.hour.isoformat(),
-                    "hit_rate": cache_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens) or 0.0,
-                    "cost_usd": r.cost_usd,
-                }
-            )
-    else:
-        daily_rollups = rollup_by_date(project_turns, since=since)
-        for r in daily_rollups:
-            cache_trend.append(
-                {
-                    "date": str(r.date),
-                    "hit_rate": cache_hit_rate(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens) or 0.0,
-                    "cost_usd": r.cost_usd,
-                }
-            )
+    f = TurnFilter(projects=(cwd,), since=since)
+    cache_trend, cache_trend_unit = _project_cache_trend(queries, f, today_date, hourly=range_key == "1d")
 
     growths = [sr.context_growth_rate_val for sr in scoped_rollups]
     _GROWTH_EDGES = [500, 1000, 2000, 5000, 10000]
@@ -2118,45 +1875,8 @@ def build_project_detail(
 
     verdict_dist = _verdict_dist(scoped_rollups)
 
-    top_turns = sorted(
-        [t for t in project_turns if not t.is_interrupted],
-        key=lambda t: t.cost_usd,
-        reverse=True,
-    )[:20]
-
-    def _turn_hit_rate(t: Turn) -> float | None:
-        u = t.usage
-        return cache_hit_rate(u.cache_read_input_tokens, u.cache_creation_input_tokens, u.input_tokens)
-
-    tool_cost, tool_invs, tool_last = _accumulate_tool_costs(project_turns)
-
-    by_tool = sorted(
-        [
-            {
-                "name": tname,
-                "cost_usd": tool_cost.get(tname, 0.0),
-                "invocations": tool_invs.get(tname, 0),
-                "last_active": tool_last[tname].isoformat() if tname in tool_last else None,
-            }
-            for tname in (set(tool_cost) | set(tool_invs))
-            if tname != UNATTRIBUTED_TOOL
-        ],
-        key=lambda r: -r["cost_usd"],
-    )
-
-    skill_cost, skill_invs, skill_last = _accumulate_skill_costs(project_turns)
-    by_skill = sorted(
-        [
-            {
-                "name": s,
-                "cost_usd": skill_cost[s],
-                "invocations": skill_invs.get(s, 0),
-                "last_active": skill_last[s].isoformat() if s in skill_last else None,
-            }
-            for s in skill_cost
-        ],
-        key=lambda r: -r["cost_usd"],
-    )
+    # Interrupted turns carry no cost and are not listed.
+    top_turns = queries.top_turns_by_cost(_excluding_interrupted(f), _TOP_TURNS_PER_PROJECT)
 
     return {
         "cwd": cwd,
@@ -2176,32 +1896,28 @@ def build_project_detail(
                 "session_id": t.session_id,
                 "model": t.model,
                 "cost_usd": t.cost_usd,
-                "input_tokens": t.usage.input_tokens,
-                "output_tokens": t.usage.output_tokens,
-                "cache_read_tokens": t.usage.cache_read_input_tokens,
-                "cache_creation_tokens": t.usage.cache_creation_input_tokens,
-                "hit_rate": _turn_hit_rate(t),
-                "cost_per_kw": cost_per_kw(t.cost_usd, t.usage.output_tokens),
-                "ctx_ratio": ctx_ratio_n_to_1(t.usage.cache_read_input_tokens, t.usage.output_tokens),
+                "input_tokens": t.input_tokens,
+                "output_tokens": t.output_tokens,
+                "cache_read_tokens": t.cache_read_tokens,
+                "cache_creation_tokens": t.cache_creation_tokens,
+                "hit_rate": cache_hit_rate(t.cache_read_tokens, t.cache_creation_tokens, t.input_tokens),
+                "cost_per_kw": cost_per_kw(t.cost_usd, t.output_tokens),
+                "ctx_ratio": ctx_ratio_n_to_1(t.cache_read_tokens, t.output_tokens),
             }
             for t in top_turns
         ],
-        "by_tool": by_tool,
-        "by_skill": by_skill,
+        "by_tool": _by_tool_rows(queries.tool_costs(f, AttributionMode.PRORATA), with_last_active=True),
+        "by_skill": _by_skill_rows(queries.skill_costs(_excluding_interrupted(f)), with_last_active=True),
     }
 
 
-def build_day_detail(
-    target_date: date,
-    all_turns: list[Turn],
-    all_sessions: list[Session],
-) -> dict | None:
+def build_day_detail(target_date: date, usage: UsageContext) -> dict | None:
     """Build the day drill-down payload for GET /api/day/{date}."""
+    queries = usage.queries
     today_date = datetime.now(tz=timezone.utc).date()
-    since_90d = today_date - timedelta(days=89)
-    turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
+    since_trend = today_date - timedelta(days=_DAY_TREND_DAYS - 1)
     daily_90d_raw: list[dict] = []
-    for r in rollup_by_date(turns_90d, since=since_90d):
+    for r in queries.daily(TurnFilter(since=since_trend), fill_since=since_trend):
         kw = cost_per_kw(r.cost_usd, r.output_tokens) or 0.0
         daily_90d_raw.append(
             {
@@ -2214,46 +1930,31 @@ def build_day_detail(
 
     cost_7d_median = trailing_median(daily_90d_raw, 7, target_date + timedelta(days=1), "cost_usd")
 
-    day_turns = [t for t in all_turns if t.timestamp.date() == target_date]
+    hours = queries.hourly(TurnFilter(), target_date=target_date, fill_day=True)
+    day_turns = sum(r.turns for r in hours)
     if not day_turns and target_date != today_date:
         return None
 
-    hourly_buckets: dict[int, dict] = {}
-    for t in day_turns:
-        h = t.timestamp.astimezone(timezone.utc).hour
-        if h not in hourly_buckets:
-            hourly_buckets[h] = {"cost_usd": 0.0, "turns": 0, "model_counts": defaultdict(int)}
-        hourly_buckets[h]["cost_usd"] += t.cost_usd
-        hourly_buckets[h]["turns"] += 1
-        if t.model:
-            hourly_buckets[h]["model_counts"][t.model] += 1
+    # Per hour: the turns of each model (models with a turn that hour only).
+    mix: dict[int, dict[str, int]] = defaultdict(dict)
+    for model, model_hours in queries.hourly_by(TurnFilter(), GroupKey.MODEL, target_date=target_date).items():
+        for r in model_hours:
+            mix[r.hour.hour][model] = r.turns
+    hourly = [
+        {"hour": r.hour.hour, "cost_usd": r.cost_usd, "turns": r.turns, "model_mix": mix.get(r.hour.hour, {})}
+        for r in hours
+    ]
 
-    hourly = []
-    for h in range(24):
-        b = hourly_buckets.get(h, {})
-        hourly.append(
-            {
-                "hour": h,
-                "cost_usd": b.get("cost_usd", 0.0),
-                "turns": b.get("turns", 0),
-                "model_mix": dict(b.get("model_counts", {})),
-            }
-        )
-
-    day_session_ids = {t.session_id for t in day_turns}
-    day_sessions = [s for s in all_sessions if s.session_id in day_session_ids]
-    day_rollups = []
-    for s in day_sessions:
-        sr = build_session_rollup(s)
-        sr.verdict = compute_verdict(sr)
-        day_rollups.append(sr)
+    touching = set(queries.session_ids(TurnFilter(since=target_date, until=target_date)))
+    day_ids = [s.session_id for s in usage.index.all() if s.session_id in touching]
+    day_rollups = usage.rollups.rollups(day_ids)
     day_rollups.sort(key=lambda sr: sr.cost_usd, reverse=True)
 
     verdict_dist = _verdict_dist(day_rollups)
 
-    day_cost = sum(t.cost_usd for t in day_turns)
+    day_cost = sum(r.cost_usd for r in hours)
     cost_ratio = day_cost / cost_7d_median if cost_7d_median and cost_7d_median > 0 else None
-    anomaly_flags = ["cost_2sigma"] if cost_ratio and cost_ratio >= 2.0 else []
+    anomaly_flags = ["cost_2sigma"] if cost_ratio and cost_ratio >= _DAY_ANOMALY_RATIO else []
 
     return {
         "date": str(target_date),
@@ -2261,7 +1962,7 @@ def build_day_detail(
         "delta_vs_7d_median": cost_ratio,
         "anomaly_flags": anomaly_flags,
         "hourly": hourly,
-        "top_sessions": [_session_rollup_to_dict(sr) for sr in day_rollups[:20]],
-        "top_projects": _projects_in_window(day_rollups, target_date)[:10],
+        "top_sessions": [_session_rollup_to_dict(sr) for sr in day_rollups[:_DAY_TOP_SESSIONS]],
+        "top_projects": _projects_in_window(day_rollups, target_date)[:_DAY_TOP_PROJECTS],
         "verdict_distribution": verdict_dist,
     }

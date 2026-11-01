@@ -70,6 +70,34 @@ def seed_history_store(db_path: Path, *, days_ago: int, turns: int, session_id: 
     return unit * turns
 
 
+def usage_from_sessions(sessions):
+    """A mode-(c) usage context holding *sessions* (their turns and metadata), ready to query.
+
+    The engine prices the turns itself from their usage, so a test states token counts and
+    models, not dollar amounts. Project grouping is pushed before returning, as the server does.
+    """
+    from tokenol.engine import SessionInfo, UsageContext
+
+    usage = UsageContext.open(None)
+    infos = [SessionInfo(s.session_id, s.source_file, s.cwd, s.is_sidechain) for s in sessions]
+    usage.engine.add_turns([t for s in sessions for t in s.turns], infos)
+    usage.index.add(infos)
+    usage.index.project_map()
+    return usage
+
+
+def engine_sessions(usage):
+    """Every session of *usage* as ``Session`` objects holding its engine turns (the oracle tests compare against)."""
+    infos = usage.index.all()
+    turns_by_sid = usage.engine.session_turns_many(i.session_id for i in infos)
+    return [usage.index.session(i.session_id, turns_by_sid.get(i.session_id, [])) for i in infos]
+
+
+def engine_turns(usage):
+    """Every turn of *usage* in time order."""
+    return sorted((t for s in engine_sessions(usage) for t in s.turns), key=lambda t: t.timestamp)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_history_store(tmp_path_factory, monkeypatch):
     """Point every test at a private, non-existent history store.

@@ -10,7 +10,8 @@ The interrupted-turn policy is the caller's, set on the filter (INV 6b item 7):
 
 * INCLUDE: daily / hourly rollups, model rollups, session rollups, recent activity, and
   the tool costs behind the model and project detail pages.
-* EXCLUDE: the tools breakdown, skill costs, tool detail, ``billable_totals``, ``bucket``.
+* EXCLUDE: the tools breakdown, skill costs, skill and tool detail, the project page's top turns,
+  ``billable_totals``, ``bucket``.
 
 Searched before writing: ``grep -rn "GROUP BY" src`` found only the history store's own
 reads (strings and JSON, a different schema), and the Python references are the
@@ -33,7 +34,7 @@ from tokenol.engine.filters import (
     SearchField,
     TurnFilter,
 )
-from tokenol.engine.ingest import sql_literal
+from tokenol.engine.ingest import naive_utc, sql_literal
 from tokenol.engine.pricing import (
     PRICED_TURN_TOOLS_VIEW,
     PRICED_TURNS_VIEW,
@@ -141,7 +142,7 @@ class ToolDetailRow:
 
 @dataclass(frozen=True, slots=True)
 class SkillCosts:
-    """Per-skill sums (the shape ``_accumulate_skill_costs`` returns) plus the spend totals."""
+    """Per-skill sums (cost, calls and last activity per skill) plus the spend totals."""
 
     cost_by_skill: dict[str, float]
     invocations_by_skill: dict[str, int]
@@ -149,6 +150,47 @@ class SkillCosts:
     total_cost: float
     total_billable_tokens: float
     skill_billable_tokens: float
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDetailRow:
+    """One (project, model) pair's share of the turns attributed to one skill."""
+
+    project: str
+    model: str
+    cost_usd: float
+    output_tokens: int
+    inline_usd: float  # cost of the main-thread turns
+    subagent_usd: float  # cost of the sidechain turns
+    last_active: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDetail:
+    """What the skill page reads: calls of the skill and the cost attributed to it.
+
+    ``invocations`` count Skill-tool calls on every turn in the filter, including turns
+    not attributed to the skill (the trigger turn usually is not); ``rows`` cover only
+    the attributed turns.
+    """
+
+    invocations: int
+    recent_invocations: int  # calls on or after ``recent_since``
+    rows: list[SkillDetailRow]
+
+
+@dataclass(frozen=True, slots=True)
+class TopTurn:
+    """One turn as the project page lists its costliest turns."""
+
+    timestamp: datetime
+    session_id: str
+    model: str
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +456,20 @@ class UsageQueries:
         )
         return float(nontool), float(total)
 
+    def top_turns_by_cost(self, f: TurnFilter, n: int) -> list[TopTurn]:
+        """The *n* costliest turns in the filter, cost-descending; ties go to the lowest turn id."""
+        rows = self._query(
+            f"{_T}.ts, {_S}.session_id, {_M}.model, {_P}.cost_usd, {_T}.input_tokens, {_T}.output_tokens, "
+            f"{_T}.cache_read_tokens, {_T}.cache_creation_tokens",
+            f,
+            f"ORDER BY {_P}.cost_usd DESC, {_T}.turn_id LIMIT {int(n)}",
+        )
+        return [TopTurn(_utc(ts), *rest) for ts, *rest in rows]
+
+    def session_ids(self, f: TurnFilter) -> list[str]:
+        """Sessions with at least one turn in the filter, sorted."""
+        return [sid for (sid,) in self._query(f"DISTINCT {_S}.session_id", f, "ORDER BY 1", priced=False)]
+
     def earliest_date(self, f: TurnFilter) -> date | None:
         ((first,),) = self._query(f"min({_T}.ts)", f, priced=False)
         return None if first is None else first.date()
@@ -647,3 +703,34 @@ class UsageQueries:
                 )
             )
         return [DailyToolCost(day, sums.get(day, 0.0)) for day in calendar]
+
+    def skill_detail(self, f: TurnFilter, skill: str, recent_since: datetime | None = None) -> SkillDetail:
+        """Calls of *skill* and, per (project, model), the cost of the turns attributed to it.
+
+        A turn's full cost goes to its attributed skill, split into main-thread and sidechain
+        (sub-agent) turns. *recent_since* (UTC) counts the calls made on or after it.
+        """
+        skill_id = self._named_id(NameKind.SKILL, skill)
+        if skill_id is None:
+            return SkillDetail(0, 0, [])
+        recent = datetime(1, 1, 1) if recent_since is None else naive_utc(recent_since)
+        where, params = f.where()
+        with self._engine.cursor() as cur:
+            ((invocations, recent_invocations),) = cur.execute(
+                f"""SELECT coalesce(sum(c.n), 0), coalesce(sum(c.n) FILTER (WHERE {_T}.ts >= ?), 0)
+                {self._from(False)}
+                JOIN {SKILL_CALLS_TABLE} c ON c.turn_id = {_T}.turn_id AND c.skill_id = {skill_id}
+                WHERE {where}""",
+                [recent, *params],
+            ).fetchall()
+            attributed = cur.execute(
+                f"""SELECT {_LABEL_SQL[GroupKey.PROJECT]}, {_LABEL_SQL[GroupKey.MODEL]}, sum({_P}.cost_usd),
+                    sum({_T}.output_tokens), coalesce(sum({_P}.cost_usd) FILTER (WHERE NOT {_T}.is_sidechain), 0),
+                    coalesce(sum({_P}.cost_usd) FILTER (WHERE {_T}.is_sidechain), 0), max({_T}.ts)
+                {self._from(True)}
+                WHERE {where} AND {_T}.attribution_skill_id = {skill_id}
+                GROUP BY 1, 2""",
+                params,
+            ).fetchall()
+        rows = [SkillDetailRow(*values, _utc(last)) for *values, last in attributed]
+        return SkillDetail(int(invocations), int(recent_invocations), rows)

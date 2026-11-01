@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 
 from tokenol.enums import BlowUpVerdict
 from tokenol.metrics.context import (
@@ -112,47 +112,6 @@ class ModelRollup:
 class DailyToolCost:
     date: date
     cost_usd: float
-
-
-def build_tool_cost_daily(turns: list[Turn], *, tool_name: str, days: int = 30, today: date | None = None) -> list[DailyToolCost]:
-    """Per-day cost_usd for *tool_name* over the last *days* days, zero-filled.
-
-    Defaults *today* to UTC so the window aligns with the UTC turn timestamps;
-    local-TZ callers risk a day's drift on either side of midnight UTC.
-    """
-    today = today or datetime.now(tz=timezone.utc).date()
-    start = today - timedelta(days=days - 1)
-    buckets: dict[date, float] = {start + timedelta(days=i): 0.0 for i in range(days)}
-    for turn in turns:
-        if turn.is_interrupted:
-            continue
-        d = turn.timestamp.date()
-        if d < start:
-            continue
-        tc = turn.tool_costs.get(tool_name)
-        if not tc:
-            continue
-        if d in buckets:
-            buckets[d] += tc.cost_usd
-    return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
-
-
-def build_skill_cost_daily(turns: list[Turn], *, skill_name: str, days: int = 30, today: date | None = None) -> list[DailyToolCost]:
-    """Per-day cost_usd for *skill_name* over the last *days* days, zero-filled.
-
-    Skill cost is turn-level: each attributed turn's full cost_usd is summed.
-    Reuses DailyToolCost (date, cost_usd) — no new shape needed.
-    """
-    today = today or datetime.now(tz=timezone.utc).date()
-    start = today - timedelta(days=days - 1)
-    buckets: dict[date, float] = {start + timedelta(days=i): 0.0 for i in range(days)}
-    for turn in turns:
-        if turn.is_interrupted or turn.attribution_skill != skill_name:
-            continue
-        d = turn.timestamp.date()
-        if d in buckets:
-            buckets[d] += turn.cost_usd
-    return [DailyToolCost(date=d, cost_usd=c) for d, c in sorted(buckets.items())]
 
 
 def build_session_rollup(session: Session) -> SessionRollup:

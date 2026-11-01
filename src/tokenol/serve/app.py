@@ -26,10 +26,9 @@ from tokenol.serve.prefs import Preferences, default_path
 if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
     from tokenol.persistence.store import HistoryStore
-from tokenol.serve.session_detail import build_session_detail, build_turn_detail
+from tokenol.serve.session_detail import build_session_detail, build_turn_detail, load_session
 from tokenol.serve.state import (
     VALID_METRICS,
-    LegacyTurnView,
     ParseCache,
     SnapshotResult,
     build_breakdown_tools,
@@ -47,7 +46,6 @@ from tokenol.serve.state import (
     build_tool_detail,
     decode_cwd,
     encode_cwd,
-    legacy_turn_view,
     model_price_status,
     range_since,
 )
@@ -146,11 +144,6 @@ def _usage_after_a_tick(request: Request) -> UsageContext:
     usage: UsageContext = request.app.state.usage
     usage.index.project_map()
     return usage
-
-
-def _legacy_turn_view(request: Request) -> LegacyTurnView:
-    """TRANSITIONAL: every turn and session as Python objects, for endpoints Task 6-7 migrate."""
-    return legacy_turn_view(_usage_after_a_tick(request))
 
 
 def create_app(
@@ -292,16 +285,14 @@ def create_app(
 
     @app.get("/api/session/{session_id}")
     async def api_session_detail(session_id: str, request: Request):
-        result = _legacy_turn_view(request)
-        session = next((s for s in result.sessions if s.session_id == session_id), None)
+        session = load_session(_usage_after_a_tick(request), session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
         return JSONResponse(build_session_detail(session))
 
     @app.get("/api/session/{session_id}/turn/{turn_idx}")
     async def api_turn_detail(session_id: str, turn_idx: int, request: Request):
-        result = _legacy_turn_view(request)
-        session = next((s for s in result.sessions if s.session_id == session_id), None)
+        session = load_session(_usage_after_a_tick(request), session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
         detail = build_turn_detail(session, turn_idx)
@@ -317,10 +308,10 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid cwd encoding") from None
         if range not in ("1d", "7d", "14d", "30d", "all"):
             raise HTTPException(status_code=400, detail="Invalid range — use 1d, 7d, 14d, 30d, or all")
-        result = _legacy_turn_view(request)
+        usage = _usage_after_a_tick(request)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: build_project_detail(cwd, result.sessions, range_key=range),
+            lambda: build_project_detail(cwd, usage, range_key=range),
         )
         if detail is None:
             raise HTTPException(status_code=404, detail="Project not found or no activity in range")
@@ -334,10 +325,10 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD") from None
         if parsed_date > date.today():
             raise HTTPException(status_code=400, detail="Future dates not supported")
-        result = _legacy_turn_view(request)
+        usage = _usage_after_a_tick(request)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: build_day_detail(parsed_date, result.turns, result.sessions),
+            lambda: build_day_detail(parsed_date, usage),
         )
         if detail is None:
             raise HTTPException(status_code=404, detail="No data for this date")
@@ -437,8 +428,7 @@ def create_app(
     @app.get("/api/model/{name:path}")
     async def api_model_detail(name: str, request: Request):
         name = _validate_tool_or_model_name(name)
-        result = _legacy_turn_view(request)
-        detail = build_model_detail(name, result.turns, result.sessions)
+        detail = build_model_detail(name, _usage_after_a_tick(request).queries)
         if detail is None:
             raise HTTPException(status_code=404, detail="Model not found")
         return JSONResponse(detail)
@@ -446,8 +436,7 @@ def create_app(
     @app.get("/api/tool/{name:path}")
     async def api_tool_detail(name: str, request: Request):
         name = _validate_tool_or_model_name(name)
-        result = _legacy_turn_view(request)
-        detail = build_tool_detail(name, result.turns, result.sessions)
+        detail = build_tool_detail(name, _usage_after_a_tick(request).queries)
         if detail is None:
             raise HTTPException(status_code=404, detail="Tool not found")
         return JSONResponse(detail)
@@ -455,8 +444,7 @@ def create_app(
     @app.get("/api/skill/{name:path}")
     async def api_skill_detail(name: str, request: Request):
         name = _validate_tool_or_model_name(name)
-        result = _legacy_turn_view(request)
-        detail = build_skill_detail(name, result.turns, result.sessions)
+        detail = build_skill_detail(name, _usage_after_a_tick(request).queries)
         if detail is None:
             raise HTTPException(status_code=404, detail="Skill not found")
         return JSONResponse(detail)
@@ -465,8 +453,7 @@ def create_app(
     async def api_search(request: Request, q: str = ""):
         if not q.strip():
             return JSONResponse({"hits": [], "query": q})
-        result = _legacy_turn_view(request)
-        return JSONResponse(build_search_results(q, result.turns, result.sessions))
+        return JSONResponse(build_search_results(q, _usage_after_a_tick(request)))
 
     @app.get("/api/prefs")
     async def api_prefs_get(request: Request):

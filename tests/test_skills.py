@@ -1,18 +1,19 @@
 """Skill cost dimension: parser, aggregation, and detail builders."""
 
+import itertools
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
+from conftest import usage_from_sessions
 
 from tokenol.engine.queries import SkillCosts
 from tokenol.ingest.builder import build_turns
 from tokenol.ingest.parser import _extract_skill_names, _is_real_skill_name
-from tokenol.metrics.rollups import build_skill_cost_daily
-from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost, Turn, Usage
+from tokenol.metrics.cost import cost_for_turn
+from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, Turn, Usage
 from tokenol.serve.state import (
-    _accumulate_skill_costs,
-    _accumulate_tool_costs,
-    build_breakdown_skills,
     build_skill_breakdown,
     build_skill_detail,
     derive_delta_turns,
@@ -22,21 +23,34 @@ from tokenol.serve.state import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _turn(skill, cost, *, sidechain=False, model="claude-opus-4-8", out=0, ts=datetime(2026, 6, 10, 12, tzinfo=timezone.utc), skill_names=None):
+_KEYS = itertools.count()
+OPUS = "claude-opus-4-8"
+
+
+def _turn(skill, out, *, sidechain=False, ts=None, skill_names=None):
+    """A turn with *out* output tokens on OPUS, attributed to *skill* (the engine prices it from the tokens)."""
     t = Turn(
-        dedup_key=f"k{cost}-{skill}",
-        timestamp=ts,
+        dedup_key=f"k{next(_KEYS)}",
+        timestamp=ts or datetime.now(tz=timezone.utc) - timedelta(days=2),
         session_id="s",
-        model=model,
+        model=OPUS,
         usage=Usage(output_tokens=out),
         is_sidechain=sidechain,
         stop_reason=None,
     )
-    t.cost_usd = cost
     t.attribution_skill = skill
     if skill_names:
         t.skill_names = Counter(skill_names)
     return t
+
+
+def _cost(t):
+    return cost_for_turn(t.model, t.usage, at=t.timestamp).total_usd
+
+
+def _skill_costs(cost_by_skill, invocations_by_skill):
+    when = datetime(2026, 6, 10, 12, tzinfo=timezone.utc)
+    return SkillCosts(cost_by_skill, invocations_by_skill, dict.fromkeys(cost_by_skill, when), 0.0, 0.0, 0.0)
 
 
 def test_turn_has_skill_fields_with_defaults():
@@ -94,63 +108,54 @@ def test_parser_reads_attribution_skill_and_invocations():
     assert inline.is_sidechain is False
 
 
-def test_build_breakdown_skills_groups_cost_by_skill():
-    turns = [
-        _turn("tiered-review", 0.06, skill_names={"tiered-review": 1}),  # trigger-ish
-        _turn("tiered-review", 4.00, sidechain=True),  # fan-out
-        _turn("simplify", 0.90),
-        _turn(None, 5.00),  # un-skilled normal work: ignored
-    ]
-    rows = build_breakdown_skills(turns)
+def test_skill_breakdown_ranks_by_cost_and_leaves_no_residual_row():
+    # Un-skilled turns never reach the sums, so the ranking holds only skills; there is no "no skill" row.
+    rows = build_skill_breakdown(_skill_costs({"tiered-review": 4.06, "simplify": 0.90}, {"tiered-review": 1}))["skills"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["tiered-review"]["cost_usd"] == 4.06
     assert by_name["simplify"]["cost_usd"] == 0.90
     assert "other" not in by_name  # only 2 skills, no tail
-    # No "no-skill" residual row — un-skilled turns are simply excluded.
     assert set(by_name) == {"tiered-review", "simplify"}
     assert by_name["tiered-review"]["invocations"] == 1
     # Ranked by cost desc.
     assert [r["name"] for r in rows] == ["tiered-review", "simplify"]
-
-
-def test_build_breakdown_skills_empty_returns_empty():
-    assert build_breakdown_skills([]) == []
-    assert build_breakdown_skills([_turn(None, 1.0)]) == []
+    assert build_skill_breakdown(_skill_costs({}, {}))["skills"] == []
 
 
 def test_build_skill_detail_splits_inline_vs_subagent():
-    turns = [
-        _turn("tiered-review", 0.06, model="claude-opus-4-8", skill_names={"tiered-review": 1}),  # inline trigger
-        _turn("tiered-review", 4.00, sidechain=True, model="claude-opus-4-8", out=2000),  # sub-agent
-        _turn("simplify", 0.90),  # other skill, ignored
-    ]
+    now = datetime.now(tz=timezone.utc)
+    old = now - timedelta(days=60)
+    trigger = _turn("tiered-review", 100, skill_names={"tiered-review": 1})  # inline trigger turn
+    sub_agent = _turn("tiered-review", 2000, sidechain=True)
+    long_ago = _turn("tiered-review", 700, ts=old, skill_names={"tiered-review": 1})  # outside both windows
+    other = _turn("simplify", 500)  # other skill, ignored
+    ghost = _turn("tiered-review", 900, skill_names={"tiered-review": 5})  # interrupted turns count for nothing
+    ghost.is_interrupted = True
+    turns = [trigger, sub_agent, long_ago, other, ghost]
     sessions = [Session(session_id="s", source_file="f.jsonl", is_sidechain=False, cwd="/home/u/proj", turns=turns)]
-    d = build_skill_detail("tiered-review", turns, sessions)
+    d = build_skill_detail("tiered-review", usage_from_sessions(sessions).queries)
     assert d is not None
     assert d["name"] == "tiered-review"
-    assert d["scorecards"]["cost_usd"] == 4.06
-    assert d["scorecards"]["invocations"] == 1
-    assert d["split"] == {"inline_usd": 0.06, "subagent_usd": 4.00}
+    total = _cost(trigger) + _cost(sub_agent) + _cost(long_ago)
+    assert d["scorecards"]["cost_usd"] == pytest.approx(total)
+    assert d["scorecards"]["output_tokens"] == 2800
+    everything = sum(_cost(t) for t in (trigger, sub_agent, long_ago, other))  # not the interrupted turn
+    assert d["scorecards"]["share_of_total"] == pytest.approx(total / everything)
+    assert d["total_invocations"] == d["scorecards"]["invocations"] == 2
+    assert d["scorecards"]["invocations_7d"] == 1  # the old trigger is outside the 7-day window
+    assert d["split"] == pytest.approx({"inline_usd": _cost(trigger) + _cost(long_ago), "subagent_usd": _cost(sub_agent)})
     # by_model groups attributed turns' full cost by model.
-    assert d["by_model"][0] == {"name": "claude-opus-4-8", "cost_usd": 4.06, "invocations": 0}
+    assert d["by_model"][0]["name"] == OPUS and d["by_model"][0]["cost_usd"] == pytest.approx(total)
+    assert d["by_model"][0]["invocations"] == 0
     # by_project keyed on the session cwd.
-    assert d["by_project"][0]["cost_usd"] == 4.06
+    assert d["by_project"][0]["cost_usd"] == pytest.approx(total)
+    # The daily series covers the last 30 days only: the 60-day-old turn is in the totals, not in it.
     assert len(d["daily_cost"]) == 30
+    assert sum(day["cost_usd"] for day in d["daily_cost"]) == pytest.approx(_cost(trigger) + _cost(sub_agent))
 
 
 def test_build_skill_detail_unknown_returns_none():
-    assert build_skill_detail("nope", [], []) is None
-
-
-def test_accumulate_skill_costs_groups_turns():
-    turns = [
-        _turn("tiered-review", 4.0, model="claude-opus-4-8"),
-        _turn("tiered-review", 0.5),
-        _turn("simplify", 0.9),
-        _turn(None, 9.0),
-    ]
-    cost, invs, last = _accumulate_skill_costs(turns)
-    assert cost == {"tiered-review": 4.5, "simplify": 0.9}
+    assert build_skill_detail("nope", usage_from_sessions([]).queries) is None
 
 
 # --- Review follow-ups: edge cases + the four bugs found in tiered review ---
@@ -201,8 +206,7 @@ def test_breakdown_skills_other_name_does_not_corrupt_collapse_row():
     # Even if an "other"-named skill slipped through, the breakdown must not let it
     # overwrite the synthetic tail. (attribution_skill "other" is filtered upstream,
     # so a real skill named "other" never reaches cost_by_skill.)
-    turns = [_turn("other", 5.0), _turn("real", 1.0)]
-    rows = build_breakdown_skills(turns)
+    rows = build_skill_breakdown(_skill_costs({"other": 5.0, "real": 1.0}, {}))["skills"]
     names = [r["name"] for r in rows]
     # "other" attribution survives as data here (no upstream parser in this unit
     # test), but with <=top_n skills there's no synthetic tail to collide with.
@@ -210,21 +214,12 @@ def test_breakdown_skills_other_name_does_not_corrupt_collapse_row():
 
 
 def test_breakdown_skills_tail_collapse_over_top_n():
-    turns = [_turn(f"sk{i}", float(20 - i), skill_names={f"sk{i}": 1}) for i in range(12)]
-    rows = build_breakdown_skills(turns, top_n=10)
+    costs = {f"sk{i}": float(20 - i) for i in range(12)}
+    rows = build_skill_breakdown(_skill_costs(costs, {f"sk{i}": 1 for i in range(12)}), top_n=10)["skills"]
     other = next(r for r in rows if r["name"] == "other")
     assert other["tool_count"] == 2  # 12 skills - top 10
     assert other["invocations"] == 2  # the two collapsed skills' invocations
     assert len([r for r in rows if r["name"] != "other"]) == 10
-
-
-def test_accumulate_skill_costs_skips_interrupted():
-    live = _turn("simplify", 0.9)
-    ghost = _turn("ghost", 0.0)
-    ghost.is_interrupted = True
-    cost, invs, last = _accumulate_skill_costs([live, ghost])
-    assert "ghost" not in cost  # interrupted turn leaves no $0 row
-    assert cost == {"simplify": 0.9}
 
 
 def test_derive_delta_turns_carries_skill_fields():
@@ -238,43 +233,14 @@ def test_derive_delta_turns_carries_skill_fields():
 def test_build_skill_detail_invocations_only_returns_payload():
     # Triggered but never attributed (invocations>0, no attributed turns):
     # must return a non-None payload with zero cost (no division-by-zero).
-    t = _turn(None, 0.30, skill_names={"checkpoint": 1})
-    d = build_skill_detail("checkpoint", [t], [])
+    t = _turn(None, 300, skill_names={"checkpoint": 1})
+    sessions = [Session(session_id="s", source_file="f.jsonl", is_sidechain=False, cwd="/home/u/proj", turns=[t])]
+    d = build_skill_detail("checkpoint", usage_from_sessions(sessions).queries)
     assert d is not None
     assert d["scorecards"]["cost_usd"] == 0.0
     assert d["scorecards"]["invocations"] == 1
     assert d["scorecards"]["share_of_total"] == 0.0
     assert d["scorecards"]["top_project"]["share"] == 0.0
-
-
-def test_build_skill_cost_daily_windowing():
-    today = datetime(2026, 6, 10, tzinfo=timezone.utc).date()
-    inside = _turn("simplify", 2.0, ts=datetime(2026, 6, 9, 12, tzinfo=timezone.utc))
-    outside = _turn("simplify", 9.0, ts=datetime(2026, 1, 1, tzinfo=timezone.utc))
-    wrong = _turn("other-skill", 5.0, ts=datetime(2026, 6, 9, 12, tzinfo=timezone.utc))
-    rows = build_skill_cost_daily([inside, outside, wrong], skill_name="simplify", days=30, today=today)
-    assert len(rows) == 30
-    assert sum(r.cost_usd for r in rows) == 2.0  # only the in-window simplify turn
-
-
-def test_accumulate_tool_costs_excludes_skill_row():
-    # The literal "Skill" tool must not surface in model/project "Cost by tool"
-    # (it 404s on click — it's owned by the Skill dimension).
-    t = Turn(
-        dedup_key="k",
-        timestamp=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
-        session_id="s",
-        model="claude-opus-4-8",
-        usage=Usage(input_tokens=1000, output_tokens=100),
-        is_sidechain=False,
-        stop_reason="tool_use",
-    )
-    t.tool_names = Counter({"Skill": 1, "Read": 2})
-    t.tool_costs = {"Skill": ToolCost("Skill", cost_usd=0.02), "Read": ToolCost("Read", cost_usd=0.05)}
-    cost, invs, _last = _accumulate_tool_costs([t])
-    assert "Skill" not in cost
-    assert "Skill" not in invs
-    assert cost["Read"] == 0.05 and invs["Read"] == 2
 
 
 def test_model_price_status_classifies_pricing_confidence():

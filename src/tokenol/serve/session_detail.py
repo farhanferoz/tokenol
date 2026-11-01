@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from tokenol.engine.context import UsageContext
 from tokenol.metrics.cost import cost_for_turn
 from tokenol.metrics.patterns import detect_patterns
 from tokenol.metrics.rollups import build_session_rollup
@@ -13,6 +14,13 @@ from tokenol.metrics.verdicts import compute_verdict
 from tokenol.model.events import Session, Turn
 
 _SNIPPET_LEN = 500
+
+
+def load_session(usage: UsageContext, session_id: str) -> Session | None:
+    """The session with its turns in time order, read from the engine; ``None`` for an id the index lacks."""
+    if usage.index.get(session_id) is None:
+        return None
+    return usage.index.session(session_id, usage.engine.session_turns(session_id))
 
 
 def _extract_text(content: str | list | None) -> str:
