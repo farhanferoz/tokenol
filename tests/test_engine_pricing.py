@@ -224,7 +224,7 @@ def _db() -> tuple[duckdb.DuckDBPyConnection, PriceTables]:
         tables.rows_for_sql(),
     )
     con.execute(
-        f"CREATE TABLE {TURNS_TABLE} (turn_id BIGINT, ts TIMESTAMP, model_id INTEGER, input_tokens BIGINT, "
+        f"CREATE TABLE {TURNS_TABLE} (turn_id BIGINT, session_ix INTEGER, ts TIMESTAMP, model_id INTEGER, input_tokens BIGINT, "
         "output_tokens BIGINT, cache_read_tokens BIGINT, cache_creation_tokens BIGINT, cache_creation_1h_tokens BIGINT)"
     )
     con.execute(
@@ -252,9 +252,10 @@ def test_sql_prices_match_python(batch: list[Turn]) -> None:
     for i, t in enumerate(batch):
         u = t.usage
         con.execute(
-            f"INSERT INTO {TURNS_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO {TURNS_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 i,
+                0,
                 t.timestamp.replace(tzinfo=None),
                 tables.model_id(t.model),
                 u.input_tokens,

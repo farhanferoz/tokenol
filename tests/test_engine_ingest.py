@@ -3,8 +3,8 @@
 One fixture of turns with hostile strings (comma, double quote, newline,
 non-ASCII in cwd, model-adjacent names, tool and skill names, dedup keys),
 interrupted turns, empty and non-empty tool and skill maps, and passthrough keys,
-loaded three ways: Python turns through CSV staging, the writable store's own
-connection, and a read-only store file. Each must return field-for-field equal,
+loaded two ways: Python turns through CSV staging, and a store file attached
+read-only (after which a writer can open that file in the same process). Each must return field-for-field equal,
 time-ordered turns; ``known_keys`` must answer membership; ``forget`` must remove
 exactly the right rows for each of its four arguments.
 """
@@ -142,25 +142,23 @@ def _assert_same(expected: Turn, actual: Turn) -> None:
             assert getattr(actual, name) is sentinel, name
 
 
-def _make_store(path: Path, turns: list[Turn], sessions: list[SessionInfo]) -> HistoryStore:
-    store = HistoryStore(path)
-    store.flush(
-        turns,
-        [Session(s.session_id, s.source_file, s.is_sidechain, s.cwd) for s in sessions],
-    )
-    return store
-
-
-def _engine(mode: str, tmp_path: Path, turns: list[Turn], sessions: list[SessionInfo]):
+def _engine(mode: str, tmp_path: Path, turns: list[Turn], sessions: list[SessionInfo]) -> UsageEngine:
     if mode == "csv":
-        engine = UsageEngine.open(None, None)
+        engine = UsageEngine.open(None)
         assert engine.add_turns(turns, sessions) == len(turns)
-        return engine, None
-    store = _make_store(tmp_path / "h.duckdb", turns, sessions)
-    if mode == "persist":
-        return UsageEngine.open(store, None), store
+        return engine
+    path = tmp_path / "h.duckdb"
+    store = HistoryStore(path)
+    store.flush(turns, [Session(s.session_id, s.source_file, s.is_sidechain, s.cwd) for s in sessions])
     store.close()
-    return UsageEngine.open(None, tmp_path / "h.duckdb"), None
+    engine = UsageEngine.open(path)
+    # The engine detached the file: a writer opens it read-write in this process and can flush.
+    writer = HistoryStore(path)
+    writer.flush([_priced_turn("late:1", "s2", BASE + timedelta(days=9), usage=Usage(1, 1, 0, 0, 0),
+                               is_sidechain=True, stop_reason=None)], [])
+    assert not writer.is_empty()
+    writer.close()
+    return engine
 
 
 def _turn_count(engine: UsageEngine) -> int:
@@ -178,10 +176,10 @@ def _orphans(engine: UsageEngine) -> int:
         )
 
 
-@pytest.mark.parametrize("mode", ["csv", "persist", "readonly"])
+@pytest.mark.parametrize("mode", ["csv", "store"])
 def test_engine_round_trip_known_keys_and_forget(mode: str, tmp_path: Path) -> None:
     turns, sessions = _fixture()
-    engine, store = _engine(mode, tmp_path, turns, sessions)
+    engine = _engine(mode, tmp_path, turns, sessions)
 
     # Round trip: field-for-field equal and time-ordered.
     for sid in ("s,1", "s2"):
@@ -238,7 +236,7 @@ def test_engine_round_trip_known_keys_and_forget(mode: str, tmp_path: Path) -> N
     first_cut = BASE + timedelta(minutes=7)  # drops two of s,1's three turns
 
     def fresh():
-        e = UsageEngine.open(None, None)
+        e = UsageEngine.open(None)
         e.add_turns([*turns, newer], [*sessions, SessionInfo("s3", "/tmp/s3.jsonl", None, False)])
         with e.cursor() as cur:  # a grouped project value that differs from the stored cwd
             cur.execute("UPDATE sessions SET project_cwd = '/p/two' WHERE session_id = 's,1'")
@@ -267,5 +265,3 @@ def test_engine_round_trip_known_keys_and_forget(mode: str, tmp_path: Path) -> N
     e.close()
 
     engine.close()
-    if store is not None:
-        store.close()

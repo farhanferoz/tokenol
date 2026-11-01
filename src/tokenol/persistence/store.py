@@ -81,6 +81,19 @@ class StoreLockedError(RuntimeError):
             f"Stop it first, or start this one without --persist."
         )
 
+def raise_if_lock_conflict(exc: duckdb.IOException, path: Path) -> None:
+    """Raise StoreLockedError if *exc* is DuckDB's file-lock conflict; otherwise return.
+
+    Only a lock conflict is translated; a genuine IO failure (full disk, bad
+    permissions) must surface unchanged, so the caller re-raises after this returns.
+    """
+    text = str(exc)
+    if "lock" not in text.lower():
+        return
+    m = _CONFLICT_PID_RE.search(text)
+    raise StoreLockedError(path, int(m.group(1)) if m else None) from exc
+
+
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS meta (
     key   VARCHAR PRIMARY KEY,
@@ -382,13 +395,8 @@ class HistoryStore:
         try:
             self._con = duckdb.connect(str(self.path), read_only=read_only)
         except duckdb.IOException as exc:
-            # Only a lock conflict becomes StoreLockedError; a genuine IO
-            # failure (full disk, bad permissions) must surface unchanged.
-            text = str(exc)
-            if "lock" not in text.lower():
-                raise
-            m = _CONFLICT_PID_RE.search(text)
-            raise StoreLockedError(self.path, int(m.group(1)) if m else None) from exc
+            raise_if_lock_conflict(exc, self.path)
+            raise
         # DuckDB defaults to 80% of system RAM, which on a 32-GiB box is enough
         # to OOM the process during a large first-run flush. Bounding the pool
         # forces spills to disk instead.
@@ -409,18 +417,6 @@ class HistoryStore:
         # making every field fall back to its NULL default.
         self._turn_cols = self._turn_column_sql()
         self._turn_cols_prefixed = self._turn_column_sql(prefix="turns.")
-
-    def engine_connection(self) -> duckdb.DuckDBPyConnection:
-        """The write connection, for the usage engine to attach its in-memory catalog to.
-
-        Callers must hold :attr:`connection_lock` while they use it (creating a
-        cursor counts as using it).
-        """
-        return self._con
-
-    @property
-    def connection_lock(self) -> threading.RLock:
-        return self._lock
 
     # Column order MUST match _row_to_turn's unpacking.
     _TURN_COLUMNS: tuple[tuple[str, str], ...] = (

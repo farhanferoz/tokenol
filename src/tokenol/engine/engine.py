@@ -4,14 +4,11 @@ One ``UsageEngine`` holds every turn as columns (about 120 MB for 711 k turns)
 instead of as Python objects. It is loaded from the history store in SQL, fed
 live turns through CSV staging, and materialises one session's turns on demand.
 
-Three connection modes share one API:
+The engine always owns its own in-memory database, in one of two modes:
 
-* ``PERSIST``: ``--persist`` has a writable ``HistoryStore``. The engine attaches
-  an in-memory catalog inside the store's own connection and loads from the
-  store's catalog (a second process cannot open the file, so there is no other way).
-* ``READ_ONLY_STORE``: a store file exists but nothing holds it for writing. The
-  engine opens its own in-memory database, attaches the file read-only, loads,
-  then detaches it so the file cache is freed.
+* ``READ_ONLY_STORE``: a store file exists. The engine attaches it read-only,
+  loads, then detaches it (freeing the file cache), so the ``--persist`` writer can
+  open the same file read-write afterwards in this process.
 * ``MEMORY``: no store; every turn arrives through ``add_turns``.
 
 Searched before writing: ``grep -rn malloc_trim src`` found only a comment in
@@ -41,6 +38,7 @@ from tokenol.engine.ingest import (
     TurnStager,
     TurnTableWriter,
     naive_utc,
+    sql_literal,
 )
 from tokenol.engine.pricing import PRICED_TURN_TOOLS_VIEW, PRICED_TURNS_VIEW, TURNS_TABLE
 from tokenol.engine.schema import (
@@ -65,7 +63,7 @@ from tokenol.model.events import (
     Usage,
 )
 from tokenol.model.registry import is_claude
-from tokenol.persistence.store import HistoryStore
+from tokenol.persistence.store import raise_if_lock_conflict
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +73,6 @@ _BYTES_PER_MB = 1024 * 1024
 
 
 class EngineMode(str, Enum):
-    PERSIST = "persist"
     READ_ONLY_STORE = "read_only_store"
     MEMORY = "memory"
 
@@ -114,55 +111,52 @@ def _mb(value: int | None) -> str:
 class UsageEngine:
     """Owns the engine's tables, its connection and the ingest and forget paths."""
 
-    def __init__(
-        self,
-        connection: duckdb.DuckDBPyConnection,
-        connection_lock: threading.RLock | threading.Lock,
-        mode: EngineMode,
-    ) -> None:
+    def __init__(self, connection: duckdb.DuckDBPyConnection, mode: EngineMode) -> None:
         self.mode = mode
         self._con = connection
         # Guards cursor creation only: a connection is not safe for two threads at once.
-        self._connection_lock = connection_lock
+        self._connection_lock = threading.Lock()
         # Serialises ingest and forget; reads never take it.
         self._write_lock = threading.Lock()
         self._models = ModelCatalog()
         self._writer = TurnTableWriter(release_free_memory)
         self._session_ix: dict[str, int] = {}
+        self._next_session_ix = 0
         self._con.execute(f"ATTACH ':memory:' AS {ENGINE_CATALOG}")
         with self.cursor() as cur:
             create_schema(cur)
 
     @classmethod
-    def open(cls, store: HistoryStore | None, store_path: Path | None) -> UsageEngine:
-        """Pick the connection mode from what exists, load, and release build memory."""
+    def open(cls, store_path: Path | None) -> UsageEngine:
+        """Load the history file at *store_path* if it exists, else start empty; release build memory.
+
+        The engine always owns its own in-memory database. The file is attached
+        read-only, loaded, then detached, so a writer may open it afterwards in
+        the same process and no file cache stays resident.
+
+        Raises StoreLockedError when another process holds the file's lock.
+        """
         started = time.monotonic()
-        if store is not None and not store.read_only:
-            with store.connection_lock:
-                con = store.engine_connection()
-                source = con.execute("SELECT current_database()").fetchone()[0]
-                engine = cls(con, store.connection_lock, EngineMode.PERSIST)
-            engine._load(source)
+        con = duckdb.connect()
+        if store_path is not None and store_path.exists():
+            try:
+                con.execute(f"ATTACH {sql_literal(str(store_path))} AS {_STORE_ALIAS} (READ_ONLY)")
+            except duckdb.IOException as exc:
+                con.close()
+                raise_if_lock_conflict(exc, store_path)
+                raise
+            engine = cls(con, EngineMode.READ_ONLY_STORE)
+            engine._load(_STORE_ALIAS)
+            con.execute(f"DETACH {_STORE_ALIAS}")
         else:
-            path = store_path if store_path is not None else (store.path if store else None)
-            if path is not None and path.exists():
-                con = duckdb.connect()
-                con.execute(f"ATTACH '{path}' AS {_STORE_ALIAS} (READ_ONLY)")
-                engine = cls(con, threading.Lock(), EngineMode.READ_ONLY_STORE)
-                engine._load(_STORE_ALIAS)
-                con.execute(f"DETACH {_STORE_ALIAS}")
-            else:
-                engine = cls(duckdb.connect(), threading.Lock(), EngineMode.MEMORY)
+            engine = cls(con, EngineMode.MEMORY)
         log.info("usage engine open in %s mode after %.1f s", engine.mode.value, time.monotonic() - started)
         return engine
 
     def close(self) -> None:
         """Free the engine's tables (and, when it owns it, the connection)."""
         with self._connection_lock:
-            if self.mode is EngineMode.PERSIST:
-                self._con.execute(f"DETACH {ENGINE_CATALOG}")
-            else:
-                self._con.close()
+            self._con.close()
 
     @contextmanager
     def cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -229,10 +223,12 @@ class UsageEngine:
                         turn.session_id, SessionInfo(turn.session_id, "", None, turn.is_sidechain)
                     )
             allocated = dict(self._session_ix)
+            next_ix = self._next_session_ix
             indexed: list[tuple[int, SessionInfo]] = []
             for sid, info in infos.items():
                 if sid not in allocated:
-                    allocated[sid] = max(allocated.values(), default=-1) + 1
+                    allocated[sid] = next_ix
+                    next_ix += 1
                 indexed.append((allocated[sid], info))
             stager = TurnStager(self._writer, self._models)
             with self.cursor() as cur, self._transaction(cur):
@@ -240,6 +236,7 @@ class UsageEngine:
                 rows = stager.add_turns(cur, fresh)
             self._models.mark_written()
             self._session_ix = allocated
+            self._next_session_ix = next_ix
         if rows > BULK_INGEST_ROWS:
             self._compact()
             before, after = release_free_memory()
@@ -276,6 +273,8 @@ class UsageEngine:
         with self.cursor() as cur:
             rows = cur.execute(f"SELECT session_id, session_ix FROM {SESSIONS_TABLE}").fetchall()
         self._session_ix = dict(rows)
+        # Never reuse an index, even one freed by forget: the counter only grows.
+        self._next_session_ix = max(self._next_session_ix, max(self._session_ix.values(), default=-1) + 1)
 
     # -- forget --------------------------------------------------------------
 
@@ -371,7 +370,7 @@ class UsageEngine:
                     p.cost_usd, p.input_usd, p.output_usd, p.cache_read_usd, p.cache_creation_usd
                 FROM {TURNS_TABLE} t
                 JOIN models m ON m.model_id = t.model_id
-                JOIN {PRICED_TURNS_VIEW} p ON p.turn_id = t.turn_id
+                JOIN {PRICED_TURNS_VIEW} p ON p.turn_id = t.turn_id AND p.session_ix = {ix}
                 LEFT JOIN {NAMES_TABLE} sr ON sr.kind = '{stop}' AND sr.name_id = t.stop_reason_id
                 LEFT JOIN {NAMES_TABLE} sk ON sk.kind = '{skill}' AND sk.name_id = t.attribution_skill_id
                 WHERE t.session_ix = ?
@@ -384,7 +383,7 @@ class UsageEngine:
                     p.input_share, p.output_share
                 FROM {PRICED_TURN_TOOLS_VIEW} p
                 JOIN {NAMES_TABLE} n ON n.kind = '{tool}' AND n.name_id = p.tool_id
-                WHERE p.turn_id IN ({in_turns})""",
+                WHERE p.session_ix = ?""",
                 [ix],
             ).fetchall()
             tool_counts = self._counts(cur, TOOL_CALLS_TABLE, "tool_id", tool, in_turns, ix)

@@ -11,10 +11,13 @@ first two):
 * ``models(model_id, model, entry_key, price_status, context_window, assumptions)``
 * ``model_rates(model_id, valid_from, valid_until, pool_above, pool_at_most,
   input_rate, output_rate, cache_write_rate, cache_write_1h_rate, cache_read_rate)``
-* ``turns(turn_id, ts, model_id, input_tokens, output_tokens, cache_read_tokens,
+* ``turns(turn_id, session_ix, ts, model_id, input_tokens, output_tokens, cache_read_tokens,
   cache_creation_tokens, cache_creation_1h_tokens)``; ``ts`` is naive UTC
 * ``turn_tools(turn_id, tool_id, input_tokens, output_tokens)``; the stored,
   fractional token shares of each tool
+
+Both views expose ``session_ix`` so a per-session query filters before the rates
+join (computing all 711 k rows first cost ~100 ms per session).
 """
 
 from __future__ import annotations
@@ -46,13 +49,13 @@ _M = float(TOKENS_PER_MILLION)
 # A model with no rate row (unknown or non-Claude) matches nothing in the left
 # join, so its rates are NULL and coalesce to 0, as cost_for_turn prices it.
 PRICED_TURNS_DDL = f"""CREATE OR REPLACE VIEW {PRICED_TURNS_VIEW} AS
-SELECT turn_id, ts, model_id, pool,
+SELECT turn_id, session_ix, ts, model_id, pool,
     input_usd, output_usd, cache_read_usd, cache_creation_usd,
     input_usd + output_usd + cache_read_usd + cache_creation_usd AS cost_usd,
     cache_read_tokens * input_rate / {_M} - cache_read_tokens * cache_read_rate / {_M}
         AS cache_saved_usd
 FROM (
-    SELECT t.turn_id, t.ts, t.model_id, t.pool, t.cache_read_tokens,
+    SELECT t.turn_id, t.session_ix, t.ts, t.model_id, t.pool, t.cache_read_tokens,
         coalesce(r.input_rate, 0) AS input_rate,
         coalesce(r.cache_read_rate, 0) AS cache_read_rate,
         t.input_tokens * coalesce(r.input_rate, 0) / {_M} AS input_usd,
@@ -77,13 +80,13 @@ FROM (
 # contributes 0, as ingest.parser._attribute_cost and
 # serve.state._recompute_excl_cache_read do.
 PRICED_TURN_TOOLS_DDL = f"""CREATE OR REPLACE VIEW {PRICED_TURN_TOOLS_VIEW} AS
-SELECT turn_id, tool_id, input_tokens, output_tokens, input_share, output_share,
+SELECT turn_id, session_ix, tool_id, input_tokens, output_tokens, input_share, output_share,
     output_share * output_usd + input_share * (input_usd + cache_read_usd + cache_creation_usd)
         AS cost_prorata,
     output_share * output_usd + input_share * (input_usd + cache_creation_usd)
         AS cost_excl_cache_read
 FROM (
-    SELECT tt.turn_id, tt.tool_id, tt.input_tokens, tt.output_tokens,
+    SELECT tt.turn_id, p.session_ix, tt.tool_id, tt.input_tokens, tt.output_tokens,
         CASE WHEN p.pool > 0 THEN tt.input_tokens / p.pool ELSE 0 END AS input_share,
         CASE WHEN tu.output_tokens > 0 THEN tt.output_tokens / tu.output_tokens ELSE 0 END
             AS output_share,

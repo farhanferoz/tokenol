@@ -114,17 +114,17 @@ def staged_csv(rows: Iterable[Sequence[object]]) -> Iterator[Path]:
         path.unlink(missing_ok=True)
 
 
-def _sql_literal(text: str) -> str:
+def sql_literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
 def _copy_csv(cur, table: str, path: Path) -> None:
     cur.execute(
-        f"COPY {table} FROM {_sql_literal(str(path))} "
+        f"COPY {table} FROM {sql_literal(str(path))} "
         # The dialect is stated, not sniffed: csv.writer's QUOTE_MINIMAL with a
         # doubled-quote escape, which is also what a sniffer would have to guess.
         f"(FORMAT csv, HEADER false, AUTO_DETECT false, DELIMITER ',', QUOTE '\"', "
-        f"ESCAPE '\"', NULL {_sql_literal(CSV_NULL)})"
+        f"ESCAPE '\"', NULL {sql_literal(CSV_NULL)})"
     )
 
 
