@@ -13,18 +13,18 @@ from __future__ import annotations
 
 import dataclasses
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("duckdb")
 
+from conftest import BASE, HAIKU, HOSTILE_CWD, HOSTILE_SKILL, HOSTILE_TOOL, _priced_turn
+
 from tokenol.engine import SessionInfo, UsageEngine
 from tokenol.engine.sessions import SessionIndex, SessionRollupCache
 from tokenol.enums import AssumptionTag
-from tokenol.ingest.parser import _attribute_cost
-from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import (
     EMPTY_ASSUMPTIONS,
     EMPTY_SKILL_NAMES,
@@ -37,37 +37,6 @@ from tokenol.model.events import (
 from tokenol.persistence.store import HistoryStore
 
 REL = 1e-12
-BASE = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
-HOSTILE_CWD = '/home/ünï/"quo,te"\nnext line'
-HOSTILE_TOOL = 'mcp__sé,rver__"do\nit"'
-HOSTILE_SKILL = 'skill,"é"\nx'
-SONNET = "claude-sonnet-4-6"
-HAIKU = "claude-haiku-4-5"  # sorts before SONNET: a position-based model id would shift
-
-
-def _priced_turn(key: str, sid: str, at: datetime, **fields) -> Turn:
-    """A turn priced and attributed exactly as the parser would."""
-    usage = fields.pop("usage")
-    model = fields.pop("model", SONNET)
-    out_shares = fields.pop("out_shares", {})
-    in_shares = fields.pop("in_shares", {})
-    cost = cost_for_turn(model, usage, at=at)
-    tools, unattr_in, unattr_out, unattr_cost = _attribute_cost(
-        model, usage, out_shares, in_shares, cost, at
-    )
-    return Turn(
-        dedup_key=key,
-        timestamp=at,
-        session_id=sid,
-        model=model,
-        usage=usage,
-        cost_usd=cost.total_usd,
-        tool_costs=dict(tools) if tools else EMPTY_TOOL_COSTS,
-        unattributed_input_tokens=unattr_in,
-        unattributed_output_tokens=unattr_out,
-        unattributed_cost_usd=unattr_cost,
-        **fields,
-    )
 
 
 def _fixture() -> tuple[list[Turn], list[SessionInfo]]:

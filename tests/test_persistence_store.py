@@ -8,14 +8,13 @@ pytest.importorskip("duckdb")
 
 import json
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 import pytest
 
 from tokenol.enums import AssumptionTag
-from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import Session, Turn, Usage
 from tokenol.persistence.store import FLUSH_CHUNK_SIZE, HistoryStore
 
@@ -182,45 +181,6 @@ def test_flush_refreshes_updated_at_on_upsert(tmp_path: Path) -> None:
         store.close()
 
 
-def test_hydrate_hot_returns_recent_turns_only(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        now = datetime.now(tz=timezone.utc)
-        old = _turn("old", "sess-1", ts=now - timedelta(days=120))
-        recent = _turn("recent", "sess-2", ts=now - timedelta(days=10))
-        store.flush(
-            [old, recent],
-            [_session("sess-1"), _session("sess-2")],
-        )
-
-        turns, sessions = store.hydrate_hot(window_days=90)
-        keys = {t.dedup_key for t in turns}
-        assert keys == {"recent"}
-        sids = {s.session_id for s in sessions}
-        # Sessions tied to hot-window turns are returned. sess-1 has no
-        # hot-window turn so it is not hydrated into memory.
-        assert sids == {"sess-2"}
-    finally:
-        store.close()
-
-
-def test_hydrate_hot_reconstructs_turn_fields(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        store.flush([_turn("k1", "sess-1")], [_session("sess-1")])
-        turns, _ = store.hydrate_hot(window_days=365)
-        assert len(turns) == 1
-        t = turns[0]
-        assert t.dedup_key == "k1"
-        assert t.session_id == "sess-1"
-        assert t.usage.input_tokens == 100
-        assert t.usage.cache_read_input_tokens == 20
-        assert dict(t.tool_names) == {"Read": 1, "Bash": 1}
-        assert [a.value for a in t.assumptions] == ["UNKNOWN_MODEL_FALLBACK"]
-    finally:
-        store.close()
-
-
 def test_last_ts_by_session(tmp_path: Path) -> None:
     store = HistoryStore(tmp_path / "h.duckdb")
     try:
@@ -236,66 +196,6 @@ def test_last_ts_by_session(tmp_path: Path) -> None:
         # DuckDB returns naive datetimes from TIMESTAMP columns; we tag them UTC on read.
         assert marks["sess-1"] == datetime(2026, 5, 1, 11, 0, tzinfo=timezone.utc)
         assert marks["sess-2"] == datetime(2026, 5, 2, 9, 0, tzinfo=timezone.utc)
-    finally:
-        store.close()
-
-
-def test_query_turns_filters_by_date_range(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        store.flush(
-            [
-                _turn("a", "s1", ts=datetime(2026, 4, 1, tzinfo=timezone.utc)),
-                _turn("b", "s1", ts=datetime(2026, 5, 1, tzinfo=timezone.utc)),
-                _turn("c", "s1", ts=datetime(2026, 6, 1, tzinfo=timezone.utc)),
-            ],
-            [_session("s1")],
-        )
-        rows = store.query_turns(since=date(2026, 5, 1), until=date(2026, 5, 31))
-        assert {t.dedup_key for t in rows} == {"b"}
-    finally:
-        store.close()
-
-
-def test_query_turns_filters_by_project_and_model(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        store.flush(
-            [
-                _turn("a", "s1", model="claude-opus-4-7"),
-                _turn("b", "s2", model="claude-sonnet-4-6"),
-            ],
-            [_session("s1", cwd="/proj/a"), _session("s2", cwd="/proj/b")],
-        )
-        rows = store.query_turns(project="/proj/a")
-        assert {t.dedup_key for t in rows} == {"a"}
-        rows = store.query_turns(model="claude-sonnet-4-6")
-        assert {t.dedup_key for t in rows} == {"b"}
-    finally:
-        store.close()
-
-
-def test_query_session_returns_full_session(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        store.flush(
-            [_turn("a", "s1"), _turn("b", "s1", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))],
-            [_session("s1", cwd="/proj/x")],
-        )
-        s = store.query_session("s1")
-        assert s is not None
-        assert s.session_id == "s1"
-        assert s.cwd == "/proj/x"
-        assert {t.dedup_key for t in s.turns} == {"a", "b"}
-
-    finally:
-        store.close()
-
-
-def test_query_session_returns_none_for_missing(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        assert store.query_session("nope") is None
     finally:
         store.close()
 
@@ -421,57 +321,6 @@ def test_flush_chunks_large_batch_without_oom(tmp_path: Path) -> None:
         store.close()
 
 
-def test_tool_costs_round_trip(tmp_path: Path) -> None:
-    """Per-tool cost attribution must survive flush -> reload. Schema v2 added
-    `tool_costs` + three `unattributed_*` columns; without this round-trip the
-    /api/breakdown/tools reconciliation invariant breaks for any --persist user
-    on range=all (warm-tier turns return with empty tool_costs)."""
-    from tokenol.model.events import ToolCost
-
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        ts = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
-        original = Turn(
-            dedup_key="rt-1",
-            timestamp=ts,
-            session_id="s1",
-            model="claude-opus-4-7",
-            usage=Usage(input_tokens=100, output_tokens=50, cache_read_input_tokens=20, cache_creation_input_tokens=10),
-            is_sidechain=False,
-            stop_reason="end_turn",
-            cost_usd=0.123,
-            tool_use_count=1,
-            tool_names=Counter({"Read": 1}),
-            tool_costs={
-                "Read": ToolCost(tool_name="Read", input_tokens=42.5, output_tokens=12.75, cost_usd=0.078),
-            },
-            unattributed_input_tokens=7.5,
-            unattributed_output_tokens=1.25,
-            unattributed_cost_usd=0.045,
-        )
-        store.flush([original], [_session("s1")])
-
-        reloaded, _ = store.hydrate_hot(window_days=365)
-        assert len(reloaded) == 1
-        r = reloaded[0]
-        assert set(r.tool_costs) == {"Read"}
-        rt = r.tool_costs["Read"]
-        assert rt.tool_name == "Read"
-        assert abs(rt.input_tokens - 42.5) < 1e-9
-        assert abs(rt.output_tokens - 12.75) < 1e-9
-        assert abs(r.unattributed_input_tokens - 7.5) < 1e-9
-        assert abs(r.unattributed_output_tokens - 1.25) < 1e-9
-        # Stored costs are repriced at today's rates from the stored token shares
-        # (42.5 of a 130-token input pool, 12.75 of 50 output tokens), so the
-        # split still adds up to the repriced turn total.
-        now = cost_for_turn("claude-opus-4-7", original.usage)
-        in_pool_usd = now.input_usd + now.cache_read_usd + now.cache_creation_usd
-        assert abs(rt.cost_usd - (in_pool_usd * 42.5 / 130 + now.output_usd * 12.75 / 50)) < 1e-9
-        assert abs(rt.cost_usd + r.unattributed_cost_usd - r.cost_usd) < 1e-9
-    finally:
-        store.close()
-
-
 def test_schema_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
     """A pre-existing v1 database (no tool_costs columns) must upgrade in
     place — the ALTER TABLE … ADD COLUMN IF NOT EXISTS migration runs on every
@@ -491,59 +340,10 @@ def test_schema_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
         store.close()
 
 
-def test_skill_fields_survive_flush_and_hydrate(tmp_path: Path) -> None:
-    """attribution_skill + skill_names round-trip through the DuckDB warm tier."""
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        s = _session("sess-sk")
-        trigger = _turn("k-trig", "sess-sk")
-        trigger.skill_names = Counter({"tiered-review": 2})
-        subagent = _turn("k-sub", "sess-sk", ts=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))
-        subagent.attribution_skill = "tiered-review"
-        store.flush(turns=[trigger, subagent], sessions=[s])
-
-        hydrated, _ = store.hydrate_hot(window_days=3650)
-        by_key = {t.dedup_key: t for t in hydrated}
-        assert by_key["k-trig"].skill_names == Counter({"tiered-review": 2})
-        assert by_key["k-trig"].attribution_skill is None
-        assert by_key["k-sub"].attribution_skill == "tiered-review"
-        assert by_key["k-sub"].skill_names == Counter()
-    finally:
-        store.close()
-
-
 def test_schema_version_is_four(tmp_path: Path) -> None:
     from tokenol.persistence.store import SCHEMA_VERSION
 
     assert SCHEMA_VERSION == 4
-
-
-def test_cache_creation_1h_tokens_round_trip(tmp_path: Path) -> None:
-    """Schema v4 added cache_creation_1h_tokens — the 1-hour-tier share of
-    cache-creation tokens. Without this round-trip, warm-tier turns lose the
-    5m/1h split on reload and any recompute would silently underprice."""
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        ts = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
-        original = Turn(
-            dedup_key="rt-1h",
-            timestamp=ts,
-            session_id="s1",
-            model="claude-opus-4-7",
-            usage=Usage(input_tokens=6, output_tokens=6, cache_read_input_tokens=16153, cache_creation_input_tokens=17618, cache_creation_1h_input_tokens=17618),
-            is_sidechain=False,
-            stop_reason="end_turn",
-            cost_usd=0.17738,
-        )
-        store.flush([original], [_session("s1")])
-
-        reloaded, _ = store.hydrate_hot(window_days=365)
-        assert len(reloaded) == 1
-        r = reloaded[0]
-        assert r.usage.cache_creation_input_tokens == 17618
-        assert r.usage.cache_creation_1h_input_tokens == 17618
-    finally:
-        store.close()
 
 
 def test_schema_v3_to_v4_migration_is_idempotent(tmp_path: Path) -> None:
@@ -562,142 +362,3 @@ def test_schema_v3_to_v4_migration_is_idempotent(tmp_path: Path) -> None:
         store.close()
 
 
-def test_hydrate_before_returns_older_turns_only(tmp_path: Path) -> None:
-    """The complement of hydrate_hot: rows strictly before the cutoff, plus their sessions."""
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        now = datetime.now(tz=timezone.utc)
-        cutoff = now - timedelta(days=90)
-        old = _turn("old", "sess-1", ts=cutoff - timedelta(seconds=1))
-        edge = _turn("edge", "sess-2", ts=cutoff)
-        recent = _turn("recent", "sess-3", ts=now - timedelta(days=10))
-        store.flush([old, edge, recent], [_session("sess-1"), _session("sess-2"), _session("sess-3")])
-
-        turns, sessions = store.hydrate_before(cutoff)
-        assert {t.dedup_key for t in turns} == {"old"}
-        assert {s.session_id for s in sessions} == {"sess-1"}
-        assert sessions[0].turns == turns, "session.turns must be populated like hydrate_hot does"
-    finally:
-        store.close()
-
-
-def test_hydrate_before_and_hydrate_hot_partition_the_store(tmp_path: Path) -> None:
-    """Every row lands in exactly one of the two hydrations for the same cutoff."""
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        now = datetime.now(tz=timezone.utc)
-        made = [_turn(f"k{i}", "sess-1", ts=now - timedelta(days=i * 20)) for i in range(10)]
-        store.flush(made, [_session("sess-1")])
-
-        # ONE cutoff for both sides. Deriving each from its own now() leaves a
-        # band between the two readings that neither side returns.
-        cutoff = now - timedelta(days=90)
-        hot, _ = store.hydrate_since(cutoff)
-        warm, _ = store.hydrate_before(cutoff)
-        hot_keys = {t.dedup_key for t in hot}
-        warm_keys = {t.dedup_key for t in warm}
-        assert hot_keys & warm_keys == set(), "a row appeared in both tiers"
-        assert hot_keys | warm_keys == {t.dedup_key for t in made}, "a row appeared in neither tier"
-
-        # The boundary row itself belongs to hot (>=), never to warm (<).
-        edge = _turn("edge-exact", "sess-2", ts=cutoff)
-        store.flush([edge], [_session("sess-2")])
-        hot2, _ = store.hydrate_since(cutoff)
-        warm2, _ = store.hydrate_before(cutoff)
-        assert "edge-exact" in {t.dedup_key for t in hot2}
-        assert "edge-exact" not in {t.dedup_key for t in warm2}
-    finally:
-        store.close()
-
-
-def test_dedup_keys_returns_every_key_in_the_store(tmp_path: Path) -> None:
-    """One query for the whole key set: the derivation seeds its dedup set from it."""
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        now = datetime.now(tz=timezone.utc)
-        made = [_turn(f"k{i}", "sess-1", ts=now - timedelta(days=i * 40)) for i in range(5)]
-        store.flush(made, [_session("sess-1")])
-
-        keys = store.dedup_keys()
-        assert keys == {f"k{i}" for i in range(5)}
-        assert isinstance(keys, set)
-        # `before` keeps only rows strictly older than the cutoff (k2 sits 80 days
-        # back; the derivation takes the newer keys from its hot Turns instead).
-        assert store.dedup_keys(before=now - timedelta(days=60)) == {"k2", "k3", "k4"}
-        assert not store.is_empty()
-    finally:
-        store.close()
-
-
-def test_dedup_keys_is_empty_on_an_empty_store(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        assert store.dedup_keys() == set()
-        assert store.is_empty()
-    finally:
-        store.close()
-
-
-def test_hydration_batches_rows_and_shares_repeated_values(tmp_path: Path, monkeypatch) -> None:
-    """Rows are converted in batches, in order, with one object per repeated value.
-
-    A batch size below the row count exercises the batch boundary; the identity
-    checks are what the memory saving rests on (1,090,252 str objects for 1,705
-    distinct values before, on a real store).
-    """
-    import tokenol.persistence.store as store_mod
-    from tokenol.model.events import (
-        EMPTY_ASSUMPTIONS,
-        EMPTY_SKILL_NAMES,
-        EMPTY_TOOL_COSTS,
-        EMPTY_TOOL_NAMES,
-    )
-
-    monkeypatch.setattr(store_mod, "HYDRATE_BATCH_ROWS", 2)
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        base = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
-        made = [_turn(f"k{i}", "sess-1", ts=base + timedelta(minutes=i)) for i in range(5)]
-        bare = made[4]
-        bare.tool_names, bare.assumptions = Counter(), []
-        store.flush(made, [_session("sess-1")])
-
-        turns, sessions = store.hydrate_since(base - timedelta(days=1))
-        assert [t.dedup_key for t in turns] == [f"k{i}" for i in range(5)]
-        assert len(sessions) == 1 and len(sessions[0].turns) == 5
-        first, second = turns[0], turns[1]
-        assert first.session_id is second.session_id
-        assert first.model is second.model
-        assert first.stop_reason is second.stop_reason
-        assert next(iter(first.tool_names)) is next(iter(second.tool_names))
-        assert turns[4].tool_names is EMPTY_TOOL_NAMES
-        assert turns[4].assumptions is EMPTY_ASSUMPTIONS
-        assert first.tool_costs is EMPTY_TOOL_COSTS
-        assert first.skill_names is EMPTY_SKILL_NAMES
-    finally:
-        store.close()
-
-
-def test_summarize_before_matches_what_hydrate_before_would_yield(tmp_path: Path) -> None:
-    """Sessions without their turns, plus the earliest date, Claude rows only."""
-    store = HistoryStore(tmp_path / "h.duckdb")
-    try:
-        cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
-        store.flush(
-            [
-                _turn("old-a", "sess-a", ts=cutoff - timedelta(days=10)),
-                _turn("old-a2", "sess-a", ts=cutoff - timedelta(days=3)),
-                _turn("old-x", "sess-x", ts=cutoff - timedelta(days=30), model="gpt-4o"),
-                _turn("new-b", "sess-b", ts=cutoff + timedelta(days=1)),
-            ],
-            [_session("sess-a", cwd="/dev/a"), _session("sess-x"), _session("sess-b")],
-        )
-        stubs, earliest = store.summarize_before(cutoff)
-        _, warm_sessions = store.hydrate_before(cutoff)
-
-        assert [(s.session_id, s.cwd) for s in stubs] == [(s.session_id, s.cwd) for s in warm_sessions]
-        assert [s.turns for s in stubs] == [[]]
-        assert earliest == (cutoff - timedelta(days=10)).date()
-        assert store.summarize_before(cutoff - timedelta(days=60)) == ([], None)
-    finally:
-        store.close()

@@ -21,7 +21,7 @@ import pytest
 pytest.importorskip("duckdb")
 pytest.importorskip("fastapi")
 
-from test_engine_ingest import (
+from conftest import (
     BASE,
     HAIKU,
     HOSTILE_CWD,

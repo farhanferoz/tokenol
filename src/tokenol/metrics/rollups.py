@@ -350,25 +350,6 @@ def build_model_rollups(turns: list[Turn]) -> list[ModelRollup]:
     return result
 
 
-def _rank_counter_with_others(total: Counter[str], top_n: int) -> list[dict]:
-    """Rank a Counter and emit `[{tool, count}]` with tail collapsed to 'others'.
-
-    Returns `[]` if `total` is empty. Otherwise emits up to `top_n` top entries
-    ranked by `Counter.most_common()` (insertion-order tie-break), and appends
-    a single `{"tool": "others", "count": <sum of tail>}` row when more than
-    `top_n` distinct keys exist.
-    """
-    if not total:
-        return []
-    ranked = total.most_common()
-    head = ranked[:top_n]
-    tail = ranked[top_n:]
-    rows = [{"tool": name, "count": count} for name, count in head]
-    if tail:
-        rows.append({"tool": "others", "count": sum(c for _, c in tail)})
-    return rows
-
-
 def _rank_dict_with_others(values: dict[str, float], top_n: int) -> list[dict]:
     """Top-N by value, sum the rest into one 'other' row. Returns a list of
     ``{name, value}`` dicts plus an optional ``other`` row with an extra
@@ -391,19 +372,3 @@ def _rank_dict_with_others(values: dict[str, float], top_n: int) -> list[dict]:
             }
         )
     return out
-
-
-def build_tool_mix(
-    session_rollups: list[SessionRollup],
-    top_n: int = 10,
-) -> list[dict]:
-    """Rank tool-name call counts across all sessions.
-
-    Returns `[{tool, count}]` sorted count-desc. If more than `top_n` distinct
-    tools are present, the tail collapses into a single `{tool: "others",
-    count: <sum of tail>}` row. Returns `[]` on empty input.
-    """
-    total: Counter[str] = Counter()
-    for sr in session_rollups:
-        total.update(sr.tool_mix)
-    return _rank_counter_with_others(total, top_n)

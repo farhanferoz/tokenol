@@ -24,7 +24,6 @@ import tokenol.serve.state as _state_mod
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 SEEDED_TURNS = 30
-SEEDED_SESSIONS = 1
 HTTP_OK = 200
 
 # Columns added by migrations v2-v4. A v1-era store has none of them.
@@ -87,6 +86,7 @@ def test_readonly_store_reads_a_v1_file_without_migrating_it(tmp_path: Path) -> 
     pytest.importorskip("duckdb")
     import duckdb
 
+    from tokenol.engine import UsageEngine
     from tokenol.persistence.store import HistoryStore
 
     db = tmp_path / "h.duckdb"
@@ -94,16 +94,17 @@ def test_readonly_store_reads_a_v1_file_without_migrating_it(tmp_path: Path) -> 
     _downgrade_to_v1(db)
 
     store = HistoryStore(db, read_only=True)
-    turns = store.query_turns()
+    assert not store.is_empty()
+    store.close()
+
+    # The engine reads the same old file; missing columns load as the defaults the migration would have supplied.
+    engine = UsageEngine.open(db)
+    turns = engine.session_turns("ro-sess")
+    engine.close()
     assert len(turns) == SEEDED_TURNS
     assert sum(t.cost_usd for t in turns) == pytest.approx(expected)
-    # Missing columns hydrate to the defaults the migration would have supplied.
     assert turns[0].usage.cache_creation_1h_input_tokens == 0
     assert turns[0].attribution_skill is None
-    hot_turns, hot_sessions = store.hydrate_hot(window_days=100_000)
-    assert len(hot_turns) == SEEDED_TURNS
-    assert len(hot_sessions) == SEEDED_SESSIONS
-    store.close()
 
     # The file must be untouched: still v1, still missing the columns.
     con = duckdb.connect(str(db), read_only=True)

@@ -22,7 +22,6 @@ from tokenol.persistence.store import HistoryStore
 from tokenol.serve.state import (
     ParseCache,
     SnapshotResult,
-    _build_turns_and_sessions,
     _recompute_excl_cache_read,
     build_breakdown_tools,
     build_model_detail,
@@ -99,126 +98,6 @@ def _mock_dirs(tmp_path: Path):
     finally:
         _state_mod.get_config_dirs = original_gcd
         _state_mod.find_jsonl_files = original_fjf
-
-
-# ---- ParseCache tests --------------------------------------------------
-
-
-def test_parse_cache_hit(tmp_path: Path) -> None:
-    """Same (size, mtime_ns) → no re-parse (same list object returned)."""
-    dst = tmp_path / "basic.jsonl"
-    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
-
-    cache = ParseCache()
-    key1, events1 = cache.get_or_parse(dst)
-    key2, events2 = cache.get_or_parse(dst)
-
-    assert key1 == key2
-    assert events1 is events2
-    assert cache.size == 1
-
-
-def test_parse_cache_miss_on_change(tmp_path: Path) -> None:
-    """Changed mtime_ns/size → re-parses, returns a new list, drops the old one.
-
-    This asserted `size == 2` until 2026-09-04, recording the retention of the
-    superseded entry as though it were intended. It was a leak: a growing session
-    file minted an entry per append and nothing ever removed them, and no caller
-    can reach a stale key — get_derived only looks up the current key set. The
-    contract is one live entry per path.
-    """
-    dst = tmp_path / "basic.jsonl"
-    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
-
-    cache = ParseCache()
-    key1, events1 = cache.get_or_parse(dst)
-
-    extra = b'\n{"type":"system","timestamp":"2026-04-14T10:10:00Z","sessionId":"sess-001","cwd":"/tmp"}\n'
-    dst.write_bytes(dst.read_bytes() + extra)
-
-    key2, events2 = cache.get_or_parse(dst)
-    assert key1 != key2
-    assert events1 is not events2
-    assert cache.size == 1, "superseded version of the same path was retained"
-
-
-def test_parse_cache_purge(tmp_path: Path) -> None:
-    dst = tmp_path / "basic.jsonl"
-    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
-
-    cache = ParseCache()
-    cache.get_or_parse(dst)
-    assert cache.size == 1
-
-    cache.purge(set())
-    assert cache.size == 0
-
-
-def test_parse_cache_get_derived_memoizes(tmp_path: Path) -> None:
-    """get_derived skips the builder on a key-set hit and rebuilds on miss.
-
-    This is the core idle-CPU optimization: identical (path, size, mtime_ns) sets
-    must reuse the cached (turns, sessions, fired) tuple without re-iterating
-    events. A new key in the set forces a rebuild.
-    """
-    dst = tmp_path / "basic.jsonl"
-    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
-
-    cache = ParseCache()
-    key, _events = cache.get_or_parse(dst)
-
-    call_count = 0
-
-    def builder(events):
-        nonlocal call_count
-        call_count += 1
-        from tokenol.serve.state import _build_turns_and_sessions
-
-        return _build_turns_and_sessions(events)
-
-    keys = frozenset({key})
-    r1 = cache.get_derived(keys, builder)
-    r2 = cache.get_derived(keys, builder)
-    assert call_count == 1, "second call with same key set must hit the memo"
-    assert r1 is r2, "memo must return the same triple object"
-
-    # A different (simulated) key set forces rebuild.
-    other_key = ("/tmp/other.jsonl", 999, 999)
-    cache.get_derived(frozenset({key, other_key}), builder)
-    assert call_count == 2
-
-
-def test_parse_cache_invalidates_derived_on_new_file(tmp_path: Path) -> None:
-    """A new get_or_parse miss must invalidate the derived memo.
-
-    Otherwise, after a JSONL file changes mtime, build_snapshot_full would happily
-    return stale (turns, sessions) computed before the change.
-    """
-    dst = tmp_path / "basic.jsonl"
-    dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
-
-    cache = ParseCache()
-    key1, _ = cache.get_or_parse(dst)
-
-    call_count = 0
-
-    def builder(events):
-        nonlocal call_count
-        call_count += 1
-        from tokenol.serve.state import _build_turns_and_sessions
-
-        return _build_turns_and_sessions(events)
-
-    cache.get_derived(frozenset({key1}), builder)
-    assert call_count == 1
-
-    # Mutate file → new key, recorded via a fresh get_or_parse miss → memo invalidated.
-    dst.write_bytes(dst.read_bytes() + b'\n{"type":"system","timestamp":"2026-04-14T10:10:00Z","sessionId":"x","cwd":"/tmp"}\n')
-    key2, _ = cache.get_or_parse(dst)
-    assert key1 != key2
-
-    cache.get_derived(frozenset({key2}), builder)
-    assert call_count == 2, "memo must be invalidated when a new file revision is parsed"
 
 
 # ---- build_snapshot_full tests -----------------------------------------
@@ -719,13 +598,12 @@ def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None
     broke for multi-session files (stem != sessionId for all but one).
     """
     from tokenol.ingest.parser import parse_file
-    from tokenol.serve.state import _build_turns_and_sessions
 
     dst = tmp_path / "multi.jsonl"
     dst.write_bytes((FIXTURES_DIR / "multi.jsonl").read_bytes())
 
     events = parse_file(dst)
-    _, sessions, _fired = _build_turns_and_sessions(events)
+    _, sessions, _fired, _locs = derive_delta_turns(events, set().intersection, set())
 
     assert {s.session_id for s in sessions} == {"sess-a", "sess-b", "sess-c"}
     for s in sessions:
@@ -957,9 +835,8 @@ def _ev(
     )
 
 
-@pytest.mark.parametrize("build", ["full", "delta"])
-def test_server_turn_builders_price_each_turn_on_its_own_day(build: str) -> None:
-    """Both server-side Turn builders must price by the turn's timestamp. Sonnet 5.5
+def test_server_turn_builder_prices_each_turn_on_its_own_day() -> None:
+    """The server-side Turn builder must price by the turn's timestamp. Sonnet 5.5
     cache reads dropped from $0.20 to $0.10/MTok on 2026-10-07; a cold start runs
     through derive_delta_turns, so missing it there would undo the fix on restart."""
     cut = datetime(2026, 10, 7, tzinfo=timezone.utc)
@@ -968,10 +845,7 @@ def test_server_turn_builders_price_each_turn_on_its_own_day(build: str) -> None
         ev = _ev(sid="s", msg_id=f"m{n}", req_id=f"r{n}", ts=ts, line=n, model="claude-sonnet-5-5")
         ev.usage = Usage(input_tokens=10, output_tokens=5, cache_read_input_tokens=1_000_000)
         events.append(ev)
-    if build == "full":
-        turns, _, _ = _build_turns_and_sessions(events)
-    else:
-        turns, _, _, _ = derive_delta_turns(events, set().intersection, set())
+    turns, _, _, _ = derive_delta_turns(events, set().intersection, set())
 
     before, after = sorted(turns, key=lambda t: t.timestamp)
     assert before.cost_usd == pytest.approx(cost_for_turn("claude-sonnet-5-5", before.usage, at=before.timestamp).total_usd)

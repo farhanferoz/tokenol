@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from tokenol.metrics.history import baseline_median, trailing_median, trailing_stddev
+from tokenol.metrics.history import baseline_median, trailing_median
 from tokenol.model.pricing import context_window
 
 # ---- trailing_median ---------------------------------------------------
@@ -55,24 +55,6 @@ def test_trailing_median_zero_values_excluded():
     result = trailing_median(series, 7, today)
     # 3 non-zero values meets the threshold of max(3, 7//3)=max(3,2)=3
     assert result == 20.0
-
-
-# ---- trailing_stddev ---------------------------------------------------
-
-
-def test_trailing_stddev_basic():
-    today = date(2026, 1, 15)
-    series = _series([10.0, 10.0, 10.0, 20.0, 10.0, 10.0, 10.0], date(2026, 1, 8))
-    result = trailing_stddev(series, 7, today)
-    assert result is not None
-    assert result > 0
-
-
-def test_trailing_stddev_cold_start():
-    today = date(2026, 1, 5)
-    series = _series([5.0, 10.0, 15.0], date(2026, 1, 2))
-    result = trailing_stddev(series, 7, today)
-    assert result is None  # fewer than 4 baseline days
 
 
 # ---- context_window helper --------------------------------------------

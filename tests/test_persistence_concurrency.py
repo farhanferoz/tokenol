@@ -79,10 +79,8 @@ def test_concurrent_read_and_write_does_not_crash(tmp_path: Path) -> None:
             for _ in range(40):
                 if stop.is_set():
                     return
-                store.query_turns()
                 store.last_ts_by_session()
-                store.query_session("s-3")
-                store.hydrate_hot(window_days=90)
+                store.is_empty()
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
             stop.set()
@@ -95,7 +93,8 @@ def test_concurrent_read_and_write_does_not_crash(tmp_path: Path) -> None:
 
     assert not any(t.is_alive() for t in threads), "a store thread deadlocked"
     assert not errors, f"concurrent access raised: {errors!r}"
-    assert len(store.query_turns()) == 500 + 20 * 200
+    with store._lock:
+        assert store._con.execute("SELECT count(*) FROM turns").fetchone()[0] == 500 + 20 * 200
     store.close()
 
 

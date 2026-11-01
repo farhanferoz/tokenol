@@ -4,6 +4,27 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **`tokenol serve` holds far less memory, and its answers come from one in-memory DuckDB
+  table instead of Python objects.** On a 711,000-turn history store, replaying the dashboard's
+  snapshot sequence took 663 MB resident against 1,512 MB on 0.8.5, and 358 MB after a cold
+  all-session rollup. 0.8.5 held 1,407 MB on the laptop with `--persist` and the dashboard open.
+- **"All" now covers all stored history.** The dashboard's "All" period and the model, tool,
+  skill and search pages used to stop at the last 90 days of stored turns; they now include
+  everything in the store (on the measured store, 185,681 turns worth $23,643 of $91,265).
+- **The project page's "All" trend starts at the project's first active day.** It used to start
+  at year 1 and sent hundreds of thousands of empty daily points (a 37 MB response taking 3.3 s
+  for one project); the same project now sends 247.
+- **Ties are ordered deterministically.** Two projects or tools with exactly equal cost now
+  appear in a fixed order (lowest turn id or label) rather than in the order they arrived.
+- **DuckDB is now a core dependency** (version 1.5 or later), so `pip install 'tokenol[serve]'`
+  is enough for `--persist`. The `persist` extra still exists and is empty, so existing install
+  commands keep working.
+- The `hot_window_days` preference is still accepted but no longer used: there is no hot window.
+
 ## 0.8.5 — 2026-11-01
 
 ### Changed

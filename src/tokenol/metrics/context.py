@@ -28,13 +28,6 @@ def cache_reuse_ratio(turns: list[Turn]) -> float | None:
     return reads / denom if denom > 0 else None
 
 
-def non_cached_input_ratio(turns: list[Turn]) -> float | None:
-    """Fraction of total context tokens that are plain (non-cached) input."""
-    raw = sum(t.usage.input_tokens for t in turns)
-    total = sum(context_tokens(t) for t in turns)
-    return raw / total if total > 0 else None
-
-
 def cache_hit_rate(cache_read: int, cache_creation: int, input_tokens: int) -> float | None:
     """Cache hit rate as a fraction (0-1): cache_read / (cache_read + cache_creation + input).
     Returns None when denominator is 0."""

@@ -6,7 +6,7 @@ rediscover what the store already held — 5,120 files and over five minutes on
 the live server, for a few thousand genuinely new turns. Persisting them turns
 that into a stat() sweep.
 
-Safety rule, enforced by the caller (`state._store_backed_derivation`): a mark
+Safety rule, enforced by the caller (`state._ingest_tick`): a mark
 is saved only when the flush queue reports every enqueued turn WRITTEN. Then a
 crash at any moment leaves either no mark (the file is re-parsed on the next
 start, exactly as before) or a mark whose turns are already in the store. And

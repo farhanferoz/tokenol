@@ -23,11 +23,53 @@ When writing a NEW test that pairs a static fixture with range/window logic:
     construction — it only gets more clearly outside the window over time.
 """
 
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from tokenol.model.events import Turn
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# Shared by the usage-engine tests (ingest round trip and aggregation parity).
+BASE = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+HOSTILE_CWD = '/home/ünï/"quo,te"\nnext line'
+HOSTILE_TOOL = 'mcp__sé,rver__"do\nit"'
+HOSTILE_SKILL = 'skill,"é"\nx'
+SONNET = "claude-sonnet-4-6"
+HAIKU = "claude-haiku-4-5"  # sorts before SONNET: a position-based model id would shift
+
+
+def _priced_turn(key: str, sid: str, at: datetime, **fields) -> Turn:
+    """A turn priced and attributed exactly as the parser would."""
+    from tokenol.ingest.parser import _attribute_cost
+    from tokenol.metrics.cost import cost_for_turn
+    from tokenol.model.events import EMPTY_TOOL_COSTS
+
+    usage = fields.pop("usage")
+    model = fields.pop("model", SONNET)
+    out_shares = fields.pop("out_shares", {})
+    in_shares = fields.pop("in_shares", {})
+    cost = cost_for_turn(model, usage, at=at)
+    tools, unattr_in, unattr_out, unattr_cost = _attribute_cost(
+        model, usage, out_shares, in_shares, cost, at
+    )
+    return Turn(
+        dedup_key=key,
+        timestamp=at,
+        session_id=sid,
+        model=model,
+        usage=usage,
+        cost_usd=cost.total_usd,
+        tool_costs=dict(tools) if tools else EMPTY_TOOL_COSTS,
+        unattributed_input_tokens=unattr_in,
+        unattributed_output_tokens=unattr_out,
+        unattributed_cost_usd=unattr_cost,
+        **fields,
+    )
 
 
 def seed_history_store(db_path: Path, *, days_ago: int, turns: int, session_id: str = "warm-sess", cwd: str = "/dev/archived") -> float:

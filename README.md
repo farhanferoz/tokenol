@@ -35,7 +35,7 @@ Project page — cache efficiency trend, verdict distribution, top turns, **and 
 
     pip install tokenol                        # CLI commands (daily, sessions, projects, ...)
     pip install 'tokenol[serve]'               # adds the live dashboard (tokenol serve)
-    pip install 'tokenol[serve,persist]'       # adds DuckDB-backed history that survives JSONL deletion
+    pip install 'tokenol[serve]'               # DuckDB is a core dependency; --persist keeps history across JSONL deletion
 
 Requires Python 3.10+. See [tokenol on PyPI](https://pypi.org/project/tokenol/).
 
@@ -127,27 +127,16 @@ If SSE delivery silently stalls (browser tab throttling, extension hooks, long-l
 
 ### Persistent history (opt-in)
 
-By default, `tokenol serve` parses your `~/.claude*/projects/**/*.jsonl` files into an in-memory model on each restart — fast, but the dashboard loses any session whose JSONL has been deleted or rotated.
+By default, `tokenol serve` parses your `~/.claude*/projects/**/*.jsonl` files into an in-memory model on each restart — fast, but the dashboard loses any session whose JSONL has been deleted or rotated. Either way, DuckDB (a core dependency) holds the turns in memory as compact columns rather than Python objects.
 
 Pass `--persist` to enable a DuckDB-backed history store at `~/.tokenol/history.duckdb` (override with `TOKENOL_HISTORY_PATH`). The store contains **no message content** — only token counts, costs, models, timestamps, tool counts, and session metadata, comparable to a billing receipt. With persistence on:
 
 - **Deleting a JSONL no longer drops it from the dashboard.** Quantitative panels render as before; only the per-turn modal's verbatim content snippets become unavailable, indicated by an "Archived — text snippets unavailable" badge. Metrics survive; words don't (matching the privacy intent of the deletion).
 - **Restart picks up where you left off.** A background flusher batches writes (every 30 s or 100 turns, whichever first) and force-drains on graceful shutdown. The JSONLs remain the durable substrate — a process crash mid-flush loses nothing because the next start re-derives the missing window from the JSONLs (idempotent on `message.id:requestId`).
-- **Cold start stays bounded.** The hot tier loads only the last `hot_window_days` of turns (default 90, tunable via `/api/prefs`); older history is read on demand from the warm tier. A turn already in the store is never re-derived from its transcript, whatever its age.
+- **Every stored turn is queryable, whatever its age.** The server loads the whole store into an in-memory DuckDB table at start-up, so "All" covers all stored history and there is no hot/warm split. A turn already in the store is never re-derived from its transcript. (The `hot_window_days` preference is still accepted by `/api/prefs` but no longer used.)
 - **A restart re-reads only what changed.** Per-file parse marks are kept in `~/.tokenol/parse-marks.json` (one entry per transcript), so an unchanged file costs a `stat()` rather than a full parse. A mark is written only once the flusher confirms that file's turns are *in the store*, so a crash can never leave a mark that outruns the data — the file is simply re-read next time. Delete the file to force a full re-read; an empty store makes the server discard it automatically. Marks are used only under `--persist`, since a plain `serve` has no writer and skipping a file would drop its turns.
 
-Measured on the author's full `~/.claude*` corpus — 5,120 transcript files, ~6.5 GB of JSONL, 385k persisted turns, 218 MB store (2026-09-07):
-
-| | `--persist`, first start | `--persist`, later starts |
-|---|---|---|
-| Time to first request served | ~2 min | ~17 s |
-| Resident, peak | ~1.4 GB | ~1.3 GB |
-| Resident, steady | ~1.2 GB | ~1.2 GB |
-| Durable disk | ~220 MB after backfill | grows incrementally |
-
-Default mode (no `--persist`) stays lighter than either column — it holds only what the transcripts on disk contain — but it reports "all the history that happens to survive" rather than all the history. The figures above are a full corpus; a smaller one scales down roughly linearly.
-
-Requires the persist extras (`pip install 'tokenol[serve,persist]'`).
+Memory, measured on a 711,000-turn history store: `tokenol serve` 0.8.5 held 1,407 MB resident on the author's laptop with `--persist` and the dashboard open. Replaying the dashboard's snapshot sequence against the same store took 663 MB resident, against 1,512 MB for 0.8.5, and 358 MB after a cold all-session rollup. Default mode (no `--persist`) reports whatever store already exists, read-only, plus the transcripts on disk. A smaller corpus scales down roughly linearly.
 
 See `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` for design rationale and `docs/superpowers/specs/2026-05-02-persistent-history-design.md` for the underlying store design.
 

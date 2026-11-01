@@ -15,30 +15,19 @@ import json as _json
 import logging
 import os
 import re
-import sys
 import tempfile
 import threading
-from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
 
-from tokenol.ingest.parser import _attribute_cost
-from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import (
-    EMPTY_ASSUMPTIONS,
-    EMPTY_SKILL_NAMES,
-    EMPTY_TOOL_COSTS,
-    EMPTY_TOOL_NAMES,
     Session,
-    ToolCost,
     Turn,
-    Usage,
 )
-from tokenol.model.registry import is_claude
 
 log = logging.getLogger(__name__)
 
@@ -46,13 +35,6 @@ SCHEMA_VERSION = 4
 
 # Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
-
-# Rows fetched per batch while hydrating. Fetching a whole tier at once held
-# every row tuple (and every boxed value in it) alive at the same moment as
-# the Turns built from them; freed afterwards, that space stayed with the
-# allocator. Measured on a 711k-turn store, 90-day hot tier: 1,842 MB resident
-# with fetchall against 1,424 MB in batches, same Turns, same load time.
-HYDRATE_BATCH_ROWS = 20_000
 
 # DuckDB reports a lock conflict as an IOException whose text carries the
 # holding PID, e.g.:
@@ -226,145 +208,6 @@ def _session_aggregate(turns: Iterable[Turn]) -> dict[str, dict]:
     return agg
 
 
-def _row_to_turn(r: tuple) -> Turn:
-    """Reconstruct a Turn from a turns-table row.
-
-    Column order MUST match the SELECT in hydrate_hot / query_turns.
-    """
-    from tokenol.enums import AssumptionTag
-
-    (
-        dedup_key,
-        ts,
-        sid,
-        model,
-        inp,
-        out,
-        cr,
-        cc,
-        cc_1h,
-        cost,
-        sidechain,
-        interrupted,
-        stop_reason,
-        tu,
-        te,
-        tool_names_json,
-        assumptions_json,
-        tool_costs_json,
-        unattr_in,
-        unattr_out,
-        unattr_cost,
-        attribution_skill,
-        skill_names_json,
-    ) = r
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    usage = Usage(
-        input_tokens=inp,
-        output_tokens=out,
-        cache_read_input_tokens=cr,
-        cache_creation_input_tokens=cc,
-        cache_creation_1h_input_tokens=cc_1h or 0,
-    )
-    # Re-price from the stored tokens rather than trusting the stored cost. A row
-    # records what pricing said on the day it was written, so every later pricing
-    # correction stopped at the store boundary: the Opus 5 and Fable 5.1 entries
-    # added on 2026-09-04 would never have reached a single persisted turn, and
-    # Fable 5.1 reads cache at a quarter of the rate its fallback assumed.
-    #
-    # Schema v4 stores the 5m/1h cache-creation split, so the recompute has every
-    # input the live path has. Rows written before v4 default cc_1h to 0 and
-    # therefore price exactly as they did before — that split is genuinely lost
-    # and this does not invent it — but they still pick up every other correction.
-    #
-    # The per-tool split is repriced too, or the Tools view keeps every stale rate
-    # after the total has moved on. Each stored tool's tokens are the turn's pool
-    # times that tool's byte share, so dividing them back out recovers the shares
-    # exactly and the parser's own attribution prices them at today's rates.
-    turn_cost = cost_for_turn(model, usage, at=ts) if model else None
-    repriced = turn_cost.total_usd if turn_cost is not None else float(cost)
-    # Every row arrives with its own copy of each string, so a few thousand
-    # distinct session ids, models and tool names were held as millions of
-    # objects (1,090,252 str objects for 1,705 distinct session/model values on a
-    # 545k-turn hot tier). Interning keeps one of each; the empty maps and lists
-    # share the read-only sentinels the parser already uses. Together with the
-    # batched fetch: 1,842 MB -> 1,100 MB for that tier, identical values.
-    sid = sys.intern(sid)
-    model = sys.intern(model) if model else model
-    stop_reason = sys.intern(stop_reason) if stop_reason else stop_reason
-    attribution_skill = sys.intern(attribution_skill) if attribution_skill else attribution_skill
-    tool_names = _interned_counter(tool_names_json, EMPTY_TOOL_NAMES)
-    skill_names = _interned_counter(skill_names_json, EMPTY_SKILL_NAMES)
-    assumption_values = _json.loads(assumptions_json) if assumptions_json else []
-    assumptions = [AssumptionTag(v) for v in assumption_values] or EMPTY_ASSUMPTIONS
-    tool_costs: dict[str, ToolCost] = {}
-    if tool_costs_json:
-        for name, tc_data in _json.loads(tool_costs_json).items():
-            name = sys.intern(name)
-            tool_costs[name] = ToolCost(
-                tool_name=name,
-                input_tokens=float(tc_data.get("i", 0.0)),
-                output_tokens=float(tc_data.get("o", 0.0)),
-                cost_usd=float(tc_data.get("c", 0.0)),
-            )
-    unattr_cost = float(unattr_cost or 0.0)
-    if turn_cost is not None:
-        pool = usage.input_token_pool
-        in_shares = {n: tc.input_tokens / pool for n, tc in tool_costs.items()} if pool else {}
-        out_shares = {n: tc.output_tokens / out for n, tc in tool_costs.items()} if out else {}
-        repriced_tools, _, _, unattr_cost = _attribute_cost(model, usage, out_shares, in_shares, turn_cost)
-        for name, tc in tool_costs.items():
-            tc.cost_usd = repriced_tools[name].cost_usd if name in repriced_tools else 0.0
-    return Turn(
-        dedup_key=dedup_key,
-        timestamp=ts,
-        session_id=sid,
-        model=model,
-        usage=usage,
-        is_sidechain=bool(sidechain),
-        stop_reason=stop_reason,
-        cost_usd=repriced,
-        is_interrupted=bool(interrupted),
-        tool_use_count=int(tu),
-        tool_error_count=int(te),
-        tool_names=tool_names,
-        assumptions=assumptions,
-        tool_costs=tool_costs or EMPTY_TOOL_COSTS,
-        unattributed_input_tokens=float(unattr_in or 0.0),
-        unattributed_output_tokens=float(unattr_out or 0.0),
-        unattributed_cost_usd=unattr_cost,
-        attribution_skill=attribution_skill,
-        skill_names=skill_names,
-    )
-
-
-def _interned_counter(json_text: str | None, empty: Counter[str]) -> Counter[str]:
-    """Parse a stored name->count map, interning names; *empty* when there are none.
-
-    Most rows carry no names, so the shared *empty* sentinel is the common
-    return. It must never be mutated (see the contract on the EMPTY_* constants
-    in tokenol.model.events).
-    """
-    parsed = _json.loads(json_text) if json_text else None
-    if not parsed:
-        return empty
-    counter: Counter[str] = Counter()
-    for name, n in parsed.items():
-        counter[sys.intern(name)] = n
-    return counter
-
-
-def _claude_turns(rows: Iterable[tuple]) -> list[Turn]:
-    """Hydrate rows, dropping non-Claude models.
-
-    The live path now excludes them before they are ever queued, but stores
-    written before that hold such rows, and a $0 turn read back dilutes every
-    blended cost-per-token figure.
-    """
-    return [t for t in map(_row_to_turn, rows) if is_claude(t.model)]
-
-
 class HistoryStore:
     """Owns a single DuckDB write connection and the schema."""
 
@@ -411,14 +254,8 @@ class HistoryStore:
             except OSError:
                 log.debug("could not chmod 0600 on %s", self.path)
             self._migrate()
-        # Computed once: the schema cannot change after __init__ (migrations run
-        # above), and re-running DESCRIBE per query would touch the shared
-        # connection outside the lock — a race that silently returns no columns,
-        # making every field fall back to its NULL default.
-        self._turn_cols = self._turn_column_sql()
-        self._turn_cols_prefixed = self._turn_column_sql(prefix="turns.")
 
-    # Column order MUST match _row_to_turn's unpacking.
+    # Column order MUST match the CREATE TABLE and the engine's staging columns.
     _TURN_COLUMNS: tuple[tuple[str, str], ...] = (
         ("dedup_key", "NULL"), ("ts", "NULL"), ("session_id", "NULL"), ("model", "NULL"),
         ("input_tokens", "0"), ("output_tokens", "0"), ("cache_read_tokens", "0"),
@@ -429,22 +266,6 @@ class HistoryStore:
         ("unattributed_input_tokens", "0.0"), ("unattributed_output_tokens", "0.0"),
         ("unattributed_cost_usd", "0.0"), ("attribution_skill", "NULL"), ("skill_names", "NULL"),
     )
-
-    def _turn_column_sql(self, prefix: str = "") -> str:
-        """SELECT list for `turns`, substituting defaults for columns this file lacks.
-
-        A store opened read-only cannot be migrated, and an older file is missing
-        every column added by v2-v4 (tool_costs, the skill fields,
-        cache_creation_1h_tokens, ...). Selecting them unconditionally fails the
-        whole query, which would make the warm tier unreadable exactly on the
-        old stores that hold the history worth recovering. Substituting a typed
-        default reproduces what the migration's DEFAULT would have given.
-        """
-        present = {r[0] for r in self._con.execute("DESCRIBE turns").fetchall()}
-        return ", ".join(
-            f"{prefix}{name}" if name in present else f"{default} AS {name}"
-            for name, default in self._TURN_COLUMNS
-        )
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
@@ -563,205 +384,16 @@ class HistoryStore:
                     [sid, s.source_file or None, s.cwd, s.is_sidechain, first_ts, last_ts, count],
                 )
 
-    @staticmethod
-    def _naive_utc(cutoff: datetime) -> datetime:
-        """Rows are stored as naive UTC timestamps; compare against the same."""
-        if cutoff.tzinfo is not None:
-            return cutoff.astimezone(timezone.utc).replace(tzinfo=None)
-        return cutoff
-
-    def hydrate_hot(self, window_days: int) -> tuple[list[Turn], list[Session]]:
-        """Load Turn rows whose ts is within `window_days` of now, plus their sessions.
-
-        Returns ([], []) if the store is empty or no turns fall within the window.
-        Each Session's `turns` list is populated with its corresponding Turns from
-        the same hot-window query — callers can iterate sessions and treat them
-        as fully-hydrated.
-        """
-        return self.hydrate_since(datetime.now(tz=timezone.utc) - timedelta(days=window_days))
-
-    def hydrate_since(self, cutoff: datetime) -> tuple[list[Turn], list[Session]]:
-        """Load Turn rows at or after `cutoff` (UTC), plus their sessions.
-
-        Takes the cutoff rather than a window so the caller can hold the exact
-        value and pass the same one to `hydrate_before`. Deriving it twice from
-        two separate `now` readings leaves a band between them that neither
-        tier covers.
-        """
-        return self._hydrate_where("ts >= ?", [self._naive_utc(cutoff)])
-
-    def hydrate_before(self, cutoff: datetime) -> tuple[list[Turn], list[Session]]:
-        """Load Turn rows strictly older than `cutoff` (UTC), plus their sessions.
-
-        The exact complement of `hydrate_since` for the same cutoff: a server
-        that hydrated its hot tier at `cutoff` already holds every row at or
-        after it and appends every new one, so this is the part of the store
-        the hot tier does not cover.
-        """
-        return self._hydrate_where("ts < ?", [self._naive_utc(cutoff)])
-
-    def _hydrate_where(self, clause: str, params: list) -> tuple[list[Turn], list[Session]]:
-        # Rows are converted batch by batch as they are fetched (see
-        # HYDRATE_BATCH_ROWS). A pending result lives on the connection that ran
-        # the query, so batching on the shared `_con` would mean holding its lock
-        # through the whole conversion — on a real store the bulk of the work,
-        # during which the flusher and every other reader would stall. The query
-        # runs on its own cursor instead: DuckDB's documented way for one thread
-        # to use the database while others use theirs. Only creating the cursor
-        # touches `_con`, so only that is under the lock.
-        with self._lock:
-            cur = self._con.cursor()
-        try:
-            cur.execute(f"SELECT {self._turn_cols} FROM turns WHERE {clause} ORDER BY ts", params)
-            turns: list[Turn] = []
-            while rows := cur.fetchmany(HYDRATE_BATCH_ROWS):
-                turns.extend(_claude_turns(rows))
-        finally:
-            cur.close()
-        if not turns:
-            return [], []
-
-        turns_by_sid: dict[str, list[Turn]] = {}
-        for t in turns:
-            turns_by_sid.setdefault(t.session_id, []).append(t)
-        return turns, self._sessions_for(turns_by_sid)
-
-    def _sessions_for(self, turns_by_sid: dict[str, list[Turn]]) -> list[Session]:
-        """Session rows for the keys of *turns_by_sid*, each carrying those turns."""
-        placeholders = ",".join(["?"] * len(turns_by_sid))
-        with self._lock:
-            session_rows = self._con.execute(
-                f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
-                list(turns_by_sid),
-            ).fetchall()
-        return [
-            Session(
-                session_id=sid,
-                source_file=src or "",
-                is_sidechain=bool(sidechain),
-                cwd=cwd,
-                turns=turns_by_sid.get(sid, []),
-            )
-            for sid, src, cwd, sidechain in session_rows
-        ]
-
-    def summarize_before(self, cutoff: datetime) -> tuple[list[Session], date | None]:
-        """The warm tier's sessions (with no turns attached) and its earliest turn date.
-
-        Exactly what `hydrate_before(cutoff)` would yield for those two things —
-        same Claude-only filter, same session rows — without building a Turn per
-        row. For a request whose range starts after the cutoff, every warm turn
-        would be filtered out anyway, but the warm *sessions* still matter:
-        project grouping rolls nested cwds up to their shortest ancestor across
-        every known session, and the daily panel reports the earliest date held.
-        """
-        with self._lock:
-            rows = self._con.execute(
-                "SELECT session_id, model, min(ts) FROM turns WHERE ts < ? GROUP BY session_id, model",
-                [self._naive_utc(cutoff)],
-            ).fetchall()
-        claude = [(sid, ts) for sid, model, ts in rows if is_claude(model)]
-        if not claude:
-            return [], None
-        stubs = self._sessions_for({sid: [] for sid, _ in claude})
-        return stubs, min(ts for _, ts in claude).date()
-
     def last_ts_by_session(self) -> dict[str, datetime]:
         """High-water marks per session_id (UTC datetimes)."""
         with self._lock:
             rows = self._con.execute("SELECT session_id, last_ts FROM sessions").fetchall()
         return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
 
-    def dedup_keys(self, before: datetime | None = None) -> set[str]:
-        """Every dedup_key in the store, or only those of rows older than *before*.
-
-        The derivation seeds its in-memory dedup set from this instead of from
-        the hot window alone. Without it every turn older than the window was
-        re-derived from JSONL on each cold start, appended to the hot tier,
-        queued, and rejected by the PRIMARY KEY at the very last step — 96,867
-        turns on the live store. Cost: one string per persisted turn, about
-        15 MB per 100k rows. With *before* set to the hot cutoff, the caller
-        takes the newer keys from the hot Turns it already holds instead of
-        holding a second copy of each.
-        """
-        with self._lock:
-            if before is None:
-                rows = self._con.execute("SELECT dedup_key FROM turns").fetchall()
-            else:
-                rows = self._con.execute(
-                    "SELECT dedup_key FROM turns WHERE ts < ?", [self._naive_utc(before)]
-                ).fetchall()
-        return {r[0] for r in rows}
-
     def is_empty(self) -> bool:
         """True when the store holds no turns at all."""
         with self._lock:
             return self._con.execute("SELECT 1 FROM turns LIMIT 1").fetchone() is None
-
-    def query_turns(
-        self,
-        since: date | None = None,
-        until: date | None = None,
-        project: str | None = None,
-        model: str | None = None,
-    ) -> list[Turn]:
-        """Return matching turns from the warm tier, hydrated into Turn objects.
-
-        `since` / `until` are inclusive bounds on the date portion of `ts`.
-        `project` matches `sessions.cwd` exactly (joins through sessions table).
-        `model` matches `turns.model` exactly.
-        """
-        where: list[str] = []
-        params: list = []
-        join_sessions = project is not None
-        if since is not None:
-            where.append("turns.ts >= ?")
-            params.append(datetime.combine(since, datetime.min.time()))
-        if until is not None:
-            # End-inclusive: include the entire `until` day.
-            where.append("turns.ts < ?")
-            params.append(datetime.combine(until, datetime.min.time()) + timedelta(days=1))
-        if model is not None:
-            where.append("turns.model = ?")
-            params.append(model)
-        if project is not None:
-            where.append("sessions.cwd = ?")
-            params.append(project)
-
-        join_clause = "JOIN sessions USING (session_id)" if join_sessions else ""
-        where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-        sql = f"""
-            SELECT {self._turn_cols_prefixed}
-            FROM turns {join_clause} {where_clause}
-            ORDER BY turns.ts
-        """
-        with self._lock:
-            rows = self._con.execute(sql, params).fetchall()
-        return _claude_turns(rows)
-
-    def query_session(self, session_id: str) -> Session | None:
-        """Return a Session with all its persisted turns, or None if unknown."""
-        with self._lock:
-            srow = self._con.execute(
-                "SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id = ?",
-                [session_id],
-            ).fetchone()
-            if srow is None:
-                return None
-            sid, src, cwd, sidechain = srow
-            # Direct query for this session's turns (avoids loading the full warm tier).
-            turn_rows = self._con.execute(
-                f"SELECT {self._turn_cols} FROM turns WHERE session_id = ? ORDER BY ts",
-                [sid],
-            ).fetchall()
-            turns = _claude_turns(turn_rows)
-            return Session(
-                session_id=sid,
-                source_file=src or "",
-                is_sidechain=bool(sidechain),
-                cwd=cwd,
-                turns=turns,
-            )
 
     def forget(
         self,

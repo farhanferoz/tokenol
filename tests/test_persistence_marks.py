@@ -64,10 +64,15 @@ def persist_setup(tmp_path, monkeypatch):
     db.parent.mkdir(parents=True)
     seed_history_store(db, days_ago=5, turns=3)
     store = HistoryStore(db)
-    store._hot_window_days = 90
     queue = FlushQueue(store, count_threshold=1_000_000, interval_seconds=1000)
     yield store, queue, src
     store.close()
+
+
+def _stored_keys(store) -> set[str]:
+    """Every dedup key the store file holds (raw SQL: the store has no read API for turns)."""
+    with store._lock:
+        return {r[0] for r in store._con.execute("SELECT dedup_key FROM turns").fetchall()}
 
 
 def _restart(store):
@@ -134,7 +139,7 @@ async def test_a_restart_skips_files_whose_marks_are_persisted(persist_setup, mo
     assert parsed == [], f"unchanged files were re-parsed after restart: {parsed}"
     # The skipped file's turns are in the store, and the engine loaded them from it:
     # known to the dedup check, and held exactly once.
-    stored = {k for k in store.dedup_keys() if not k.startswith("warm-")}
+    stored = {k for k in _stored_keys(store) if not k.startswith("warm-")}
     assert len(stored) == BASIC_JSONL_TURNS, "the skipped file's turns must be in the store"
     assert usage.engine.known_keys(stored) == stored
     assert len(usage.engine.session_turns("sess-001")) == BASIC_JSONL_TURNS, "old turns were rebuilt into the engine"
@@ -270,7 +275,7 @@ async def test_marks_are_distrusted_when_the_store_is_empty(persist_setup, monke
 
     # The store loses every row, but the sidecar survives.
     store.forget(all=True)
-    assert store.dedup_keys() == set()
+    assert _stored_keys(store) == set()
     save_marks({src: src.stat().st_mtime_ns})
 
     parsed: list[Path] = []

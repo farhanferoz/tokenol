@@ -50,27 +50,3 @@ def baseline_median(
     if n < 7:
         return statistics.median(r[key] for r in past[-3:]), "3d"
     return statistics.median(r[key] for r in past[-7:]), "7d"
-
-
-def trailing_stddev(
-    daily_series: list[dict],
-    days: int,
-    today: date,
-    value_key: str = "cost_usd",
-) -> float | None:
-    """Standard deviation over the same baseline window as trailing_median.
-
-    Returns None if fewer than 4 baseline days available.
-    """
-    cutoff = today.toordinal() - days
-    window = [
-        r[value_key]
-        for r in daily_series
-        if r.get("date") and date.fromisoformat(r["date"]).toordinal() > cutoff and date.fromisoformat(r["date"]) < today and r.get(value_key, 0) >= 0
-    ]
-    if len(window) < 4:
-        return None
-    try:
-        return statistics.stdev(window)
-    except statistics.StatisticsError:
-        return None

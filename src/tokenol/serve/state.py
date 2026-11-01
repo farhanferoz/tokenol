@@ -5,12 +5,6 @@ usage engine does not hold yet (_ingest_tick), hands them to the engine in one
 batch, and keeps no reference to them. Every snapshot section is then answered
 by the engine's queries (build_snapshot_full).
 
-The old no-store fallback (get_or_parse / get_derived / _build_turns_and_sessions,
-which re-derives everything from cached events) is no longer called by the
-snapshot; Task 8 deletes it.
-
-Thread-safety invariant: ParseCache._store is mutated only under _lock.
-All code paths that call get_or_parse / purge acquire the lock first.
 """
 
 from __future__ import annotations
@@ -99,194 +93,19 @@ _MARKS_SAVE_INTERVAL_SECONDS = 60.0
 
 @dataclass
 class ParseCache:
-    """JSONL parse cache keyed by (path_str, size, mtime_ns).
+    """Per-server tick bookkeeping and the handle to the usage engine.
 
-    All public methods are thread-safe via an internal lock.
-
-    Also memoizes the derived (turns, sessions) tuple keyed on the active set of
-    parse keys: when no JSONL file changed since the last build, build_snapshot_full
-    can skip the O(total events) re-derivation. The memo is invalidated automatically
-    on any get_or_parse miss or any purge that drops a key.
-
-    Scope note: `_store` and the derived memo back the old NO-STORE fallback
-    path only, which the snapshot no longer takes (Task 8 deletes it). The tick
-    (`_ingest_tick`) parses edge files directly and retains none of their
-    events; this instance carries just its bookkeeping as duck-typed attributes
-    (`_tick_initialized`, `_known_passthrough_locs`, `_last_mtime_ns_by_path`,
-    ...), and `size` stays 0. Retaining events there cost roughly 2.1 GB on a
-    real corpus for a reader that did not exist.
+    The tick (`_ingest_tick`) parses edge files directly and retains none of
+    their events; this instance carries just its bookkeeping as duck-typed
+    attributes (`_tick_initialized`, `_known_passthrough_locs`,
+    `_last_mtime_ns_by_path`, ...). Retaining parsed events here once cost
+    roughly 2.1 GB on a real corpus for a reader that did not exist.
     """
 
-    _store: dict[tuple[str, int, int], list[RawEvent]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
-    _derived_keys: frozenset[tuple[str, int, int]] | None = None
-    _derived: tuple[list[Turn], list[Session], Counter[AssumptionTag]] | None = None
     # The usage engine and its companions. create_app sets it from the store before any
     # HistoryStore opens; build_snapshot_full opens an empty one when it is still None.
     usage: UsageContext | None = None
-
-    def get_or_parse(self, path: Path) -> tuple[tuple[str, int, int], list[RawEvent]]:
-        """Return (cache_key, events). Parses only when (size, mtime_ns) changes."""
-        stat = path.stat()
-        key = (str(path), stat.st_size, stat.st_mtime_ns)
-        path_str = str(path)
-        with self._lock:
-            if key not in self._store:
-                self._store[key] = list(parse_file(path))
-                # Drop superseded versions of THIS path. The key carries (size,
-                # mtime_ns), so every append to a live session file mints a new
-                # entry while the old one — the whole event list for the previous
-                # size — stays resident. A file has exactly one current version and
-                # older ones are never read again, so retaining them is a pure leak
-                # that grows with session activity, not with corpus size. purge()
-                # used to hide this by clearing on every tick, but it runs only on
-                # the non-store derivation path, so store-backed servers never
-                # evicted anything.
-                for stale in [k for k in self._store if k[0] == path_str and k != key]:
-                    del self._store[stale]
-                # New file content invalidates any derived memo.
-                self._derived_keys = None
-                self._derived = None
-            return key, self._store[key]
-
-    def purge(self, keep_keys: set[tuple[str, int, int]]) -> None:
-        """Remove entries not in keep_keys (stale / deleted files)."""
-        with self._lock:
-            stale = [k for k in self._store if k not in keep_keys]
-            for k in stale:
-                del self._store[k]
-            if stale:
-                self._derived_keys = None
-                self._derived = None
-
-    def get_derived(
-        self,
-        keys: frozenset[tuple[str, int, int]],
-        builder: Callable[[list[RawEvent]], tuple[list[Turn], list[Session], Counter[AssumptionTag]]],
-    ) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
-        """Return memoized (turns, sessions, fired_counts) for the given key set; rebuild on miss.
-
-        The memo is keyed on `keys` (the set of active ParseCache entries). When no
-        file changed mtime/size since the last build, the cached derivation is
-        returned without re-iterating events — this is the dominant per-tick cost.
-        """
-        with self._lock:
-            if self._derived is not None and self._derived_keys == keys:
-                return self._derived
-            # Build outside the parse-cache invariant by snapshotting events first.
-            events: list[RawEvent] = []
-            for k in keys:
-                bucket = self._store.get(k)
-                if bucket is not None:
-                    events.extend(bucket)
-        # Builder runs without the lock — it's pure CPU over a private list.
-        derived = builder(events)
-        with self._lock:
-            self._derived = derived
-            self._derived_keys = keys
-        return derived
-
-    @property
-    def size(self) -> int:
-        with self._lock:
-            return len(self._store)
-
-
-def _build_turns_and_sessions(
-    all_events: list[RawEvent],
-) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
-    """Build deduplicated turns and sessions from pre-parsed raw events.
-
-    Returns the (turns, sessions, fired-assumption-counts). Fired counts are returned
-    rather than written to a global recorder so the result is referentially
-    transparent and safe to memoize on ParseCache.
-    """
-    seen: dict[str, tuple[RawEvent, str]] = {}
-    passthroughs: list[tuple[RawEvent, None]] = []
-    cwd_by_session: dict[str, str] = {}
-    session_source: dict[str, str] = {}
-    fired: Counter[AssumptionTag] = Counter()
-
-    for ev in all_events:
-        if ev.cwd and ev.session_id not in cwd_by_session:
-            cwd_by_session[ev.session_id] = ev.cwd
-        if ev.session_id not in session_source:
-            session_source[ev.session_id] = ev.source_file
-        if ev.event_type != "assistant":
-            continue
-        if ev.model == "<synthetic>":
-            continue
-        if not registry.is_claude(ev.model):
-            continue
-        k = dedup_key(ev)
-        if k is None:
-            passthroughs.append((ev, None))
-        else:
-            seen[k] = (ev, k)
-
-    turns: list[Turn] = []
-    for ev, k in itertools.chain(passthroughs, seen.values()):
-        is_interrupted = ev.usage is None
-        usage = ev.usage if ev.usage is not None else Usage()
-
-        tags: list[AssumptionTag] = []
-        if k is None:
-            tags.append(AssumptionTag.DEDUP_PASSTHROUGH)
-        if is_interrupted:
-            tags.append(AssumptionTag.INTERRUPTED_TURN_SKIPPED)
-
-        tc = cost_for_turn(ev.model, usage, at=ev.timestamp)
-        tags.extend(t for t in tc.assumptions if t not in tags)
-        for tag in tags:
-            fired[tag] += 1
-
-        key_str = k or ev.uuid or str(id(ev))
-        turns.append(
-            Turn(
-                dedup_key=key_str,
-                timestamp=ev.timestamp,
-                session_id=ev.session_id,
-                model=ev.model,
-                usage=usage,
-                is_sidechain=ev.is_sidechain,
-                stop_reason=ev.stop_reason,
-                assumptions=tags if tags else EMPTY_ASSUMPTIONS,
-                cost_usd=tc.total_usd,
-                is_interrupted=is_interrupted,
-                tool_use_count=ev.tool_use_count,
-                tool_error_count=ev.tool_error_count,
-                tool_names=ev.tool_names,
-                tool_costs=ev.tool_costs,
-                unattributed_input_tokens=ev.unattributed_input_tokens,
-                unattributed_output_tokens=ev.unattributed_output_tokens,
-                unattributed_cost_usd=ev.unattributed_cost_usd,
-                attribution_skill=ev.attribution_skill,
-                skill_names=ev.skill_names,
-            )
-        )
-
-    session_turns: dict[str, list[Turn]] = defaultdict(list)
-    session_sidechain: dict[str, bool] = {}
-    for turn in turns:
-        sid = turn.session_id
-        session_turns[sid].append(turn)
-        if sid not in session_sidechain:
-            session_sidechain[sid] = turn.is_sidechain
-
-    sessions: list[Session] = []
-    for sid, t_list in session_turns.items():
-        t_list.sort(key=lambda t: t.timestamp)
-        sessions.append(
-            Session(
-                session_id=sid,
-                source_file=session_source.get(sid, ""),
-                is_sidechain=session_sidechain.get(sid, False),
-                cwd=cwd_by_session.get(sid),
-                turns=t_list,
-            )
-        )
-    sessions.sort(key=lambda s: s.turns[0].timestamp if s.turns else s.session_id)
-    return turns, sessions, fired
 
 
 def derive_delta_turns(
@@ -454,12 +273,6 @@ def _verdict_dist(rollups: list[SessionRollup]) -> dict[str, int]:
     for sr in rollups:
         dist[sr.verdict.value] += 1
     return dist
-
-
-def _sessions_in_window(rollups: list[SessionRollup], since: date, top: int) -> list[dict]:
-    filtered = [sr for sr in rollups if sr.last_ts.date() >= since]
-    filtered.sort(key=lambda sr: sr.cost_usd, reverse=True)
-    return [_session_rollup_to_dict(sr) for sr in filtered[:top]]
 
 
 def _projects_in_window(rollups: list[SessionRollup], since: date) -> list[dict]:

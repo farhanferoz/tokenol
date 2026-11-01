@@ -8,7 +8,7 @@ import pytest
 
 from tokenol.ingest.builder import build_turns
 from tokenol.metrics.cost import cache_saved_usd, cost_for_turn, rollup_by_date
-from tokenol.metrics.rollups import build_session_rollup, build_tool_mix
+from tokenol.metrics.rollups import build_session_rollup
 from tokenol.model.events import Session, Turn, Usage
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -358,74 +358,6 @@ def test_session_rollup_sums_tool_mix():
     )
     sr = build_session_rollup(s)
     assert sr.tool_mix == Counter({"Bash": 3, "Read": 3, "Edit": 1})
-
-
-def test_build_tool_mix_ranks_descending():
-    srs = [
-        Session(session_id="a", source_file="a.jsonl", is_sidechain=False, cwd="/p", turns=[_turn_with_tools({"Read": 5, "Edit": 2})]),
-        Session(session_id="b", source_file="b.jsonl", is_sidechain=False, cwd="/p", turns=[_turn_with_tools({"Edit": 3, "Bash": 1})]),
-    ]
-    rollups = [build_session_rollup(s) for s in srs]
-    result = build_tool_mix(rollups, top_n=10)
-
-    assert result == [
-        {"tool": "Read", "count": 5},
-        {"tool": "Edit", "count": 5},
-        {"tool": "Bash", "count": 1},
-    ]
-
-
-def test_build_tool_mix_collapses_tail_to_others():
-    srs = [
-        Session(
-            session_id="a",
-            source_file="a.jsonl",
-            is_sidechain=False,
-            cwd="/p",
-            turns=[
-                _turn_with_tools(
-                    {
-                        "Read": 10,
-                        "Edit": 8,
-                        "Bash": 6,
-                        "Grep": 4,
-                        "Glob": 3,
-                        "Write": 2,
-                        "Task": 1,
-                    }
-                )
-            ],
-        )
-    ]
-    rollups = [build_session_rollup(s) for s in srs]
-    result = build_tool_mix(rollups, top_n=3)
-
-    assert result[0] == {"tool": "Read", "count": 10}
-    assert result[1] == {"tool": "Edit", "count": 8}
-    assert result[2] == {"tool": "Bash", "count": 6}
-    assert result[3] == {"tool": "others", "count": 4 + 3 + 2 + 1}
-    assert len(result) == 4
-
-
-def test_build_tool_mix_no_others_when_under_top_n():
-    srs = [
-        Session(
-            session_id="a",
-            source_file="a.jsonl",
-            is_sidechain=False,
-            cwd="/p",
-            turns=[_turn_with_tools({"Read": 2, "Edit": 1})],
-        )
-    ]
-    rollups = [build_session_rollup(s) for s in srs]
-    result = build_tool_mix(rollups, top_n=10)
-
-    assert result == [{"tool": "Read", "count": 2}, {"tool": "Edit", "count": 1}]
-    assert all(row["tool"] != "others" for row in result)
-
-
-def test_build_tool_mix_empty():
-    assert build_tool_mix([], top_n=10) == []
 
 
 def test_cost_opus_5_has_own_entry():

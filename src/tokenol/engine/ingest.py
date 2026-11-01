@@ -253,7 +253,7 @@ class StoreLoader:
     def load(self, cur, source_catalog: str) -> int:
         """Load every Claude turn of ``<source_catalog>.main.turns``; return the row count.
 
-        Non-Claude rows are left out, as ``store._claude_turns`` has always done.
+        Non-Claude rows are left out, by the Claude-only rule the store reads always applied.
         """
         src = f'"{source_catalog}".main'
         present = {

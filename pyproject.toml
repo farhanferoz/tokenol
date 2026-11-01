@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "typer>=0.12",
     "rich>=13",
+    "duckdb>=1.5",
 ]
 
 [project.optional-dependencies]
@@ -39,9 +40,8 @@ serve = [
     "uvicorn[standard]>=0.29",
     "watchfiles>=0.21",
 ]
-persist = [
-    "duckdb>=0.10",
-]
+# DuckDB is a core dependency now; this extra stays empty so `pip install 'tokenol[serve,persist]'` keeps working.
+persist = []
 
 [project.scripts]
 tokenol = "tokenol.cli:app"

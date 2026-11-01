@@ -15,7 +15,6 @@ from tokenol.metrics.context import (
     ctx_ratio_n_to_1,
     ctx_used_latest,
     max_turn_input,
-    non_cached_input_ratio,
     tool_error_rate,
 )
 
@@ -55,14 +54,6 @@ def test_cache_reuse_ratio_basic():
     assert abs(ratio - 1500 / 1600) < 1e-9
 
 
-def test_non_cached_input_ratio_basic():
-    turns = build_turns([FIXTURES / "basic.jsonl"])
-    # raw=1000+2000=3000, total=1600+3000=4600
-    ratio = non_cached_input_ratio(turns)
-    assert ratio is not None
-    assert abs(ratio - 3000 / 4600) < 1e-9
-
-
 def test_context_growth_rate_single_turn():
     turns = build_turns([FIXTURES / "basic.jsonl"])
     assert context_growth_rate([turns[0]]) == 0.0
@@ -75,10 +66,6 @@ def test_max_turn_input_empty():
 def test_cache_reuse_ratio_none_when_no_cache():
     # Test None branch with empty list
     assert cache_reuse_ratio([]) is None
-
-
-def test_non_cached_input_ratio_none_when_empty():
-    assert non_cached_input_ratio([]) is None
 
 
 # ---- ctx_ratio_n_to_1 --------------------------------------------------

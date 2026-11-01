@@ -1,4 +1,4 @@
-"""Efficiency threshold defaults and colour helpers for Phase 5 metrics.
+"""Efficiency threshold defaults for Phase 5 metrics.
 
 `DEFAULTS` holds the factory values. A future settings UI will supply overrides
 at runtime; call-sites receive a `thresholds: dict` argument populated from
@@ -31,42 +31,6 @@ DEFAULTS: dict[str, float] = {
     "tool_error_storm_window": 10,
     "tool_error_storm_rate": 0.2,
 }
-
-
-def colour_for_hit_pct(pct: float, thresholds: dict = DEFAULTS) -> str:
-    """Return 'good' | 'amber' | 'red' | 'mute' for a hit-rate percentage."""
-    if pct >= thresholds["hit_rate_good_pct"]:
-        return "good"
-    if pct >= thresholds["hit_rate_red_pct"]:
-        return "amber"
-    return "red"
-
-
-def colour_for_cost_per_kw(value: float, thresholds: dict = DEFAULTS) -> str:
-    """Return 'good' | 'amber' | 'red' for $/kW."""
-    if value <= thresholds["cost_per_kw_good"]:
-        return "good"
-    if value <= thresholds["cost_per_kw_red"]:
-        return "amber"
-    return "red"
-
-
-def colour_for_ctx_ratio(value: float, thresholds: dict = DEFAULTS) -> str:
-    """Return 'good' | 'amber' | 'red' for Ctx N:1."""
-    if value >= thresholds["ctx_ratio_red"]:
-        return "red"
-    if value >= thresholds["ctx_ratio_red"] * 0.5:
-        return "amber"
-    return "good"
-
-
-def colour_for_cache_reuse(value: float, thresholds: dict = DEFAULTS) -> str:
-    """Return 'good' | 'amber' | 'red' for cache reuse N:1."""
-    if value >= thresholds["cache_reuse_good"]:
-        return "good"
-    if value >= thresholds["cache_reuse_red"]:
-        return "amber"
-    return "red"
 
 
 # ---------------------------------------------------------------------------

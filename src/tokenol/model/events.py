@@ -1,4 +1,4 @@
-"""Core data model: Event → Turn → Session → Project."""
+"""Core data model: Event → Turn → Session."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from tokenol.enums import AssumptionTag
 #
 # SAFETY: these singletons must never be mutated. The audit at
 # `src/tokenol/` does not write to .tool_names / .tool_costs / .assumptions
-# anywhere — only reads. The parser and `_build_turns_and_sessions` assign
+# anywhere — only reads. The parser and `derive_delta_turns` assign
 # fresh Counter / dict / list when content exists, and these sentinels only
 # in the empty case. If a future caller mutates a Turn's field, it must
 # replace it with a fresh container first; never mutate in place.
@@ -156,35 +156,3 @@ class Session:
     cwd: str | None = None
     turns: list[Turn] = field(default_factory=list)
     archived: bool = False
-
-    @property
-    def total_cost(self) -> float:
-        return sum(t.cost_usd for t in self.turns)
-
-    @property
-    def total_output_tokens(self) -> int:
-        return sum(t.usage.output_tokens for t in self.turns)
-
-    @property
-    def total_input_tokens(self) -> int:
-        return sum(t.usage.input_tokens for t in self.turns)
-
-    @property
-    def total_cache_read(self) -> int:
-        return sum(t.usage.cache_read_input_tokens for t in self.turns)
-
-    @property
-    def total_cache_creation(self) -> int:
-        return sum(t.usage.cache_creation_input_tokens for t in self.turns)
-
-
-@dataclass(slots=True)
-class Project:
-    """Aggregation of sessions under one config directory."""
-
-    config_dir: str
-    sessions: list[Session] = field(default_factory=list)
-
-    @property
-    def all_turns(self) -> list[Turn]:
-        return [t for s in self.sessions for t in s.turns]
