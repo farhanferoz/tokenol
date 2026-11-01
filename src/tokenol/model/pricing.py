@@ -23,6 +23,7 @@ increase and made $2/$10 the standard price (verified on the pricing page
 2026-09-04) — do NOT "fix" this entry up to $3/$15.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TypedDict
 
@@ -377,3 +378,94 @@ FAMILY_FALLBACKS: dict[str, str] = {
     "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5-20251001",
 }
+
+
+def entry_key(entry: ModelEntry) -> str:
+    """The CLAUDE_MODELS key *entry* is stored under (entries are module constants)."""
+    for key, candidate in CLAUDE_MODELS.items():
+        if candidate is entry:
+            return key
+    raise KeyError("entry is not a CLAUDE_MODELS value")
+
+
+@dataclass(frozen=True, slots=True)
+class RateRow:
+    """One price that applies to a (time, prompt size) region of a model's history.
+
+    The region is ``valid_from <= ts < valid_until`` and
+    ``pool_above < pool <= pool_at_most``; a None bound is open. Prompt size is
+    the input-side token pool (input + cache read + cache creation).
+    """
+
+    valid_from: datetime | None  # inclusive, UTC
+    valid_until: datetime | None  # exclusive, UTC
+    pool_above: int | None  # row applies when pool > this
+    pool_at_most: int | None  # row applies when pool <= this
+    rates: Rates
+
+    def applies(self, at: datetime | None, pool: int) -> bool:
+        # at=None prices at today's list: dated rows are history, so only open-ended ones match.
+        if at is None:
+            if self.valid_until is not None:
+                return False
+        elif (self.valid_from is not None and at < self.valid_from) or (
+            self.valid_until is not None and at >= self.valid_until
+        ):
+            return False
+        if self.pool_above is not None and pool <= self.pool_above:
+            return False
+        return self.pool_at_most is None or pool <= self.pool_at_most
+
+
+def _rates_of(source: Rates) -> Rates:
+    return {
+        "input": source["input"],
+        "output": source["output"],
+        "cache_write": source["cache_write"],
+        "cache_write_1h": source["cache_write_1h"],
+        "cache_read": source["cache_read"],
+    }
+
+
+_RATE_ROWS: dict[int, tuple[ModelEntry, tuple[RateRow, ...]]] = {}
+
+
+def rate_rows(entry: ModelEntry) -> tuple[RateRow, ...]:
+    """Expand *entry* into non-overlapping rows that cover every (time, pool) pair.
+
+    This is the one definition of price precedence: dated ``earlier`` rates win
+    before their ``until`` whatever the prompt size; from ``until`` on (or always,
+    with no ``earlier``) a prompt over the ``long_prompt`` threshold pays the
+    long-prompt rates, and anything else pays the entry's own rates. Cached per
+    entry (entries are module constants; the entry is held so its id stays valid).
+    """
+    cached = _RATE_ROWS.get(id(entry))
+    if cached is not None and cached[0] is entry:
+        return cached[1]
+    rows: list[RateRow] = []
+    valid_from: datetime | None = None
+    earlier = entry.get("earlier")
+    if earlier is not None:
+        rows.append(RateRow(None, earlier["until"], None, None, _rates_of(earlier)))
+        valid_from = earlier["until"]
+    long_prompt = entry.get("long_prompt")
+    if long_prompt is not None:
+        threshold = long_prompt["threshold"]
+        rows.append(RateRow(valid_from, None, threshold, None, _rates_of(long_prompt)))
+        rows.append(RateRow(valid_from, None, None, threshold, _rates_of(entry)))
+    else:
+        rows.append(RateRow(valid_from, None, None, None, _rates_of(entry)))
+    result = tuple(rows)
+    _RATE_ROWS[id(entry)] = (entry, result)
+    return result
+
+
+def select_rate(rows: tuple[RateRow, ...], at: datetime | None, pool: int) -> Rates:
+    """The rates of the first row in force at *at* for a prompt of *pool* tokens.
+
+    *at* None means today's price list.
+    """
+    for row in rows:
+        if row.applies(at, pool):
+            return row.rates
+    raise ValueError("rate rows do not cover this (time, pool)")

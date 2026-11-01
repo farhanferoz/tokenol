@@ -29,3 +29,11 @@ class AssumptionTag(str, Enum):
 class AttributionMode(str, Enum):
     PRORATA = "prorata"
     EXCL_CACHE_READ = "excl_cache_read"
+
+
+class PriceStatus(str, Enum):
+    """How confident we are in a model's price (values are the API's JSON strings)."""
+
+    KNOWN = "known"
+    ESTIMATED = "estimated"
+    UNPRICED = "unpriced"

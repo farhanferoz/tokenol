@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict
+from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict, PriceStatus
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import (
     SKILL_TOOL,
@@ -50,6 +50,7 @@ from tokenol.metrics.context import (
     ctx_ratio_n_to_1,
 )
 from tokenol.metrics.cost import TurnCost, cost_for_turn, rollup_by_date, rollup_by_hour
+from tokenol.metrics.cost import price_status as model_price_status
 from tokenol.metrics.history import baseline_median, trailing_median
 from tokenol.metrics.rollups import (
     SessionRollup,
@@ -1816,26 +1817,6 @@ def _accumulate_skill_costs(
     return cost, invs, last
 
 
-def model_price_status(model: str | None) -> str:
-    """How confident we are in a model's price, for surfacing on Model Mix.
-
-    - ``"known"`` — the model is in the price list; its cost is exact.
-    - ``"estimated"`` — an unrecognised model that the registry priced from a
-      similar one (tagged ``UNKNOWN_MODEL_FALLBACK``); typically an unknown
-      Claude version, but any string that falls through to the fallback.
-    - ``"unpriced"`` — no model, the ``(unknown)`` bucket, or a provider the
-      registry has no price for (e.g. gemini/gpt); its cost shows as $0.
-    """
-    if not model or model == "(unknown)":
-        return "unpriced"
-    entry, tags = registry.resolve(model)
-    if entry is None:
-        return "unpriced"
-    if AssumptionTag.UNKNOWN_MODEL_FALLBACK in tags:
-        return "estimated"
-    return "known"
-
-
 def estimated_models(turns: list[Turn]) -> list[dict]:
     """Models in *turns* that are missing from the price list, and what each is priced as.
 
@@ -1845,7 +1826,7 @@ def estimated_models(turns: list[Turn]) -> list[dict]:
     """
     out = []
     for model in sorted({t.model for t in turns if t.model}):
-        if model_price_status(model) == "estimated":
+        if model_price_status(model) is PriceStatus.ESTIMATED:
             entry, _ = registry.resolve(model)
             out.append({"model": model, "priced_as": FAMILY_FALLBACKS[entry["family"]]})
     return out

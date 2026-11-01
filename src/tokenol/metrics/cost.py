@@ -6,12 +6,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from tokenol.enums import AssumptionTag
+from tokenol.enums import AssumptionTag, PriceStatus
 from tokenol.model import registry
 from tokenol.model.events import Turn, Usage
-from tokenol.model.pricing import ModelEntry, Rates
+from tokenol.model.pricing import ModelEntry, Rates, rate_rows, select_rate
 
-_M = 1_000_000  # tokens per pricing unit
+TOKENS_PER_MILLION = 1_000_000  # rates are USD per this many tokens
 
 
 @dataclass(slots=True)
@@ -30,34 +30,51 @@ def _rates(entry: ModelEntry, usage: Usage, at: datetime | None) -> Rates:
     *at* None means today's price list. A request over a long-prompt threshold
     pays the long-prompt rates on every component, output included.
     """
-    earlier = entry.get("earlier")
-    if earlier is not None and at is not None and at < earlier["until"]:
-        return earlier
-    long_prompt = entry.get("long_prompt")
-    if long_prompt is not None and usage.input_token_pool > long_prompt["threshold"]:
-        return long_prompt
-    return entry
+    return select_rate(rate_rows(entry), at, usage.input_token_pool)
+
+
+def resolve_pricing(model: str | None) -> tuple[ModelEntry | None, list[AssumptionTag]]:
+    """The price-list entry and assumption tags for a logged model string.
+
+    No model at all is tagged like an unknown one and prices at zero.
+    """
+    if model:
+        return registry.resolve(model)
+    return None, [AssumptionTag.UNKNOWN_MODEL_FALLBACK]
+
+
+def price_status(model: str | None) -> PriceStatus:
+    """How confident we are in a model's price, for surfacing on Model Mix.
+
+    - ``KNOWN`` — the model is in the price list; its cost is exact.
+    - ``ESTIMATED`` — an unrecognised model that the registry priced from a
+      similar one (tagged ``UNKNOWN_MODEL_FALLBACK``); typically an unknown
+      Claude version, but any string that falls through to the fallback.
+    - ``UNPRICED`` — no model, the ``(unknown)`` bucket, or a provider the
+      registry has no price for (e.g. gemini/gpt); its cost shows as $0.
+    """
+    if not model or model == "(unknown)":
+        return PriceStatus.UNPRICED
+    entry, tags = registry.resolve(model)
+    if entry is None:
+        return PriceStatus.UNPRICED
+    if AssumptionTag.UNKNOWN_MODEL_FALLBACK in tags:
+        return PriceStatus.ESTIMATED
+    return PriceStatus.KNOWN
 
 
 def cost_for_turn(model: str | None, usage: Usage, *, at: datetime | None = None) -> TurnCost:
     """Price one request. Pass its timestamp as *at* so a model whose price has
     since changed bills at the rate in force that day; None prices it at today's."""
-    tags: list[AssumptionTag] = []
-
-    if model:
-        entry, fallback_tags = registry.resolve(model)
-        tags.extend(fallback_tags)
-    else:
-        entry = None
-        tags.append(AssumptionTag.UNKNOWN_MODEL_FALLBACK)
+    entry, tags = resolve_pricing(model)
 
     if entry is None:
         return TurnCost(0, 0, 0, 0, 0, tags)
 
     rates = _rates(entry, usage, at)
-    input_usd = usage.input_tokens * rates["input"] / _M
-    output_usd = usage.output_tokens * rates["output"] / _M
-    cache_read_usd = usage.cache_read_input_tokens * rates["cache_read"] / _M
+    input_usd = usage.input_tokens * rates["input"] / TOKENS_PER_MILLION
+    output_usd = usage.output_tokens * rates["output"] / TOKENS_PER_MILLION
+    cache_read_usd = usage.cache_read_input_tokens * rates["cache_read"] / TOKENS_PER_MILLION
 
     # Cache-creation tokens split by TTL tier: 1-hour writes bill at 2x input,
     # 5-minute writes at 1.25x. Clamp the 1h share to the total as a defensive
@@ -65,7 +82,7 @@ def cost_for_turn(model: str | None, usage: Usage, *, at: datetime | None = None
     # not an internal invariant) — Anthropic's own payloads never violate it.
     cache_1h_tokens = min(usage.cache_creation_1h_input_tokens, usage.cache_creation_input_tokens)
     cache_5m_tokens = usage.cache_creation_input_tokens - cache_1h_tokens
-    cache_creation_usd = cache_5m_tokens * rates["cache_write"] / _M + cache_1h_tokens * rates["cache_write_1h"] / _M
+    cache_creation_usd = cache_5m_tokens * rates["cache_write"] / TOKENS_PER_MILLION + cache_1h_tokens * rates["cache_write_1h"] / TOKENS_PER_MILLION
     total = input_usd + output_usd + cache_read_usd + cache_creation_usd
 
     return TurnCost(input_usd, output_usd, cache_read_usd, cache_creation_usd, total, tags)
@@ -89,8 +106,8 @@ def cache_saved_usd(turns: Iterable[Turn]) -> float:
         if entry is None:
             continue
         rates = _rates(entry, turn.usage, turn.timestamp)
-        full_input_usd = cache_read * rates["input"] / _M
-        actual_cache_usd = cache_read * rates["cache_read"] / _M
+        full_input_usd = cache_read * rates["input"] / TOKENS_PER_MILLION
+        actual_cache_usd = cache_read * rates["cache_read"] / TOKENS_PER_MILLION
         total += full_input_usd - actual_cache_usd
     return total
 
