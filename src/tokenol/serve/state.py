@@ -21,12 +21,19 @@ import logging
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING
 
+from tokenol.engine.sessions import (  # noqa: F401  (_GROUPED_CWD_CACHE, is_container_cwd: re-exported for callers and tests; Task 6 removes the alias)
+    _GROUPED_CWD_CACHE,
+    is_container_cwd,
+)
+from tokenol.engine.sessions import (
+    grouped_project_cwds as _grouped_cwd_by_sid,
+)
 from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict, PriceStatus
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import (
@@ -1272,85 +1279,6 @@ def _extract_metric(r: object, metric: str) -> float | None:
 
 def _cwd_basename(cwd: str) -> str:
     return cwd.split("/")[-1] if cwd else "–"
-
-
-# Root-level directories whose immediate children are user/mount homes, not
-# projects: "/home/ff235" and "/mnt/scratch" group projects, they are not one.
-_HOME_PARENTS: frozenset[str] = frozenset({"home", "Users", "mnt", "media", "srv"})
-
-# Memoize _grouped_cwd_by_sid on a content fingerprint of the sessions list.
-# Why content, not `id(sessions)`: Python recycles ids for freed objects, so
-# successive derives (or successive test runs) can collide on `id()` and return
-# stale results. The fingerprint is cheap to compute (one tuple build) and
-# changes whenever a session is added, removed, or has its cwd rewritten.
-_GROUPED_CWD_CACHE: dict[tuple, dict[str, str]] = {}
-_GROUPED_CWD_CACHE_MAX = 8
-
-
-def is_container_cwd(cwd: str) -> bool:
-    """Return True if *cwd* is a directory that holds projects rather than being one.
-
-    A home directory, a filesystem root, or anything above them is a container:
-    a session started there (``cd ~ && claude``) is its own project, but it must
-    never become the roll-up target for every project underneath it.
-
-    Matched by shape, not against this machine's ``$HOME``, because cwds are
-    ingested from other machines too (the DGX Spark sync mirrors its cages in
-    here, and it has its own home path). "Home-shaped" means exactly one
-    component below a root-level container: ``/home/x``, ``/Users/x``,
-    ``/root``, ``/mnt/x``.
-    """
-    parts = PurePosixPath(cwd).parts
-    if len(parts) <= 2:  # "/", "/home", "/Users", "/mnt", "/root"
-        return True
-    return len(parts) == 3 and parts[1] in _HOME_PARENTS
-
-
-class _HasCwd(Protocol):
-    """A session or a session's metadata: all the grouping needs."""
-
-    @property
-    def session_id(self) -> str: ...
-
-    @property
-    def cwd(self) -> str | None: ...
-
-
-def _grouped_cwd_by_sid(sessions: Sequence[_HasCwd]) -> dict[str, str]:
-    """Return {session_id: canonical_cwd}, where nested cwds roll up to their
-    shortest active ancestor.
-
-    Example: if both "/dev/proj" and "/dev/proj/backend" appear as cwds, every
-    session in "/dev/proj/backend" is remapped to "/dev/proj". Sibling or
-    unrelated cwds stay separate. The "(unknown)" sentinel is preserved as-is.
-
-    Container directories (see :func:`is_container_cwd`) are never roll-up
-    targets. Without that guard a single ``cd ~ && claude`` session collapses
-    every project on the machine into one "ff235" bucket, because the home
-    directory is a proper ancestor of all of them.
-
-    O(C²) in the number of distinct cwds; memoized on a content fingerprint so
-    a server with many projects doesn't re-do the work on every API request.
-    """
-    key = tuple((s.session_id, s.cwd or "(unknown)") for s in sessions)
-    cached = _GROUPED_CWD_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    raw = dict(key)
-    cwds = {cwd for cwd in raw.values() if cwd != "(unknown)"}
-    groupable = {cwd for cwd in cwds if not is_container_cwd(cwd)}
-    remap: dict[str, str] = {}
-    for cwd in cwds:
-        ancestors = [o for o in groupable if len(o) < len(cwd) and cwd.startswith(o + "/")]
-        remap[cwd] = min(ancestors, key=len) if ancestors else cwd
-    result = {sid: remap.get(cwd, cwd) for sid, cwd in raw.items()}
-
-    if len(_GROUPED_CWD_CACHE) >= _GROUPED_CWD_CACHE_MAX:
-        # Drop oldest entry (insertion order = oldest-first in CPython 3.7+).
-        _GROUPED_CWD_CACHE.pop(next(iter(_GROUPED_CWD_CACHE)))
-    _GROUPED_CWD_CACHE[key] = result
-    return result
 
 
 _COMPARE_TOP_N = 8
