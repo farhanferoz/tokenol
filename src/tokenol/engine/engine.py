@@ -18,6 +18,7 @@ Searched before writing: ``grep -rn malloc_trim src`` found only a comment in
 from __future__ import annotations
 
 import ctypes
+import gc
 import logging
 import os
 import threading
@@ -70,6 +71,8 @@ log = logging.getLogger(__name__)
 _STORE_ALIAS = "tokenol_store"
 _PROC_STATM = Path("/proc/self/statm")
 _BYTES_PER_MB = 1024 * 1024
+# Sessions per batched read; bounds the inlined id list in the SQL text.
+SESSION_CHUNK = 500
 
 
 class EngineMode(str, Enum):
@@ -356,9 +359,34 @@ class UsageEngine:
 
     def session_turns(self, session_id: str) -> list[Turn]:
         """The session's turns in time order, priced, as the ``Turn``s the Python code consumes."""
-        ix = self._session_ix.get(session_id)
-        if ix is None:
-            return []
+        return self.session_turns_many([session_id]).get(session_id, [])
+
+    def session_turns_many(self, session_ids: Iterable[str]) -> dict[str, list[Turn]]:
+        """``session_turns`` for many sessions at once; unknown ids are absent from the result.
+
+        One set of statements per chunk of ``SESSION_CHUNK`` sessions instead of per
+        session: a statement costs ~8 ms of fixed overhead however few rows it returns.
+        """
+        wanted = {sid: self._session_ix[sid] for sid in dict.fromkeys(session_ids) if sid in self._session_ix}
+        sids = list(wanted)
+        result: dict[str, list[Turn]] = {}
+        # Building ~700k long-lived objects makes the cyclic collector rescan them over and
+        # over: measured 8.2 s with it on, 4.4 s off, for every session on the real store.
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for start in range(0, len(sids), SESSION_CHUNK):
+                chunk = sids[start : start + SESSION_CHUNK]
+                result.update(self._read_session_chunk({wanted[sid]: sid for sid in chunk}))
+        finally:
+            if was_enabled:
+                gc.enable()
+        return result
+
+    def _read_session_chunk(self, sid_by_ix: dict[int, str]) -> dict[str, list[Turn]]:
+        # Literal ints (our own ids, never user text): an inlined list is what lets DuckDB
+        # filter the turns before the rates join; a bound parameter list did not.
+        ixs = ", ".join(str(ix) for ix in sid_by_ix)
         tool, skill = NameKind.TOOL.value, NameKind.SKILL.value
         stop = NameKind.STOP_REASON.value
         with self.cursor() as cur:
@@ -367,27 +395,27 @@ class UsageEngine:
                     t.cache_read_tokens, t.cache_creation_tokens, t.cache_creation_1h_tokens,
                     t.is_sidechain, t.is_interrupted, sr.name, t.tool_use_count, t.tool_error_count,
                     t.unattributed_input_tokens, t.unattributed_output_tokens, sk.name, t.assumptions,
-                    p.cost_usd, p.input_usd, p.output_usd, p.cache_read_usd, p.cache_creation_usd
+                    p.cost_usd, p.input_usd, p.output_usd, p.cache_read_usd, p.cache_creation_usd,
+                    t.session_ix
                 FROM {TURNS_TABLE} t
                 JOIN models m ON m.model_id = t.model_id
-                JOIN {PRICED_TURNS_VIEW} p ON p.turn_id = t.turn_id AND p.session_ix = {ix}
+                JOIN {PRICED_TURNS_VIEW} p ON p.turn_id = t.turn_id AND p.session_ix IN ({ixs})
                 LEFT JOIN {NAMES_TABLE} sr ON sr.kind = '{stop}' AND sr.name_id = t.stop_reason_id
                 LEFT JOIN {NAMES_TABLE} sk ON sk.kind = '{skill}' AND sk.name_id = t.attribution_skill_id
-                WHERE t.session_ix = ?
-                ORDER BY t.ts, t.turn_id""",
-                [ix],
+                WHERE t.session_ix IN ({ixs})
+                ORDER BY t.session_ix, t.ts, t.turn_id"""
             ).fetchall()
-            in_turns = f"SELECT turn_id FROM {TURNS_TABLE} WHERE session_ix = ?"
+            in_turns = f"SELECT turn_id FROM {TURNS_TABLE} WHERE session_ix IN ({ixs})"
             tool_rows = cur.execute(
                 f"""SELECT p.turn_id, n.name, p.input_tokens, p.output_tokens, p.cost_prorata,
                     p.input_share, p.output_share
                 FROM {PRICED_TURN_TOOLS_VIEW} p
                 JOIN {NAMES_TABLE} n ON n.kind = '{tool}' AND n.name_id = p.tool_id
-                WHERE p.session_ix = ?""",
-                [ix],
+                WHERE p.session_ix IN ({ixs})
+                ORDER BY p.turn_id, p.tool_id"""  # fixed order: float sums must not depend on the batch
             ).fetchall()
-            tool_counts = self._counts(cur, TOOL_CALLS_TABLE, "tool_id", tool, in_turns, ix)
-            skill_counts = self._counts(cur, SKILL_CALLS_TABLE, "skill_id", skill, in_turns, ix)
+            tool_counts = self._counts(cur, TOOL_CALLS_TABLE, "tool_id", tool, in_turns)
+            skill_counts = self._counts(cur, SKILL_CALLS_TABLE, "skill_id", skill, in_turns)
         costs: dict[int, dict[str, ToolCost]] = {}
         shares: dict[int, list[float]] = {}  # turn_id -> [summed input share, summed output share]
         for turn_id, name, tin, tout, cost, in_share, out_share in tool_rows:
@@ -395,18 +423,19 @@ class UsageEngine:
             total = shares.setdefault(turn_id, [0.0, 0.0])
             total[0] += in_share
             total[1] += out_share
-        turns: list[Turn] = []
+        result: dict[str, list[Turn]] = {sid: [] for sid in sid_by_ix.values()}
         for (
             turn_id, key, ts, model, inp, out, cr, cc, cc_1h, sidechain, interrupted, stop_reason,
             tool_uses, tool_errors, unattr_in, unattr_out, skill_name, bits,
-            cost, input_usd, output_usd, cache_read_usd, cache_creation_usd,
+            cost, input_usd, output_usd, cache_read_usd, cache_creation_usd, session_ix,
         ) in rows:
             in_total, out_total = shares.get(turn_id, (0.0, 0.0))
             # The share of each side no tool accounts for, priced as the parser prices it.
             unattr_cost = output_usd * max(0.0, 1.0 - out_total) + (
                 input_usd + cache_read_usd + cache_creation_usd
             ) * max(0.0, 1.0 - in_total)
-            turns.append(
+            session_id = sid_by_ix[session_ix]
+            result[session_id].append(
                 Turn(
                     dedup_key=key,
                     timestamp=ts.replace(tzinfo=timezone.utc),
@@ -429,16 +458,36 @@ class UsageEngine:
                     skill_names=skill_counts.get(turn_id) or EMPTY_SKILL_NAMES,
                 )
             )
-        return turns
+        return result
+
+    def set_project_cwds(self, mapping: dict[str, str]) -> None:
+        """Write each session's grouped project cwd (session_id -> cwd) in one transaction."""
+        if not mapping:
+            return
+        with self.cursor() as cur, self._transaction(cur):
+            cur.execute(
+                f"UPDATE {SESSIONS_TABLE} SET project_cwd = i.project_cwd FROM "
+                "(SELECT unnest(?) AS session_id, unnest(?) AS project_cwd) i "
+                f"WHERE {SESSIONS_TABLE}.session_id = i.session_id",
+                [list(mapping), list(mapping.values())],
+            )
+
+    def session_first_times(self) -> dict[str, datetime]:
+        """Each session's first turn time (UTC), the order ``SessionIndex.all`` lists them in."""
+        with self.cursor() as cur:
+            rows = cur.execute(
+                f"SELECT s.session_id, min(t.ts) FROM {SESSIONS_TABLE} s "
+                f"JOIN {TURNS_TABLE} t ON t.session_ix = s.session_ix GROUP BY s.session_id"
+            ).fetchall()
+        return {sid: first.replace(tzinfo=timezone.utc) for sid, first in rows}
 
     @staticmethod
-    def _counts(cur, table: str, column: str, kind: str, in_turns: str, ix: int) -> dict[int, Counter[str]]:
+    def _counts(cur, table: str, column: str, kind: str, in_turns: str) -> dict[int, Counter[str]]:
         counts: dict[int, Counter[str]] = {}
         rows = cur.execute(
             f"""SELECT c.turn_id, n.name, c.n FROM {table} c
             JOIN {NAMES_TABLE} n ON n.kind = '{kind}' AND n.name_id = c.{column}
-            WHERE c.turn_id IN ({in_turns})""",
-            [ix],
+            WHERE c.turn_id IN ({in_turns})"""
         ).fetchall()
         for turn_id, name, n in rows:
             counts.setdefault(turn_id, Counter())[name] = n

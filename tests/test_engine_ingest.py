@@ -21,6 +21,7 @@ import pytest
 pytest.importorskip("duckdb")
 
 from tokenol.engine import SessionInfo, UsageEngine
+from tokenol.engine.sessions import SessionIndex, SessionRollupCache
 from tokenol.enums import AssumptionTag
 from tokenol.ingest.parser import _attribute_cost
 from tokenol.metrics.cost import cost_for_turn
@@ -264,4 +265,39 @@ def test_engine_round_trip_known_keys_and_forget(mode: str, tmp_path: Path) -> N
         assert cur.execute("SELECT count(*) FROM sessions WHERE session_id IN ('s,1','s2')").fetchone()[0] == 0
     e.close()
 
+    engine.close()
+
+    _check_project_cwd_and_rollup_cache(turns, newer)
+
+
+def _check_project_cwd_and_rollup_cache(turns: list[Turn], newer: Turn) -> None:
+    """Project grouping is mirrored into the engine; a cached rollup lives until invalidated."""
+    home = "/home/ff235"
+    sessions = [
+        SessionInfo("s,1", "/tmp/a.jsonl", "/p/two/deep", False),  # nested: groups under /p/two
+        SessionInfo("s2", "/tmp/c.jsonl", "/p/two", True),
+        SessionInfo("s3", "/tmp/s3.jsonl", home, False),  # a container is its own project ...
+        SessionInfo("s5", "/tmp/s5.jsonl", f"{home}/proj", False),  # ... and nobody's ancestor
+    ]
+    engine = UsageEngine.open(None)
+    engine.add_turns([*turns, newer], sessions)
+    index = SessionIndex(engine)
+    index.add(sessions)
+    expected = {"s,1": "/p/two", "s2": "/p/two", "s3": home, "s5": f"{home}/proj"}
+    assert index.project_map() == expected
+    with engine.cursor() as cur:
+        stored = dict(cur.execute("SELECT session_id, project_cwd FROM sessions").fetchall())
+    assert stored == expected
+    assert [s.session_id for s in index.all()[:3]] == ["s,1", "s2", "s3"]  # first-turn order
+
+    cache = SessionRollupCache(engine, index)
+    first = cache.rollup("s2")
+    assert first.turns == 1
+    late = _priced_turn("late:2", "s2", BASE + timedelta(days=2), usage=Usage(5, 5, 0, 0, 0),
+                        is_sidechain=True, stop_reason=None)
+    engine.add_turns([late], [])
+    assert cache.rollup("s2") is first  # reused until a tick says otherwise
+    cache.invalidate(["s2"])
+    assert cache.rollup("s2").turns == 2
+    assert [r.session_id for r in cache.rollups(["s3", "s2"])] == ["s3", "s2"]
     engine.close()

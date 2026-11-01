@@ -21,11 +21,11 @@ import logging
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict, PriceStatus
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
@@ -1306,7 +1306,17 @@ def is_container_cwd(cwd: str) -> bool:
     return len(parts) == 3 and parts[1] in _HOME_PARENTS
 
 
-def _grouped_cwd_by_sid(sessions: list[Session]) -> dict[str, str]:
+class _HasCwd(Protocol):
+    """A session or a session's metadata: all the grouping needs."""
+
+    @property
+    def session_id(self) -> str: ...
+
+    @property
+    def cwd(self) -> str | None: ...
+
+
+def _grouped_cwd_by_sid(sessions: Sequence[_HasCwd]) -> dict[str, str]:
     """Return {session_id: canonical_cwd}, where nested cwds roll up to their
     shortest active ancestor.
 
