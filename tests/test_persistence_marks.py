@@ -96,6 +96,17 @@ async def test_marks_are_saved_only_after_the_flush_is_written(persist_setup, mo
     from tokenol.persistence.marks import marks_path
 
     monkeypatch.setattr(_state_mod, "_MARKS_SAVE_INTERVAL_SECONDS", 0.0)
+    # A file whose read fails must never be marked: a mark would skip it on every later start.
+    broken = src.with_name("broken.jsonl")
+    broken.write_bytes(src.read_bytes())
+    real = _state_mod.parse_file
+
+    def flaky(path):
+        if path == broken:
+            raise OSError("simulated read failure")
+        return real(path)
+
+    monkeypatch.setattr(_state_mod, "parse_file", flaky)
     cache = ParseCache()
 
     build_snapshot_full(cache, history_store=store, flush_queue=queue)  # parses, enqueues
@@ -109,7 +120,7 @@ async def test_marks_are_saved_only_after_the_flush_is_written(persist_setup, mo
     build_snapshot_full(cache, history_store=store, flush_queue=queue)  # first tick after the write
     assert marks_path().is_file()
     saved = json.loads(marks_path().read_text())
-    assert saved == {str(src): src.stat().st_mtime_ns}
+    assert saved == {str(src): src.stat().st_mtime_ns}, "only the file that was read may be marked"
 
 
 @pytest.mark.asyncio

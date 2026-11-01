@@ -119,9 +119,13 @@ def _engine(mode: str, tmp_path: Path, turns: list[Turn], sessions: list[Session
         return engine
     path = tmp_path / "h.duckdb"
     store = HistoryStore(path)
-    store.flush(turns, [Session(s.session_id, s.source_file, s.is_sidechain, s.cwd) for s in sessions])
+    # A non-Claude row in the store must stay out of the engine: excluded, not priced at $0.
+    gemini = _priced_turn("gem:1", "g1", BASE, usage=Usage(1, 1, 0, 0, 0), model="gemini-2.5-pro",
+                          is_sidechain=False, stop_reason="end_turn")
+    store.flush([*turns, gemini], [Session(s.session_id, s.source_file, s.is_sidechain, s.cwd) for s in sessions])
     store.close()
     engine = UsageEngine.open(path)
+    assert engine.known_keys(["gem:1"]) == set(), "a non-Claude stored row was loaded"
     # The engine detached the file: a writer opens it read-write in this process and can flush.
     writer = HistoryStore(path)
     writer.flush([_priced_turn("late:1", "s2", BASE + timedelta(days=9), usage=Usage(1, 1, 0, 0, 0),
