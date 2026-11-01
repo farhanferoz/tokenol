@@ -1,5 +1,6 @@
 """The in-memory usage engine."""
 
+from tokenol.engine.context import UsageContext
 from tokenol.engine.engine import UsageEngine
 from tokenol.engine.filters import GroupKey, InterruptedPolicy, SearchField, TurnFilter
 from tokenol.engine.queries import UsageQueries
@@ -13,6 +14,7 @@ __all__ = [
     "SearchField",
     "SessionInfo",
     "TurnFilter",
+    "UsageContext",
     "UsageEngine",
     "UsageQueries",
 ]

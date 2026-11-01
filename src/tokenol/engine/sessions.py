@@ -130,6 +130,11 @@ class SessionIndex:
         self._ordered = None
         self._project_map = None
 
+    def replace_all(self, infos: Iterable[SessionInfo]) -> None:
+        """Drop every session, then register *infos* (after a forget removed some from the engine)."""
+        self._infos.clear()
+        self.add(infos)
+
     def get(self, session_id: str) -> SessionInfo | None:
         return self._infos.get(session_id)
 

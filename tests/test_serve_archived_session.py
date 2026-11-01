@@ -12,8 +12,9 @@ from pathlib import Path
 
 import tokenol.ingest.discovery as _disc_mod
 import tokenol.serve.state as _state_mod
+from tokenol.engine import UsageContext
 from tokenol.persistence.store import HistoryStore
-from tokenol.serve.state import ParseCache, build_snapshot_full
+from tokenol.serve.state import ParseCache, build_snapshot_full, legacy_turn_view
 
 
 def _write_session(proj_dir: Path, sid: str, cwd: str, model: str, ts_iso: str, uid: str) -> None:
@@ -78,25 +79,26 @@ def test_jsonl_deletion_preserves_snapshot(tmp_path: Path) -> None:
     _write_session(proj, "sid-A", "/proj/a", "claude-sonnet-4-6", "2026-05-01T12:00:00Z", "1")
     _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7", "2026-05-01T13:00:00Z", "2")
 
-    store = HistoryStore(tmp_path / "h.duckdb")
-    # Wide hot window so both turns hydrate into memory after deletion.
-    store._hot_window_days = 365
+    store_path = tmp_path / "h.duckdb"
+    store = HistoryStore(store_path)
 
     try:
         with _mock_dirs(claude_root):
             cache = ParseCache()
             r1 = build_snapshot_full(cache, history_store=store)
             # Force-flush whatever the broadcaster would normally batch.
-            store.flush(
-                turns=cache._hot_turns,
-                sessions=list(cache._hot_sessions_by_id.values()),
-            )
+            held = legacy_turn_view(cache.usage)
+            store.flush(turns=held.turns, sessions=held.sessions)
 
         # Delete one JSONL — sid-A should become archived; sid-B stays live.
         (proj / "sid-A.jsonl").unlink()
 
+        # Start-up order: the engine reads the store file, then the writer reopens it.
+        store.close()
         with _mock_dirs(claude_root):
             cache2 = ParseCache()
+            cache2.usage = UsageContext.open(store_path)
+            store = HistoryStore(store_path)
             r2 = build_snapshot_full(cache2, history_store=store)
 
         # Quantitative payload sections must match exactly.
@@ -104,7 +106,7 @@ def test_jsonl_deletion_preserves_snapshot(tmp_path: Path) -> None:
             assert r1.payload[k] == r2.payload[k], f"divergence in {k}"
 
         # sid-A is archived (no live JSONL); sid-B is not.
-        sids = {s.session_id: s for s in r2.sessions}
+        sids = {s.session_id: s for s in legacy_turn_view(cache2.usage).sessions}
         assert sids["sid-A"].archived is True, "sid-A should be archived after JSONL deletion"
         assert sids["sid-B"].archived is False, "sid-B has live JSONL — must not be archived"
     finally:

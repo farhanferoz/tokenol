@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -16,9 +15,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
+from tokenol.engine.context import UsageContext
+from tokenol.engine.filters import TurnFilter
 from tokenol.enums import AttributionMode
 from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
 from tokenol.metrics.thresholds import DEFAULTS
+from tokenol.persistence.store import default_path as default_store_path
 from tokenol.serve.prefs import Preferences, default_path
 
 if TYPE_CHECKING:
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
 from tokenol.serve.session_detail import build_session_detail, build_turn_detail
 from tokenol.serve.state import (
     VALID_METRICS,
+    LegacyTurnView,
     ParseCache,
     SnapshotResult,
     _grouped_cwd_by_sid,
@@ -46,6 +49,7 @@ from tokenol.serve.state import (
     build_tool_detail,
     decode_cwd,
     encode_cwd,
+    legacy_turn_view,
     model_price_status,
     range_since,
 )
@@ -128,39 +132,34 @@ STATIC_DIR = Path(__file__).parent / "static"
 _MAX_HOT_WINDOW_DAYS = 3650
 
 
-def _open_readonly_store_if_present():
-    """Open an existing history store read-only, or return None.
+def _open_readonly_usage(store_path: Path) -> UsageContext:
+    """Open the engine on an existing history store for a plain `serve`, or on nothing.
 
-    Reading the warm tier and writing it are separate concerns with very
-    different risk: reading is what recovers history the JSONL no longer has,
-    while writing runs a flusher thread inside the server. So a plain
-    `tokenol serve` reads whatever store is already there and never writes to
-    it; `--persist` is only about keeping it up to date.
+    Reading the history is what recovers turns the JSONL no longer has, while writing
+    runs a flusher thread inside the server. So a plain `tokenol serve` reads whatever
+    store is already there and never writes to it; `--persist` is only about keeping it
+    up to date.
 
-    Best-effort: a missing, unreadable, or already-write-locked store just
-    means no warm tier, never a failed startup.
+    Best-effort: a missing, unreadable, or write-locked store just means an empty
+    engine fed from the JSONL, never a failed startup.
     """
     from rich.console import Console
 
     console = Console(stderr=True)
-    _env = os.environ.get("TOKENOL_HISTORY_PATH")
-    store_path = Path(_env) if _env else Path.home() / ".tokenol" / "history.duckdb"
     try:
         size_mb = store_path.stat().st_size / (1024 * 1024)
     except OSError:
-        return None
+        return UsageContext.open(None)
     try:
-        from tokenol.persistence.store import HistoryStore
-
-        store = HistoryStore(store_path, read_only=True)
-    except Exception as exc:  # noqa: BLE001 - never block startup on the warm tier
+        usage = UsageContext.open(store_path)
+    except Exception as exc:  # noqa: BLE001 - never block startup on the history store
         console.print(f"[yellow]History store at {store_path} ({size_mb:.0f} MB) could not be read: {exc}[/yellow]")
-        return None
+        return UsageContext.open(None)
     console.print(
         f"[green]Reading history store at {store_path} ({size_mb:.0f} MB) — read-only.[/green]\n"
         "[yellow]Not being updated. Pass --persist to keep it current.[/yellow]"
     )
-    return store
+    return usage
 
 
 @dataclass
@@ -171,32 +170,36 @@ class ServerConfig:
     persist: bool = False
 
 
-def _build_and_cache_snapshot(request: Request, period: str = "today") -> SnapshotResult:
+def _build_snapshot(request: Request, period: str = "today") -> SnapshotResult:
     cfg: ServerConfig = request.app.state.config
     prefs: Preferences = request.app.state.prefs
     cache: ParseCache = request.app.state.parse_cache
-    result = build_snapshot_full(
+    return build_snapshot_full(
         cache,
         all_projects=cfg.all_projects,
         reference_usd=prefs.reference_usd,
         tick_seconds=prefs.tick_seconds,
         period=period,
         thresholds=prefs.thresholds,
-        history_store=request.app.state.derivation_store,
+        history_store=request.app.state.history_store,
         flush_queue=request.app.state.flush_queue,
     )
-    request.app.state.snapshot_result = result
-    return result
 
 
-def _current_snapshot_result(request: Request) -> SnapshotResult:
-    """Prefer the broadcaster's latest build; fall back to the app cache or a fresh build."""
-    broadcaster = getattr(request.app.state, "broadcaster", None)
-    if broadcaster is not None:
-        latest = broadcaster.latest_result()
-        if latest is not None:
-            return latest
-    return request.app.state.snapshot_result or _build_and_cache_snapshot(request)
+def _usage_after_a_tick(request: Request) -> UsageContext:
+    """The usage context; if no tick has run yet (no dashboard connected), run one first.
+
+    Nothing but a snapshot build ingests the JSONL, so an endpoint reached before any
+    build would otherwise answer from the history store alone.
+    """
+    if not getattr(request.app.state.parse_cache, "_tick_initialized", False):
+        _build_snapshot(request)
+    return request.app.state.usage
+
+
+def _legacy_turn_view(request: Request) -> LegacyTurnView:
+    """TRANSITIONAL: every turn and session as Python objects, for endpoints Task 6-7 migrate."""
+    return legacy_turn_view(_usage_after_a_tick(request))
 
 
 # Seconds of no use after which the hydrated warm tier is dropped. The warm set
@@ -328,7 +331,7 @@ async def _snapshot_with_warm_tier(
     *,
     project: str | None = None,
     since: date | None = None,
-) -> SnapshotResult:
+) -> LegacyTurnView:
     """Return the current snapshot with persisted (warm-tier) turns folded in.
 
     *since* is the first date the caller will read turns from, for a caller
@@ -354,7 +357,7 @@ async def _snapshot_with_warm_tier(
     recycles ids for freed objects) so a page firing six breakdown requests off
     one snapshot pays for the merge once.
     """
-    result = _current_snapshot_result(request)
+    result = _legacy_turn_view(request)
     if getattr(request.app.state, "warm_store", None) is None:
         return result
 
@@ -438,6 +441,9 @@ def create_app(
     write_pidfile_fn = None
     clear_pidfile_fn = None
 
+    # DE2 order: the engine reads the store file first and lets go of it, then --persist
+    # opens it read-write; DuckDB refuses a read-only attach while a writer holds the file.
+    store_path = default_store_path()
     if config.persist:
         from tokenol.persistence.flusher import FlushQueue as _FlushQueue
         from tokenol.persistence.forget_handoff import (
@@ -450,28 +456,20 @@ def create_app(
             HistoryStore as _HistoryStore,
         )
 
-        history_store = _HistoryStore()
+        # Another tokenol holding the file raises StoreLockedError here: refuse to start.
+        usage = UsageContext.open(store_path)
+        try:
+            history_store = _HistoryStore(store_path)
+        except Exception:
+            usage.close()
+            raise
         flush_queue = _FlushQueue(history_store)
         write_pidfile_fn = _write_pidfile
         clear_pidfile_fn = _clear_pidfile
-        warm_store = history_store
     else:
         # No flusher, but still surface whatever history is already persisted.
-        warm_store = _open_readonly_store_if_present()
-
-    # Which store the snapshot DERIVES from. This used to be `history_store`, which
-    # is only set under --persist, so a plain `serve` fell back to re-deriving every
-    # turn from every cached event on every tick — the fallback memo is keyed on a
-    # frozenset of all JSONL (path, size, mtime), so one file changing anywhere
-    # invalidates it. Measured 2026-09-04 on a real corpus: 3,897 files, 258,856
-    # turns, 2.4-5.3s of CPU per miss against a 5s tick, i.e. a permanently
-    # saturated core. Deriving incrementally only needs to READ the store, so it
-    # has nothing to do with whether we are also writing to it.
-    derivation_store = history_store if history_store is not None else warm_store
-    if derivation_store is not None:
-        # Read by _store_backed_derivation as a duck-typed attr; unset it silently
-        # defaults to 90 days and the hot tier would differ between modes.
-        derivation_store._hot_window_days = prefs.hot_window_days
+        usage = _open_readonly_usage(store_path) if store_path.exists() else UsageContext.open(None)
+    parse_cache.usage = usage
 
     broadcaster = SnapshotBroadcaster(
         parse_cache=parse_cache,
@@ -479,7 +477,7 @@ def create_app(
         get_reference_usd=lambda: prefs.reference_usd,
         get_tick_seconds=lambda: prefs.tick_seconds,
         get_thresholds=lambda: prefs.thresholds,
-        history_store=derivation_store,
+        history_store=history_store,
         flush_queue=flush_queue,
         on_forget=lambda: _release_warm_cache(app.state),
     )
@@ -502,24 +500,24 @@ def create_app(
                 await flush_queue.stop()
                 history_store.close()
                 clear_pidfile_fn()
-            elif warm_store is not None:
-                warm_store.close()
+            usage.close()
 
     app = FastAPI(title="tokenol", lifespan=lifespan)
     app.state.config = config
     app.state.prefs = prefs
     app.state.prefs_path = _prefs_path
     app.state.parse_cache = parse_cache
-    app.state.snapshot_result = None
+    app.state.usage = usage
     app.state.warm_merged = None
     app.state.warm_tier_cache = None
     app.state.warm_tier_release = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
-    app.state.derivation_store = derivation_store
     # Guards the warm-tier hydration against a stampede; see _warm_tier.
     app.state.warm_tier_lock = asyncio.Lock()
-    app.state.warm_store = warm_store
+    # The warm tier is gone (the engine holds all history); Task 6 deletes the functions
+    # that still read this, which are inert while it is None.
+    app.state.warm_store = None
     app.state.flush_queue = flush_queue
 
     if STATIC_DIR.exists():
@@ -569,11 +567,11 @@ def create_app(
             cached = broadcaster.cached_payload(period)
             if cached is not None:
                 return JSONResponse(cached)
-        return JSONResponse(_build_and_cache_snapshot(request, period=period).payload)
+        return JSONResponse(_build_snapshot(request, period=period).payload)
 
     @app.get("/api/session/{session_id}")
     async def api_session_detail(session_id: str, request: Request):
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         session = next((s for s in result.sessions if s.session_id == session_id), None)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -581,7 +579,7 @@ def create_app(
 
     @app.get("/api/session/{session_id}/turn/{turn_idx}")
     async def api_turn_detail(session_id: str, turn_idx: int, request: Request):
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         session = next((s for s in result.sessions if s.session_id == session_id), None)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -615,7 +613,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD") from None
         if parsed_date > date.today():
             raise HTTPException(status_code=400, detail="Future dates not supported")
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_day_detail(parsed_date, result.turns, result.sessions),
@@ -652,7 +650,7 @@ def create_app(
             parsed = date.fromisoformat(target_date)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD") from None
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         return JSONResponse(build_hourly_panel(parsed, result.turns, result.sessions, metric, project, model))
 
     @app.get("/api/daily")
@@ -706,18 +704,18 @@ def create_app(
 
     @app.get("/api/models")
     async def api_models(request: Request, range: str = "today"):
-        result = _current_snapshot_result(request)
+        usage = _usage_after_a_tick(request)
         since = range_since(range, date.today())
-        turns = [t for t in result.turns if t.timestamp.date() >= since] if since else result.turns
-        return JSONResponse(build_models_panel(turns, range))
+        return JSONResponse(build_models_panel(usage.queries.model_rollups(TurnFilter(since=since)), range))
 
     @app.get("/api/recent")
     async def api_recent(request: Request, window: str = "60m"):
         if window not in _WINDOW_MINUTES:
             raise HTTPException(status_code=400, detail=f"window must be one of: {list(_WINDOW_MINUTES)}")
-        result = _current_snapshot_result(request)
+        usage = _usage_after_a_tick(request)
+        usage.index.project_map()  # before the first query: pushes new sessions' project into the engine
         now = datetime.now(tz=timezone.utc)
-        return JSONResponse(build_recent_activity_panel(result.turns, result.sessions, now, _WINDOW_MINUTES[window]))
+        return JSONResponse(build_recent_activity_panel(usage.queries, now, _WINDOW_MINUTES[window]))
 
     def _validate_tool_or_model_name(name: str) -> str:
         # MCP tools have names like `mcp__server__tool`; future Claude Code
@@ -732,7 +730,7 @@ def create_app(
     @app.get("/api/model/{name:path}")
     async def api_model_detail(name: str, request: Request):
         name = _validate_tool_or_model_name(name)
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         detail = build_model_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Model not found")
@@ -741,7 +739,7 @@ def create_app(
     @app.get("/api/tool/{name:path}")
     async def api_tool_detail(name: str, request: Request):
         name = _validate_tool_or_model_name(name)
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         detail = build_tool_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Tool not found")
@@ -750,7 +748,7 @@ def create_app(
     @app.get("/api/skill/{name:path}")
     async def api_skill_detail(name: str, request: Request):
         name = _validate_tool_or_model_name(name)
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         detail = build_skill_detail(name, result.turns, result.sessions)
         if detail is None:
             raise HTTPException(status_code=404, detail="Skill not found")
@@ -760,7 +758,7 @@ def create_app(
     async def api_search(request: Request, q: str = ""):
         if not q.strip():
             return JSONResponse({"hits": [], "query": q})
-        result = _current_snapshot_result(request)
+        result = _legacy_turn_view(request)
         return JSONResponse(build_search_results(q, result.turns, result.sessions))
 
     @app.get("/api/prefs")

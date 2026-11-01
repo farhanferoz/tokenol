@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import tokenol.serve.state as _state_mod
+from tokenol.engine import UsageContext
 from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import RawEvent, Session, ToolCost, Turn, Usage
 from tokenol.persistence.store import HistoryStore
@@ -25,6 +26,7 @@ from tokenol.serve.state import (
     build_snapshot_full,
     build_tool_detail,
     derive_delta_turns,
+    legacy_turn_view,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -401,8 +403,9 @@ def test_assumptions_summary_has_all_tags(tmp_path: Path) -> None:
 
 def test_snapshot_empty_state(tmp_path: Path) -> None:
     """Empty directory → zero-cost snapshot, no sessions."""
+    cache = ParseCache()
     with _mock_dirs(tmp_path):
-        result = build_snapshot_full(ParseCache())
+        result = build_snapshot_full(cache)
 
     p = result.payload
     assert p["anomaly"] is None
@@ -410,11 +413,20 @@ def test_snapshot_empty_state(tmp_path: Path) -> None:
     assert p["topbar_summary"]["sessions_count"] == 0
     assert p["recent_activity"]["rows"] == []
     assert p["models"]["rows"] == []
-    assert result.sessions == []
+    assert cache.usage.index.all() == []
 
 
 def test_snapshot_recent_activity_shape(tmp_path: Path) -> None:
-    """recent_activity has window, aggregate, rows fields."""
+    """recent_activity has window, aggregate, rows fields; a session new this tick is grouped by project."""
+    from datetime import datetime, timedelta, timezone
+
+    recent_ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    proj = tmp_path / "projects"
+    proj.mkdir(parents=True)
+    # The second cwd is nested in the first, so it rolls up into one project row.
+    _write_session(proj, "sess-parent", "/home/u/proj", "claude-opus-4-7", recent_ts, "p")
+    _write_session(proj, "sess-nested", "/home/u/proj/backend", "claude-opus-4-7", recent_ts, "n")
+
     with _mock_dirs(tmp_path):
         result = build_snapshot_full(ParseCache())
 
@@ -425,6 +437,8 @@ def test_snapshot_recent_activity_shape(tmp_path: Path) -> None:
     agg = ra["aggregate"]
     for key in ("projects", "turns", "output", "cost", "model_mix", "hit_pct", "cost_per_kw"):
         assert key in agg, f"recent_activity.aggregate missing: {key}"
+    # Sessions first seen in this very tick: their project grouping must already be in the engine.
+    assert [(r["cwd"], r["turns"]) for r in ra["rows"]] == [("/home/u/proj", 2)]
 
 
 def test_snapshot_daily_shape(tmp_path: Path) -> None:
@@ -928,7 +942,7 @@ def test_server_turn_builders_price_each_turn_on_its_own_day(build: str) -> None
     if build == "full":
         turns, _, _ = _build_turns_and_sessions(events)
     else:
-        turns, _, _, _ = derive_delta_turns(events, set(), set())
+        turns, _, _, _ = derive_delta_turns(events, set().intersection, set())
 
     before, after = sorted(turns, key=lambda t: t.timestamp)
     assert before.cost_usd == pytest.approx(cost_for_turn("claude-sonnet-5-5", before.usage, at=before.timestamp).total_usd)
@@ -941,12 +955,20 @@ def test_derive_delta_turns_skips_known_dedup_keys() -> None:
         _ev(sid="s", msg_id="m1", req_id="r1", ts=ts),
         _ev(sid="s", msg_id="m2", req_id="r2", ts=ts, line=2),
     ]
+    asked: list[list[str]] = []
+
+    def known_keys(candidates):
+        asked.append(sorted(candidates))
+        return {"m1:r1"}.intersection(asked[-1])
+
     turns, _, _, _ = derive_delta_turns(
         events,
-        existing_dedup_keys={"m1:r1"},
+        known_keys=known_keys,
         existing_passthrough_locations=set(),
     )
     assert {t.dedup_key for t in turns} == {"m2:r2"}
+    # One question per batch, carrying every candidate: the engine answers it in one statement.
+    assert asked == [["m1:r1", "m2:r2"]]
 
 
 def test_derive_delta_turns_skips_known_passthroughs() -> None:
@@ -957,7 +979,7 @@ def test_derive_delta_turns_skips_known_passthroughs() -> None:
     ]
     turns, _, _, _ = derive_delta_turns(
         events,
-        existing_dedup_keys=set(),
+        known_keys=set().intersection,
         existing_passthrough_locations={("/x.jsonl", 4)},
     )
     # Line 4 known → skipped; line 7 emitted as a new passthrough turn.
@@ -970,7 +992,7 @@ def test_derive_delta_turns_emits_session_metadata_for_new_sids() -> None:
     events = [_ev(sid="brand-new", msg_id="m1", req_id="r1", ts=ts, cwd="/proj/new")]
     _, sessions, _, _ = derive_delta_turns(
         events,
-        existing_dedup_keys=set(),
+        known_keys=set().intersection,
         existing_passthrough_locations=set(),
     )
     assert len(sessions) == 1
@@ -991,7 +1013,7 @@ def test_derive_delta_turns_returns_accepted_passthrough_locations() -> None:
     ]
     _, _, _, accepted = derive_delta_turns(
         events,
-        existing_dedup_keys=set(),
+        known_keys=set().intersection,
         existing_passthrough_locations={("/x.jsonl", 30)},
     )
     assert accepted == {("/x.jsonl", 10)}
@@ -1007,7 +1029,7 @@ def test_derive_delta_turns_drops_non_claude_models() -> None:
     ]
     turns, _, _, accepted = derive_delta_turns(
         events,
-        existing_dedup_keys=set(),
+        known_keys=set().intersection,
         existing_passthrough_locations=set(),
     )
     assert [t.model for t in turns] == ["claude-sonnet-4-6"]
@@ -1025,33 +1047,35 @@ def test_snapshot_equivalence_via_store(tmp_path: Path) -> None:
     _write_session(proj, "sid-A", "/proj/a", "claude-sonnet-4-6", "2026-05-01T12:00:00Z", "1")
     _write_session(proj, "sid-B", "/proj/b", "claude-opus-4-7", "2026-05-01T13:00:00Z", "2")
 
-    store = HistoryStore(tmp_path / "h.duckdb")
-    # Use a wide hot window so both turns hydrate into memory in run 2.
-    store._hot_window_days = 365
+    store_path = tmp_path / "h.duckdb"
+    store = HistoryStore(store_path)
 
     try:
         with _mock_dirs(tmp_path / "claude"):
             cache = ParseCache()
             r1 = build_snapshot_full(cache, history_store=store)
             # Force-flush whatever the broadcaster would normally batch.
-            store.flush(
-                turns=cache._hot_turns,
-                sessions=list(cache._hot_sessions_by_id.values()),
-            )
+            held = legacy_turn_view(cache.usage)
+            store.flush(turns=held.turns, sessions=held.sessions)
+            first_sessions = {i.session_id for i in cache.usage.index.all()}
 
         # Delete the live JSONLs.
         for f in proj.glob("*.jsonl"):
             f.unlink()
 
+        # Start-up order: the engine reads the store file, then the writer reopens it.
+        store.close()
         with _mock_dirs(tmp_path / "claude"):
             cache2 = ParseCache()
+            cache2.usage = UsageContext.open(store_path)
+            store = HistoryStore(store_path)
             r2 = build_snapshot_full(cache2, history_store=store)
 
         # Quantitative payload sections must match across the deletion.
         for k in ("topbar_summary", "tiles", "models", "recent_activity"):
             assert r1.payload[k] == r2.payload[k], f"divergence in {k}"
         # Sessions are preserved across deletion.
-        assert {s.session_id for s in r1.sessions} == {s.session_id for s in r2.sessions}
+        assert first_sessions == {i.session_id for i in cache2.usage.index.all()} == {"sid-A", "sid-B"}
     finally:
         store.close()
 

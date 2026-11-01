@@ -47,7 +47,7 @@ async def test_read_only_server_leaves_the_request_file_alone(tmp_path, monkeypa
     seed_history_store(db, days_ago=200, turns=5)
 
     app = create_app(ServerConfig(persist=False), prefs_path=tmp_path / "prefs.json")
-    assert app.state.warm_store is not None
+    assert app.state.usage.engine.session_turns("warm-sess"), "the existing store must still be read"
     assert app.state.flush_queue is None
 
     req = forget_handoff.request_path()

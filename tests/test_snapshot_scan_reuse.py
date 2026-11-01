@@ -15,7 +15,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from tokenol.serve import state as state_mod
-from tokenol.serve.state import ParseCache, build_snapshot_full, compute_active_keys
+from tokenol.serve.state import (
+    ParseCache,
+    build_snapshot_full,
+    compute_active_keys,
+    legacy_turn_view,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -53,9 +58,11 @@ def test_result_is_identical_with_and_without_precomputed_keys(tmp_path, monkeyp
     monkeypatch.setattr(state_mod, "get_config_dirs", lambda all_projects=False: [root])
 
     keys = compute_active_keys(all_projects=False)
-    with_keys = build_snapshot_full(ParseCache(), all_projects=False, active_keys=keys)
-    without = build_snapshot_full(ParseCache(), all_projects=False)
+    with_keys_cache, without_cache = ParseCache(), ParseCache()
+    build_snapshot_full(with_keys_cache, all_projects=False, active_keys=keys)
+    build_snapshot_full(without_cache, all_projects=False)
 
+    with_keys, without = legacy_turn_view(with_keys_cache.usage), legacy_turn_view(without_cache.usage)
     assert len(with_keys.turns) == len(without.turns)
     assert [t.dedup_key for t in with_keys.turns] == [t.dedup_key for t in without.turns]
     assert {s.session_id for s in with_keys.sessions} == {s.session_id for s in without.sessions}
@@ -67,7 +74,8 @@ def test_new_file_is_still_picked_up_on_the_next_tick(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(state_mod, "get_config_dirs", lambda all_projects=False: [root])
 
     cache = ParseCache()
-    first = build_snapshot_full(cache, all_projects=False, active_keys=compute_active_keys(all_projects=False))
+    build_snapshot_full(cache, all_projects=False, active_keys=compute_active_keys(all_projects=False))
+    first = legacy_turn_view(cache.usage)
 
     # Distinct ids: a byte copy would dedup against the first file and prove nothing.
     second_text = (
@@ -79,6 +87,7 @@ def test_new_file_is_still_picked_up_on_the_next_tick(tmp_path, monkeypatch) -> 
         .replace("sess-001", "sess-002")
     )
     (root / "projects" / "sess-002.jsonl").write_text(second_text)
-    second = build_snapshot_full(cache, all_projects=False, active_keys=compute_active_keys(all_projects=False))
+    build_snapshot_full(cache, all_projects=False, active_keys=compute_active_keys(all_projects=False))
+    second = legacy_turn_view(cache.usage)
 
     assert len(second.turns) > len(first.turns), "a newly added file was not picked up"

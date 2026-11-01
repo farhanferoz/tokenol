@@ -144,8 +144,7 @@ async def test_serve_without_persist_still_surfaces_the_warm_tier(tmp_path: Path
 
     app = create_app(ServerConfig(persist=False), prefs_path=tmp_path / "prefs.json")
     assert app.state.history_store is None, "no flusher may be constructed without --persist"
-    assert app.state.warm_store is not None, "an existing store must still be read"
-    assert app.state.warm_store.read_only is True
+    assert app.state.usage.engine.session_infos(), "an existing store must still be read"
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         merged = (await client.get("/api/breakdown/summary?range=all")).json()

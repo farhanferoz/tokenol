@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from tokenol.persistence.flusher import FlushQueue
     from tokenol.persistence.store import HistoryStore
 
+from tokenol.engine.context import UsageContext
 from tokenol.persistence.marks import clear_marks
 from tokenol.serve.state import (
     ParseCache,
@@ -54,6 +55,13 @@ def _effective_tick(tick: int, idle_seconds: float) -> int:
     if idle_seconds >= IDLE_THRESHOLD:
         return max(tick * 3, IDLE_TICK_FLOOR)
     return tick
+
+
+def _forget_from_engine(usage: UsageContext, forget_args: dict) -> None:
+    """Drop the same history from the engine, then bring the session index and rollups in line."""
+    usage.engine.forget(**forget_args)
+    usage.index.replace_all(usage.engine.session_infos())
+    usage.rollups.clear()
 
 
 class _Subscriber:
@@ -194,15 +202,13 @@ class SnapshotBroadcaster:
         self._history_store = history_store
         self._flush_queue = flush_queue
         # Called on the event loop after a forget request has been applied to
-        # the store and the hot tier, so app-level caches built from the store
+        # the store and the engine, so app-level caches built from the store
         # (the hydrated warm tier, the merged snapshot) are dropped in the same
         # tick. Without it a forget left deleted turns being served from the
         # warm cache until it happened to be rebuilt.
         self._on_forget = on_forget
         self._groups: dict[str, _Group] = {}
         self._lock = asyncio.Lock()
-        # turns/sessions are period-agnostic, so any producer's freshest result serves all readers.
-        self._latest_result: SnapshotResult | None = None
 
     def _compute_active_keys(self) -> frozenset[tuple[str, int, int]]:
         return compute_active_keys(self._all_projects)
@@ -219,14 +225,10 @@ class SnapshotBroadcaster:
             flush_queue=self._flush_queue,
             active_keys=active_keys,
         )
-        self._latest_result = result
         return result.payload
 
-    def latest_result(self) -> SnapshotResult | None:
-        return self._latest_result
-
     async def process_pending_forget(self) -> None:
-        """Consume any pending forget request and apply it to the store + hot tier.
+        """Consume any pending forget request and apply it to the store + engine.
 
         Called once per broadcaster tick. Cheap when no request is pending — just
         a single os.stat() inside take_forget_request().
@@ -247,55 +249,36 @@ class SnapshotBroadcaster:
 
         loop = asyncio.get_running_loop()
         try:
-            evicted_sids: list[str] = []
             cache = self._parse_cache
             store = self._history_store
+            # The engine keyword is the store's: both match sessions by the same stored columns.
             if req.kind == "session" and req.value:
-                evicted_sids = [req.value]
-                await loop.run_in_executor(None, lambda: store.forget(session_ids=[req.value]))
+                forget_args: dict = {"session_ids": [req.value]}
             elif req.kind == "project" and req.value:
-                if hasattr(cache, "_hot_sessions_by_id"):
-                    evicted_sids = [sid for sid, s in cache._hot_sessions_by_id.items() if s.cwd == req.value]
-                await loop.run_in_executor(None, lambda: store.forget(cwd=req.value))
+                forget_args = {"cwd": req.value}
             elif req.kind == "older_than" and req.value:
                 from datetime import datetime, timezone
 
                 cutoff = datetime.fromisoformat(req.value)
                 if cutoff.tzinfo is None:
                     cutoff = cutoff.replace(tzinfo=timezone.utc)
-                await loop.run_in_executor(None, lambda: store.forget(older_than=cutoff))
-                if hasattr(cache, "_hot_turns"):
-                    cache._hot_turns = [t for t in cache._hot_turns if t.timestamp >= cutoff]
-                    cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
-                    # Evict sessions whose every turn was pruned — otherwise they linger as
-                    # phantoms in the hot-tier maps and inflate session counts.
-                    surviving_sids = {t.session_id for t in cache._hot_turns}
-                    if hasattr(cache, "_hot_sessions_by_id"):
-                        cache._hot_sessions_by_id = {sid: s for sid, s in cache._hot_sessions_by_id.items() if sid in surviving_sids}
-                    if hasattr(cache, "_last_ts_by_session"):
-                        cache._last_ts_by_session = {sid: ts for sid, ts in cache._last_ts_by_session.items() if sid in surviving_sids}
+                forget_args = {"older_than": cutoff}
             elif req.kind == "all":
-                await loop.run_in_executor(None, lambda: store.forget(all=True))
-                if hasattr(cache, "_hot_turns"):
-                    cache._hot_turns = []
-                    cache._hot_sessions_by_id = {}
-                    cache._known_dedup_keys = set()
+                forget_args = {"all": True}
+            else:
+                forget_args = {}
+
+            if forget_args:
+                await loop.run_in_executor(None, lambda: store.forget(**forget_args))
+                if cache.usage is not None:
+                    await loop.run_in_executor(None, _forget_from_engine, cache.usage, forget_args)
+                if req.kind == "all":
                     cache._known_passthrough_locs = set()
-                    cache._last_ts_by_session = {}
                     # The store is empty now, so every file must be read again
                     # on the next start. A surviving mark would skip it forever.
                     cache._last_mtime_ns_by_path = {}
                     cache._marks_dirty = False
                     clear_marks()
-
-            # For session/project deletes, evict matching session_ids from the hot tier.
-            if evicted_sids and hasattr(cache, "_hot_sessions_by_id"):
-                evict_set = set(evicted_sids)
-                for sid in evicted_sids:
-                    cache._hot_sessions_by_id.pop(sid, None)
-                    cache._last_ts_by_session.pop(sid, None)
-                cache._hot_turns = [t for t in cache._hot_turns if t.session_id not in evict_set]
-                cache._known_dedup_keys = {t.dedup_key for t in cache._hot_turns}
 
             if self._on_forget is not None:
                 self._on_forget()

@@ -9,6 +9,7 @@ import pytest
 
 import tokenol.serve.state as _state_mod
 from tokenol.serve.app import ServerConfig, create_app
+from tokenol.serve.state import legacy_turn_view
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -1038,8 +1039,7 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     assert isinstance(p["output_cost"], (int, float)) and p["output_cost"] >= 0
 
     # Oracle cross-check: per-project token sums match raw snapshot totals.
-    snap = app.state.snapshot_result
-    assert snap is not None, "snapshot should be cached after the endpoint call"
+    snap = legacy_turn_view(app.state.usage)
     expected_input = sum(t.usage.input_tokens for s in snap.sessions for t in s.turns if not t.is_interrupted)
     expected_output = sum(t.usage.output_tokens for s in snap.sessions for t in s.turns if not t.is_interrupted)
     assert sum(p["input"] for p in data["projects"]) == expected_input
@@ -1103,8 +1103,7 @@ async def test_breakdown_by_model_returns_model_array(tmp_path: Path) -> None:
         assert billable == sorted(billable, reverse=True)
 
         # Oracle cross-check: sums of per-model input/output match raw totals.
-        snap = app.state.snapshot_result
-        assert snap is not None
+        snap = legacy_turn_view(app.state.usage)
         expected_input = sum(t.usage.input_tokens for t in snap.turns if not t.is_interrupted)
         expected_output = sum(t.usage.output_tokens for t in snap.turns if not t.is_interrupted)
         assert sum(mm["input"] for mm in data["models"]) == expected_input
@@ -1336,12 +1335,13 @@ def test_daily_range_all_uses_warm_tier(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     from fastapi.testclient import TestClient
 
+    from tokenol.persistence.store import HistoryStore
     from tokenol.serve.app import ServerConfig, create_app
 
-    app = create_app(ServerConfig(persist=True))
-    store = app.state.history_store
-    # Insert one turn well outside any reasonable hot window.
+    # Insert one turn well outside any reasonable hot window. The engine reads the store
+    # file at start-up, so the file is seeded (and released) before create_app opens it.
     old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = HistoryStore(tmp_path / "h.duckdb")
     store.flush(
         [
             Turn(
@@ -1362,7 +1362,9 @@ def test_daily_range_all_uses_warm_tier(tmp_path, monkeypatch) -> None:
         ],
         [Session(session_id="s1", source_file="", is_sidechain=False, cwd="/proj/old")],
     )
+    store.close()
 
+    app = create_app(ServerConfig(persist=True))
     with TestClient(app) as client:
         resp = client.get("/api/daily?range=all")
     assert resp.status_code == 200

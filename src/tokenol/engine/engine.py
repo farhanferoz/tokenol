@@ -472,6 +472,15 @@ class UsageEngine:
                 [list(mapping), list(mapping.values())],
             )
 
+    def session_infos(self) -> list[SessionInfo]:
+        """Every session row the engine holds, as the metadata the session index keeps."""
+        with self.cursor() as cur:
+            rows = cur.execute(
+                f"SELECT session_id, coalesce(source_file, ''), cwd, is_sidechain FROM {SESSIONS_TABLE} "
+                "ORDER BY session_ix"
+            ).fetchall()
+        return [SessionInfo(sid, source, cwd, bool(sidechain)) for sid, source, cwd, sidechain in rows]
+
     def session_first_times(self) -> dict[str, datetime]:
         """Each session's first turn time (UTC), the order ``SessionIndex.all`` lists them in."""
         with self.cursor() as cur:

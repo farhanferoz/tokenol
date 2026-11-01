@@ -1,44 +1,16 @@
 """Default-mode (`persist=False`) regression tests for tokenol serve.
 
-These tests guarantee that `tokenol serve` without `--persist` reproduces
-v0.3.2 behavior: no `import duckdb`, no `~/.tokenol/` directory created,
-`app.state.history_store is None`, no flusher task. Spec:
-docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md.
+These tests guarantee that `tokenol serve` without `--persist` stays read-only:
+no `~/.tokenol/` directory created, `app.state.history_store is None`, no flusher
+task. (It no longer avoids `import duckdb`: the usage engine runs on it in every
+mode.) Spec: docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md.
 """
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-
-
-def test_default_create_app_does_not_import_duckdb(tmp_path):
-    """A subprocess that constructs the default app must not load duckdb.
-
-    Subprocess isolation is required because the parent test process likely
-    has duckdb in sys.modules already from earlier persistence tests.
-    """
-    snippet = (
-        "import os, sys, pathlib;"
-        f"os.environ['HOME']={str(tmp_path)!r};"
-        "from tokenol.serve.app import create_app, ServerConfig;"
-        "app = create_app(ServerConfig());"
-        "assert app.state.history_store is None, 'history_store leaked';"
-        "assert app.state.flush_queue is None, 'flush_queue leaked';"
-        "assert 'duckdb' not in sys.modules, 'duckdb was imported';"
-        "print('OK')"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", snippet],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, f"subprocess failed: stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    assert "OK" in proc.stdout
 
 
 def test_default_app_state_has_no_store(tmp_path, monkeypatch):

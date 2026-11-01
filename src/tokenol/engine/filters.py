@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 
+from tokenol.engine.ingest import naive_utc
+
 # Aliases every query in ``queries.py`` uses for these tables; the WHERE text depends on them.
 TURNS_ALIAS = "t"
 SESSIONS_ALIAS = "s"
@@ -44,10 +46,13 @@ class SearchField(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class TurnFilter:
-    """Which turns a query covers. Dates are inclusive UTC days."""
+    """Which turns a query covers. Dates are inclusive UTC days; ``since_ts`` is an instant."""
 
     since: date | None = None
     until: date | None = None
+    # Inclusive lower bound at full precision, ANDed with ``since``: the recent-activity
+    # window and the tiles' last hour are minutes, which a date bound cannot express.
+    since_ts: datetime | None = None
     projects: tuple[str, ...] = ()
     models: tuple[str, ...] = ()
     session_id: str | None = None
@@ -65,6 +70,9 @@ class TurnFilter:
         if self.since is not None:
             clauses.append(f"{t}.ts >= ?")
             params.append(datetime.combine(self.since, time.min))
+        if self.since_ts is not None:
+            clauses.append(f"{t}.ts >= ?")
+            params.append(naive_utc(self.since_ts))
         if self.until is not None:
             clauses.append(f"{t}.ts < ?")
             params.append(datetime.combine(self.until + timedelta(days=1), time.min))

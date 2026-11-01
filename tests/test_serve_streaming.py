@@ -353,13 +353,14 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
     """A live serve consumes pending forget requests within one tick.
 
     The broadcaster polls take_forget_request() each tick. When a request is
-    present, it applies the deletion to the store AND evicts the affected
-    session_ids from the in-memory hot tier so the next snapshot reflects it
-    without requiring a process restart.
+    present, it applies the deletion to the store AND drops the session from the
+    usage engine, the session index and the rollup cache, so the next snapshot
+    reflects it without requiring a process restart.
     """
     from collections import Counter
     from datetime import datetime, timezone
 
+    from tokenol.engine import UsageContext
     from tokenol.enums import AssumptionTag
     from tokenol.model.events import Session, Turn, Usage
     from tokenol.persistence.flusher import FlushQueue
@@ -368,7 +369,8 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
     from tokenol.serve.state import ParseCache
 
     monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
-    store = HistoryStore(tmp_path / "h.duckdb")
+    store_path = tmp_path / "h.duckdb"
+    store = HistoryStore(store_path)
     try:
         pre_existing_turn = Turn(
             dedup_key="k1",
@@ -394,15 +396,12 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
         )
         store.flush([pre_existing_turn], [pre_existing_session])
 
-        # Prime the parse cache's hot tier as if the broadcaster had hydrated it.
+        # Start-up order: the engine reads the store file, then the writer reopens it.
+        store.close()
         parse_cache = ParseCache()
-        parse_cache._hot_initialized = True
-        parse_cache._hot_turns = [pre_existing_turn]
-        parse_cache._hot_sessions_by_id = {"sess-X": pre_existing_session}
-        parse_cache._known_dedup_keys = {"k1"}
-        parse_cache._known_passthrough_locs = set()
-        parse_cache._last_ts_by_session = {"sess-X": pre_existing_turn.timestamp}
-        parse_cache._fired = Counter()
+        parse_cache.usage = usage = UsageContext.open(store_path)
+        store = HistoryStore(store_path)
+        assert usage.rollups.rollup("sess-X").turns == 1  # cached, so a forget has to invalidate it
 
         flush_queue = FlushQueue(store, count_threshold=1000, interval_seconds=60)
         await flush_queue.start()
@@ -430,10 +429,10 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
             # Store row gone.
             rows = store._con.execute("SELECT COUNT(*) FROM sessions WHERE session_id = 'sess-X'").fetchone()
             assert rows == (0,)
-            # In-memory hot tier evicted.
-            assert "sess-X" not in parse_cache._hot_sessions_by_id
-            # Hot turns list also pruned.
-            assert all(t.session_id != "sess-X" for t in parse_cache._hot_turns)
+            # Engine, session index and rollup cache all let go of it.
+            assert usage.engine.session_turns("sess-X") == []
+            assert usage.index.get("sess-X") is None
+            assert usage.rollups.rollup("sess-X").turns == 0
         finally:
             await flush_queue.stop()
     finally:
@@ -442,12 +441,13 @@ async def test_broadcaster_applies_pending_forget(tmp_path, monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypatch) -> None:
-    """forget(older_than) must evict from _hot_sessions_by_id and _last_ts_by_session,
-    not just _hot_turns. Otherwise sessions whose every turn was pruned linger
-    as phantoms in the hot-tier maps."""
+    """forget(older_than) must drop sessions whose every turn was pruned from the
+    session index, not just their turns from the engine. Otherwise they linger as
+    phantoms in the index and inflate session counts."""
     from collections import Counter
     from datetime import datetime, timezone
 
+    from tokenol.engine import UsageContext
     from tokenol.enums import AssumptionTag
     from tokenol.model.events import Session, Turn, Usage
     from tokenol.persistence.flusher import FlushQueue
@@ -455,7 +455,8 @@ async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypa
     from tokenol.persistence.store import HistoryStore
 
     monkeypatch.setenv("TOKENOL_HISTORY_DIR", str(tmp_path))
-    store = HistoryStore(tmp_path / "h.duckdb")
+    store_path = tmp_path / "h.duckdb"
+    store = HistoryStore(store_path)
     try:
         old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
         recent_ts = datetime(2026, 5, 1, tzinfo=timezone.utc)
@@ -485,14 +486,10 @@ async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypa
             [_s("s_old"), _s("s_recent")],
         )
 
+        store.close()
         cache = ParseCache()
-        cache._hot_initialized = True
-        cache._hot_turns = [_t("old1", "s_old", old_ts), _t("recent1", "s_recent", recent_ts)]
-        cache._hot_sessions_by_id = {"s_old": _s("s_old"), "s_recent": _s("s_recent")}
-        cache._known_dedup_keys = {"old1", "recent1"}
-        cache._known_passthrough_locs = set()
-        cache._last_ts_by_session = {"s_old": old_ts, "s_recent": recent_ts}
-        cache._fired = Counter()
+        cache.usage = usage = UsageContext.open(store_path)
+        store = HistoryStore(store_path)
 
         flush_queue = FlushQueue(store, count_threshold=1000, interval_seconds=60)
         await flush_queue.start()
@@ -517,12 +514,12 @@ async def test_broadcaster_older_than_evicts_phantom_sessions(tmp_path, monkeypa
 
             await broadcaster.process_pending_forget()
 
-            # s_old must be evicted from BOTH the hot turns AND the hot-tier maps.
-            assert "s_old" not in cache._hot_sessions_by_id
-            assert "s_old" not in cache._last_ts_by_session
+            # s_old must be gone from BOTH the engine's turns AND the session index.
+            assert usage.engine.session_turns("s_old") == []
+            assert usage.index.get("s_old") is None
             # s_recent must be retained.
-            assert "s_recent" in cache._hot_sessions_by_id
-            assert "s_recent" in cache._last_ts_by_session
+            assert [t.dedup_key for t in usage.engine.session_turns("s_recent")] == ["recent1"]
+            assert usage.index.get("s_recent") is not None
         finally:
             await flush_queue.stop()
     finally:

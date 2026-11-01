@@ -1,12 +1,13 @@
 """Server-side parse cache and snapshot builder.
 
-Two derivation paths live here. A server with a history store takes
-_store_backed_derivation: it hydrates the hot tier from the store once, then
-each tick parses only the files whose mtime moved and appends the new turns.
-It does NOT populate ParseCache._store, because it reads each file's events
-exactly once. The fallback path, taken only when there is no store (the CLI
-report commands), re-derives everything from cached events and is the sole
-user of _store and of the derived memo.
+Each tick parses only the JSONL files whose mtime moved, derives the turns the
+usage engine does not hold yet (_ingest_tick), hands them to the engine in one
+batch, and keeps no reference to them. Every snapshot section is then answered
+by the engine's queries (build_snapshot_full).
+
+The old no-store fallback (get_or_parse / get_derived / _build_turns_and_sessions,
+which re-derives everything from cached events) is no longer called by the
+snapshot; Task 8 deletes it.
 
 Thread-safety invariant: ParseCache._store is mutated only under _lock.
 All code paths that call get_or_parse / purge acquire the lock first.
@@ -21,14 +22,24 @@ import logging
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tokenol.engine.context import UsageContext
+from tokenol.engine.filters import (
+    UNKNOWN_LABEL,
+    GroupKey,
+    InterruptedPolicy,
+    SearchField,
+    TurnFilter,
+)
+from tokenol.engine.queries import BucketTotals, LatestTurn, Totals, UsageQueries
 from tokenol.engine.sessions import (  # noqa: F401  (_GROUPED_CWD_CACHE, is_container_cwd: re-exported for callers and tests; Task 6 removes the alias)
     _GROUPED_CWD_CACHE,
+    SessionInfo,
     is_container_cwd,
 )
 from tokenol.engine.sessions import (
@@ -56,10 +67,17 @@ from tokenol.metrics.context import (
     cost_per_kw,
     ctx_ratio_n_to_1,
 )
-from tokenol.metrics.cost import TurnCost, cost_for_turn, rollup_by_date, rollup_by_hour
+from tokenol.metrics.cost import (
+    DailyRollup,
+    TurnCost,
+    cost_for_turn,
+    rollup_by_date,
+    rollup_by_hour,
+)
 from tokenol.metrics.cost import price_status as model_price_status
 from tokenol.metrics.history import baseline_median, trailing_median
 from tokenol.metrics.rollups import (
+    ModelRollup,
     SessionRollup,
     _rank_dict_with_others,
     build_model_rollups,
@@ -78,7 +96,7 @@ log = logging.getLogger(__name__)
 # Minimum seconds between two writes of the parse-marks sidecar. Bounds the new
 # disk traffic to one small file per minute while transcripts are changing, and
 # none at all when they are not. A save additionally requires the flusher to
-# report every enqueued turn written; see _store_backed_derivation.
+# report every enqueued turn written; see _ingest_tick.
 _MARKS_SAVE_INTERVAL_SECONDS = 60.0
 
 
@@ -93,19 +111,22 @@ class ParseCache:
     can skip the O(total events) re-derivation. The memo is invalidated automatically
     on any get_or_parse miss or any purge that drops a key.
 
-    Scope note: `_store` and the derived memo back the NO-STORE fallback path
-    only. A server with a history store parses edge files directly and retains
-    none of their events, so on that path this instance carries just the
-    hot-tier bookkeeping layered on top as duck-typed attributes
-    (`_hot_turns`, `_hot_cutoff`, `_last_mtime_ns_by_path`, ...), and `size`
-    stays 0. Retaining events there cost roughly 2.1 GB on a real corpus for a
-    reader that did not exist.
+    Scope note: `_store` and the derived memo back the old NO-STORE fallback
+    path only, which the snapshot no longer takes (Task 8 deletes it). The tick
+    (`_ingest_tick`) parses edge files directly and retains none of their
+    events; this instance carries just its bookkeeping as duck-typed attributes
+    (`_tick_initialized`, `_known_passthrough_locs`, `_last_mtime_ns_by_path`,
+    ...), and `size` stays 0. Retaining events there cost roughly 2.1 GB on a
+    real corpus for a reader that did not exist.
     """
 
     _store: dict[tuple[str, int, int], list[RawEvent]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _derived_keys: frozenset[tuple[str, int, int]] | None = None
     _derived: tuple[list[Turn], list[Session], Counter[AssumptionTag]] | None = None
+    # The usage engine and its companions. create_app sets it from the store before any
+    # HistoryStore opens; build_snapshot_full opens an empty one when it is still None.
+    usage: UsageContext | None = None
 
     def get_or_parse(self, path: Path) -> tuple[tuple[str, int, int], list[RawEvent]]:
         """Return (cache_key, events). Parses only when (size, mtime_ns) changes."""
@@ -273,12 +294,15 @@ def _build_turns_and_sessions(
 
 def derive_delta_turns(
     new_events: list[RawEvent],
-    existing_dedup_keys: set[str],
+    known_keys: Callable[[Iterable[str]], set[str]],
     existing_passthrough_locations: set[tuple[str, int]],
 ) -> tuple[list[Turn], list[Session], Counter[AssumptionTag], set[tuple[str, int]]]:
     """Build new Turn/Session deltas from events not already represented in memory.
 
-    *existing_dedup_keys* is the set of dedup keys already in the in-memory hot tier.
+    *known_keys* answers which of the given dedup keys the usage engine already holds
+    (``engine.known_keys``; a caller holding a set passes ``known.intersection``). It
+    is called once, with every candidate key of the batch, so the engine is asked in
+    one statement however many events there are.
     *existing_passthrough_locations* is the set of (source_file, line_number) tuples
     for passthrough turns already emitted (passthroughs lack dedup keys).
 
@@ -289,9 +313,7 @@ def derive_delta_turns(
       passthroughs that were actually emitted (excluding synthetic models and already-known).
     Within-batch dedup follows the existing last-wins rule.
     """
-    seen: dict[str, tuple[RawEvent, str]] = {}
-    passthroughs: list[tuple[RawEvent, None]] = []
-    accepted_passthrough_locs: set[tuple[str, int]] = set()
+    candidates: list[tuple[RawEvent, str | None]] = []
     cwd_by_session: dict[str, str] = {}
     session_source: dict[str, str] = {}
     fired: Counter[AssumptionTag] = Counter()
@@ -307,7 +329,13 @@ def derive_delta_turns(
             continue
         if not registry.is_claude(ev.model):
             continue
-        k = dedup_key(ev)
+        candidates.append((ev, dedup_key(ev)))
+
+    known = known_keys([k for _ev, k in candidates if k is not None])
+    seen: dict[str, tuple[RawEvent, str]] = {}
+    passthroughs: list[tuple[RawEvent, None]] = []
+    accepted_passthrough_locs: set[tuple[str, int]] = set()
+    for ev, k in candidates:
         if k is None:
             loc = (ev.source_file, ev.line_number)
             if loc in existing_passthrough_locations:
@@ -315,7 +343,7 @@ def derive_delta_turns(
             passthroughs.append((ev, None))
             accepted_passthrough_locs.add(loc)
         else:
-            if k in existing_dedup_keys:
+            if k in known:
                 continue
             seen[k] = (ev, k)
 
@@ -384,8 +412,40 @@ def derive_delta_turns(
 @dataclass
 class SnapshotResult:
     payload: dict
-    turns: list[Turn]
-    sessions: list[Session]
+
+
+@dataclass(frozen=True)
+class LegacyTurnView:
+    """Every turn and session as Python objects, for the endpoints not yet migrated.
+
+    TRANSITIONAL: deleted by Task 7, when the last reader of ``.turns`` / ``.sessions``
+    moves to the engine's queries.
+    """
+
+    turns: list[Turn]  # time order
+    sessions: list[Session]  # SessionIndex.all() order, each holding its own turns
+
+
+def legacy_turn_view(usage: UsageContext) -> LegacyTurnView:
+    """Materialise every session's turns from the engine in one batched read.
+
+    TRANSITIONAL: deleted by Task 7.
+    """
+    infos = usage.index.all()
+    turns_by_sid = usage.engine.session_turns_many(info.session_id for info in infos)
+    sessions = [
+        Session(
+            session_id=info.session_id,
+            source_file=info.source_file,
+            is_sidechain=info.is_sidechain,
+            cwd=info.cwd,
+            turns=turns_by_sid.get(info.session_id, []),
+            archived=usage.index.archived(info.session_id),
+        )
+        for info in infos
+    ]
+    turns = sorted((t for s in sessions for t in s.turns), key=lambda t: t.timestamp)
+    return LegacyTurnView(turns=turns, sessions=sessions)
 
 
 def encode_cwd(cwd: str) -> str:
@@ -508,9 +568,9 @@ def _series_for_key(series: list[dict], key: str) -> list[dict]:
     return [{"date": r["date"], key: r[key]} for r in series if r.get(key) is not None]
 
 
-def _build_daily_series(turns: list[Turn], since: date) -> list[dict]:
+def _build_daily_series(rollups: list[DailyRollup]) -> list[dict]:
     result = []
-    for r in rollup_by_date(turns, since=since):
+    for r in rollups:
         result.append(
             {
                 "date": str(r.date),
@@ -536,74 +596,67 @@ def _moving_avg_7d(series: list[dict], key: str) -> list[dict]:
     return result
 
 
-def _build_topbar(today_turns: list[Turn]) -> dict:
-    model_costs: defaultdict[str, float] = defaultdict(float)
-    session_ids: set[str] = set()
-    today_cost = 0.0
-    billable_out = billable_inp = 0
-    last_active: datetime | None = None
-    for t in today_turns:
-        today_cost += t.cost_usd
-        session_ids.add(t.session_id)
-        if t.model:
-            model_costs[t.model] += t.cost_usd
-        if not t.is_interrupted:
-            billable_out += t.usage.output_tokens
-            billable_inp += t.usage.input_tokens
-        if last_active is None or t.timestamp > last_active:
-            last_active = t.timestamp
+def _excluding_interrupted(f: TurnFilter) -> TurnFilter:
+    """*f* without interrupted turns: the policy of every token and cost sum the tiles and topbar show."""
+    return replace(f, interrupted=InterruptedPolicy.EXCLUDE)
+
+
+def _model_mix(by_model: dict[str, BucketTotals]) -> dict[str, float]:
+    """Each model's share of cost, short-named and largest first; the unknown group is left out."""
+    model_costs = {m: b.total_cost for m, b in by_model.items() if m != UNKNOWN_LABEL}
     total_mc = sum(model_costs.values()) or 1.0
-    model_mix = {_short_model(m): c / total_mc for m, c in sorted(model_costs.items(), key=lambda x: -x[1])}
+    # Ties by name: the SQL group order is arbitrary, and the mix must not depend on it.
+    return {_short_model(m): c / total_mc for m, c in sorted(model_costs.items(), key=lambda x: (-x[1], x[0]))}
+
+
+def _build_topbar(queries: UsageQueries, today: date) -> dict:
+    day = TurnFilter(since=today, until=today)
+    everything = queries.totals(day)
+    billable = queries.totals(_excluding_interrupted(day))
+    by_model = queries.bucket(day, GroupKey.MODEL)
+    # The newest turn of ANY group counts, the unknown-model group included.
+    last_active = max((b.last_ts for b in by_model.values() if b.last_ts is not None), default=None)
     return {
-        "today_cost": today_cost,
-        "sessions_count": len(session_ids),
-        "output_tokens": billable_out,
-        "input_tokens": billable_inp,
-        "model_mix": model_mix,
+        "today_cost": everything.cost_usd,
+        "sessions_count": everything.sessions,
+        "output_tokens": billable.output_tokens,
+        "input_tokens": billable.input_tokens,
+        "model_mix": _model_mix(by_model),
         "last_active": last_active.isoformat() if last_active else None,
     }
 
 
-def _tile_metrics(turns: list[Turn]) -> dict[str, float | None]:
-    """Compute the 4 headline metrics over a slice of turns."""
-    cr = cc = inp = out = 0
-    cost = 0.0
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        u = t.usage
-        cr += u.cache_read_input_tokens
-        cc += u.cache_creation_input_tokens
-        inp += u.input_tokens
-        out += u.output_tokens
-        cost += t.cost_usd
+def _tile_metrics(totals: Totals) -> dict[str, float | None]:
+    """Compute the 4 headline metrics over the totals of a slice of turns (interrupted ones excluded)."""
+    cr, cc = totals.cache_read_tokens, totals.cache_creation_tokens
     return {
-        "hit_pct": cache_hit_pct(cr, cc, inp),
-        "cost_per_kw": cost_per_kw(cost, out),
-        "ctx_ratio": ctx_ratio_n_to_1(cr, out),
+        "hit_pct": cache_hit_pct(cr, cc, totals.input_tokens),
+        "cost_per_kw": cost_per_kw(totals.cost_usd, totals.output_tokens),
+        "ctx_ratio": ctx_ratio_n_to_1(cr, totals.output_tokens),
         "cache_reuse": cache_reuse_n_to_1(cr, cc),
     }
 
 
 def _build_tiles(
-    period_turns: list[Turn],
+    queries: UsageQueries,
+    period_filter: TurnFilter,
     daily_90d: list[dict],
     today_date: date,
     thresholds: dict,
     now: datetime,
 ) -> dict:
-    m = _tile_metrics(period_turns)
+    m = _tile_metrics(queries.totals(_excluding_interrupted(period_filter)))
     hit_val, cpk_val, ctx_val, reuse_val = m["hit_pct"], m["cost_per_kw"], m["ctx_ratio"], m["cache_reuse"]
 
     # Last-hour slice: shows whether the period aggregate still reflects current
     # behaviour or is dominated by an early-period spike (e.g. cache thrashing
     # at 8am pulls the today-total cache_reuse down and keeps it low even after
     # recovery, because subsequent turns have tiny absolute cache_creation).
-    last_hour_cutoff = now - timedelta(hours=1)
-    last_hour_turns = [t for t in period_turns if t.timestamp >= last_hour_cutoff]
+    # Shown whenever the hour holds any turn, interrupted ones included.
+    last_hour = replace(period_filter, since_ts=now - timedelta(hours=1))
     lh = (
-        _tile_metrics(last_hour_turns)
-        if last_hour_turns
+        _tile_metrics(queries.totals(_excluding_interrupted(last_hour)))
+        if queries.totals(last_hour).turns > 0
         else {
             "hit_pct": None,
             "cost_per_kw": None,
@@ -709,42 +762,60 @@ def _disambiguate_cwd_labels(cwds: set[str] | list[str]) -> dict[str, str]:
     return labels
 
 
+def _format_active_entities(cwds: Iterable[str], models: Iterable[str]) -> dict[str, list[dict]]:
+    """Distinct cwds and models formatted for a UI dropdown.
+
+    Results are sorted alphabetically by display label so the dropdown is stable and
+    scannable. Labels are disambiguated when multiple cwds share a basename. When two
+    full model ids share a short name, the first one in *models* is the value.
+    """
+    cwd_set = set(cwds)
+    models_by_short: dict[str, str] = {}
+    for model in models:
+        models_by_short.setdefault(_short_model(model), model)
+    cwd_labels = _disambiguate_cwd_labels(cwd_set)
+    projects = sorted(
+        ({"label": cwd_labels[c], "value": c} for c in cwd_set),
+        key=lambda p: (p["label"].lower(), p["value"]),
+    )
+    models_out = sorted(
+        ({"label": s, "value": m} for s, m in models_by_short.items()),
+        key=lambda p: p["label"].lower(),
+    )
+    return {"active_projects": projects, "active_models": models_out}
+
+
 def _active_entities(turns: list[Turn], cwd_by_sid: dict[str, str]) -> dict[str, list[dict]]:
     """Distinct cwds and models active across *turns*, formatted for a UI dropdown.
 
     Excludes the '(unknown)' cwd (turns whose session isn't indexed) — compare views
-    treat those as noise. Results are sorted alphabetically by display label so the
-    dropdown is stable and scannable. Labels are disambiguated when multiple cwds
-    share a basename.
+    treat those as noise. Used by the hourly and daily panels until Task 6 moves them
+    to ``_engine_active_entities``.
     """
     cwds: set[str] = set()
-    models_by_short: dict[str, str] = {}
+    models: list[str] = []
     for t in turns:
-        cwd = cwd_by_sid.get(t.session_id, "(unknown)")
-        if cwd != "(unknown)":
+        cwd = cwd_by_sid.get(t.session_id, UNKNOWN_LABEL)
+        if cwd != UNKNOWN_LABEL:
             cwds.add(cwd)
         if t.model:
-            models_by_short.setdefault(_short_model(t.model), t.model)
-    cwd_labels = _disambiguate_cwd_labels(cwds)
-    projects = sorted(
-        ({"label": cwd_labels[c], "value": c} for c in cwds),
-        key=lambda p: (p["label"].lower(), p["value"]),
-    )
-    models = sorted(
-        ({"label": s, "value": m} for s, m in models_by_short.items()),
-        key=lambda p: p["label"].lower(),
-    )
-    return {"active_projects": projects, "active_models": models}
+            models.append(t.model)
+    return _format_active_entities(cwds, models)
 
 
-def _build_hourly(
-    today_turns: list[Turn],
-    today_date: date,
-    all_turns: list[Turn],
-    cwd_by_sid: dict[str, str],
-) -> dict:
+def _engine_active_entities(queries: UsageQueries, f: TurnFilter) -> dict[str, list[dict]]:
+    """``_active_entities`` over the engine: the filter's projects (never the unknown one) and models.
+
+    Models come sorted, so a short name shared by two full ids takes the alphabetically first id.
+    """
+    cwds = [project for project in queries.bucket(f, GroupKey.PROJECT) if project != UNKNOWN_LABEL]
+    return _format_active_entities(cwds, queries.distinct_values(SearchField.MODEL, f))
+
+
+def _build_hourly(queries: UsageQueries, today_date: date) -> dict:
+    day = TurnFilter(since=today_date, until=today_date)
     series = []
-    for r in rollup_by_hour(today_turns, target_date=today_date, fill_day=True):
+    for r in queries.hourly(day, target_date=today_date, fill_day=True):
         series.append(
             {
                 "hour": r.hour.isoformat(),
@@ -753,12 +824,12 @@ def _build_hourly(
                 "hit_pct": cache_hit_pct(r.cache_read_tokens, r.cache_creation_tokens, r.input_tokens),
             }
         )
-    earliest = min((t.timestamp.date() for t in all_turns), default=today_date)
+    earliest = queries.earliest_date(TurnFilter()) or today_date
     return {
         "date": str(today_date),
         "earliest_available": str(earliest),
         "series": series,
-        **_active_entities(today_turns, cwd_by_sid),
+        **_engine_active_entities(queries, day),
     }
 
 
@@ -766,8 +837,7 @@ def _build_daily(
     daily_90d: list[dict],
     period: str,
     today_date: date,
-    range_turns: list[Turn],
-    cwd_by_sid: dict[str, str],
+    entities: dict[str, list[dict]],
 ) -> dict:
     since_30d = today_date - timedelta(days=29)
     series = [r for r in daily_90d if date.fromisoformat(r["date"]) >= since_30d]
@@ -777,12 +847,11 @@ def _build_daily(
         "earliest_available": earliest,
         "series": series,
         "moving_avg_7d": _moving_avg_7d(series, "hit_pct"),
-        **_active_entities(range_turns, cwd_by_sid),
+        **entities,
     }
 
 
-def _build_models(period_turns: list[Turn], range_label: str) -> dict:
-    rollups = build_model_rollups(period_turns)
+def _models_payload(rollups: list[ModelRollup], range_label: str) -> dict:
     rows = []
     for mr in rollups:
         cw = context_window(mr.model)
@@ -819,78 +888,36 @@ def _build_models(period_turns: list[Turn], range_label: str) -> dict:
     }
 
 
-def _build_recent_activity(
-    all_turns: list[Turn],
-    cwd_by_sid: dict[str, str],
-    now: datetime,
-    window_minutes: int = 60,
-) -> dict:
-    window_since = now - timedelta(minutes=window_minutes)
-    window_turns = [t for t in all_turns if t.timestamp >= window_since]
+def _build_recent_activity(queries: UsageQueries, now: datetime, window_minutes: int = 60) -> dict:
+    window = TurnFilter(since_ts=now - timedelta(minutes=window_minutes))
+    billable = _excluding_interrupted(window)
 
-    proj_turns: dict[str, list[Turn]] = defaultdict(list)
-    for t in window_turns:
-        proj_turns[cwd_by_sid.get(t.session_id, "(unknown)")].append(t)
+    latest = queries.latest_turn_per_project(window)
+    billable_by_project = queries.bucket(billable, GroupKey.PROJECT)
+    window_totals = queries.totals(window)
+    billable_totals = queries.totals(billable)
 
-    cr_all = cc_all = inp_all = out_all = 0
-    cost_all = 0.0
-    model_costs_all: defaultdict[str, float] = defaultdict(float)
-    for t in window_turns:
-        if not t.is_interrupted:
-            cr_all += t.usage.cache_read_input_tokens
-            cc_all += t.usage.cache_creation_input_tokens
-            inp_all += t.usage.input_tokens
-            out_all += t.usage.output_tokens
-            cost_all += t.cost_usd
-        if t.model:
-            model_costs_all[t.model] += t.cost_usd
-    total_mc = sum(model_costs_all.values()) or 1.0
-    model_mix = {_short_model(m): c / total_mc for m, c in sorted(model_costs_all.items(), key=lambda x: -x[1])}
-
-    proj_stats: dict[str, dict] = {}
-    for cwd, turns in proj_turns.items():
-        cr = cc = inp = out = 0
-        cost = 0.0
-        model_ctr: Counter = Counter()
-        last_turn: Turn | None = None
-        for t in turns:
-            if not t.is_interrupted:
-                cr += t.usage.cache_read_input_tokens
-                cc += t.usage.cache_creation_input_tokens
-                inp += t.usage.input_tokens
-                out += t.usage.output_tokens
-                cost += t.cost_usd
-            if t.model:
-                model_ctr[t.model] += 1
-            if last_turn is None or t.timestamp > last_turn.timestamp:
-                last_turn = t
-        proj_stats[cwd] = {
-            "turns": turns,
-            "cr": cr,
-            "cc": cc,
-            "inp": inp,
-            "out": out,
-            "cost": cost,
-            "model_ctr": model_ctr,
-            "last_turn": last_turn,
-        }
+    def project_cost(turn: LatestTurn) -> float:
+        b = billable_by_project.get(turn.project)  # absent when every turn of the project was interrupted
+        return b.total_cost if b else 0.0
 
     rows = []
-    for cwd, s in sorted(proj_stats.items(), key=lambda x: -x[1]["cost"]):
-        turns = s["turns"]
-        cr, cc, inp, out, cost = s["cr"], s["cc"], s["inp"], s["out"], s["cost"]
-        model_ctr = s["model_ctr"]
-        last_turn = s["last_turn"]
-        cw = context_window(last_turn.model or "")
-        visible = last_turn.usage.input_tokens + last_turn.usage.cache_read_input_tokens + last_turn.usage.cache_creation_input_tokens
+    # Most expensive first; ties by project, so the order does not depend on arrival.
+    for turn in sorted(latest, key=lambda t: (-project_cost(t), t.project)):
+        b = billable_by_project.get(turn.project)
+        cr, cc, inp, out, cost = (
+            (b.cache_read, b.cache_creation, b.input, b.output, b.total_cost) if b else (0, 0, 0, 0, 0.0)
+        )
+        cw = context_window(turn.model or "")
+        visible = turn.pool
         rows.append(
             {
-                "cwd": cwd,
-                "cwd_b64": encode_cwd(cwd),
-                "model_primary": _short_model(model_ctr.most_common(1)[0][0]) if model_ctr else "(unknown)",
-                "last_turn_at": last_turn.timestamp.isoformat(),
-                "latest_session_id": last_turn.session_id,
-                "turns": len(turns),
+                "cwd": turn.project,
+                "cwd_b64": encode_cwd(turn.project),
+                "model_primary": _short_model(turn.primary_model) if turn.primary_model else "(unknown)",
+                "last_turn_at": turn.timestamp.isoformat(),
+                "latest_session_id": turn.session_id,
+                "turns": turn.turns,
                 "output": out,
                 "ctx_used": visible / cw if cw else None,
                 "ctx_used_abs": {"visible": visible, "window": cw} if cw else None,
@@ -905,13 +932,15 @@ def _build_recent_activity(
     return {
         "window": f"{window_minutes}m",
         "aggregate": {
-            "projects": len(proj_turns),
-            "turns": len(window_turns),
-            "output": out_all,
-            "cost": cost_all,
-            "model_mix": model_mix,
-            "hit_pct": cache_hit_pct(cr_all, cc_all, inp_all),
-            "cost_per_kw": cost_per_kw(cost_all, out_all),
+            "projects": len(latest),
+            "turns": window_totals.turns,
+            "output": billable_totals.output_tokens,
+            "cost": billable_totals.cost_usd,
+            "model_mix": _model_mix(queries.bucket(window, GroupKey.MODEL)),
+            "hit_pct": cache_hit_pct(
+                billable_totals.cache_read_tokens, billable_totals.cache_creation_tokens, billable_totals.input_tokens
+            ),
+            "cost_per_kw": cost_per_kw(billable_totals.cost_usd, billable_totals.output_tokens),
         },
         "rows": rows,
     }
@@ -922,47 +951,25 @@ def _build_recent_activity(
 # ---------------------------------------------------------------------------
 
 
-def _store_backed_derivation(
+def _ingest_tick(
     parse_cache: ParseCache,
     paths: list[Path],
-    history_store: HistoryStore,
+    history_store: HistoryStore | None,
     flush_queue: FlushQueue | None,
     mtime_by_path: dict[Path, int] | None = None,
-) -> tuple[list[Turn], list[Session], Counter[AssumptionTag]]:
-    """Hot-tier-aware derivation: hydrate from store on first call, then append deltas.
+) -> Counter[AssumptionTag]:
+    """Parse the files that changed, hand their new turns to the engine, keep no reference to them.
 
-    The hot-tier caches live as duck-typed attributes on the ParseCache instance so
-    they survive across ticks within a single process. They are intentionally NOT
-    declared on ParseCache itself (the dataclass invariants there are about the
-    JSONL parse cache; we layer hot-tier state on top without altering that).
+    Per edge file: parse, derive the turns the engine does not hold. Once per tick: add
+    them to the engine and the session index, drop the rollups of the sessions they
+    touched, queue them for the store under --persist, and record which JSONL files are
+    present. The bookkeeping that survives ticks (marks, passthrough locations, assumption
+    counts) lives as duck-typed attributes on the ParseCache, beside its JSONL parse cache.
     """
-    if not getattr(parse_cache, "_hot_initialized", False):
-        window_days = getattr(history_store, "_hot_window_days", 90)
-        # ONE cutoff, computed here and used for both tiers. The warm tier
-        # hydrates its exact complement (app._warm_tier), so the two must agree
-        # on the boundary to the microsecond: deriving it twice from two `now`
-        # readings leaves a band that neither tier covers, and turns landing
-        # there would disappear from every historical total without a word.
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
-        parse_cache._hot_cutoff = cutoff
-        hot_turns, hot_sessions = history_store.hydrate_since(cutoff)
-        parse_cache._hot_turns = hot_turns
-        parse_cache._hot_sessions_by_id = {s.session_id: s for s in hot_sessions}
-        # Every persisted key, not just the hot window's: a turn the store
-        # already holds must never be rebuilt, whatever its age. The hot keys
-        # are a subset, so this is a superset of what was here before. Without
-        # it a cold start re-derived every row below the cutoff (96,867 on the
-        # live store), appended it to the hot tier, queued it, and had the
-        # database reject it as a key conflict at the last step.
-        # Keys at or after the cutoff are taken from the hot Turns themselves,
-        # sharing their strings rather than holding a second copy of each. The
-        # only stored rows that leaves out are non-Claude ones, and
-        # derive_delta_turns drops non-Claude events before it ever consults
-        # this set.
-        parse_cache._known_dedup_keys = {t.dedup_key for t in hot_turns}
-        parse_cache._known_dedup_keys.update(history_store.dedup_keys(before=cutoff))
+    usage = parse_cache.usage
+    assert usage is not None, "build_snapshot_full opens the usage context before the first tick"
+    if not getattr(parse_cache, "_tick_initialized", False):
         parse_cache._known_passthrough_locs = set()
-        parse_cache._last_ts_by_session = history_store.last_ts_by_session()
         # Marks persist across restarts ONLY under --persist (a flush queue
         # exists). Plain `serve` has no writer, so a skipped file's turns would
         # exist nowhere; there the marks start empty and every file is parsed.
@@ -973,7 +980,7 @@ def _store_backed_derivation(
         # marks there would skip every transcript and serve an empty dashboard
         # for ever, silently. The marks lose. (forget --all clears them on its
         # own path; this covers the store going away behind our back.)
-        if parse_cache._last_mtime_ns_by_path and history_store.is_empty():
+        if parse_cache._last_mtime_ns_by_path and history_store is not None and history_store.is_empty():
             log.warning("history store is empty but parse marks exist; ignoring the marks and re-reading every transcript")
             parse_cache._last_mtime_ns_by_path = {}
             clear_marks()
@@ -985,7 +992,7 @@ def _store_backed_derivation(
         # first save by a whole interval there. An explicit None cannot.
         parse_cache._marks_saved_at = None
         parse_cache._fired = Counter()
-        parse_cache._hot_initialized = True
+        parse_cache._tick_initialized = True
 
     # Persist the marks at the START of a tick, before this tick enqueues
     # anything: if the flusher reports everything written now, every mark
@@ -1021,8 +1028,8 @@ def _store_backed_derivation(
     #
     # Parsed directly, NOT through parse_cache.get_or_parse: on this path a
     # file's events are consumed exactly once. A changed file is re-parsed under
-    # a new (path, size, mtime_ns) key and derive_delta_turns skips what it has
-    # already seen by dedup_key, and session drill-down re-opens the JSONL from
+    # a new (path, size, mtime_ns) key and derive_delta_turns skips what the engine
+    # already holds by dedup_key, and session drill-down re-opens the JSONL from
     # disk. Caching the events retained every RawEvent of the whole corpus for
     # the life of the process — on the first tick every file is an edge file —
     # for a reader that does not exist.
@@ -1054,55 +1061,63 @@ def _store_backed_derivation(
 
         delta_turns, delta_sessions, fired, accepted_passthrough_locs = derive_delta_turns(
             file_events,
-            parse_cache._known_dedup_keys,
+            usage.engine.known_keys,
             parse_cache._known_passthrough_locs,
         )
         del file_events
-        # Append new turns to hot tier and update bookkeeping.
-        for t in delta_turns:
-            parse_cache._hot_turns.append(t)
-            parse_cache._known_dedup_keys.add(t.dedup_key)
-        # Add new session metadata for previously-unseen session_ids.
-        for s in delta_sessions:
-            if s.session_id not in parse_cache._hot_sessions_by_id:
-                parse_cache._hot_sessions_by_id[s.session_id] = s
         # Track passthrough locations from the SAME source of truth as derive_delta_turns
         # (which knows about the synthetic-model and already-known filters).
         parse_cache._known_passthrough_locs.update(accepted_passthrough_locs)
-        # Refresh per-session high-water marks from the new turns.
-        for t in delta_turns:
-            cur = parse_cache._last_ts_by_session.get(t.session_id)
-            if cur is None or t.timestamp > cur:
-                parse_cache._last_ts_by_session[t.session_id] = t.timestamp
-        # Attach new turns to their in-memory Session objects so drilldowns work.
-        for t in delta_turns:
-            sess = parse_cache._hot_sessions_by_id.get(t.session_id)
-            if sess is not None:
-                sess.turns.append(t)
         parse_cache._fired.update(fired)
         tick_turns.extend(delta_turns)
         tick_sessions.extend(delta_sessions)
 
+    # First-seen metadata wins, as the hot tier's session map did.
+    new_infos: dict[str, SessionInfo] = {}
+    for s in tick_sessions:
+        if s.session_id not in new_infos and usage.index.get(s.session_id) is None:
+            new_infos[s.session_id] = SessionInfo(s.session_id, s.source_file, s.cwd, s.is_sidechain)
+    touched_sids = list(dict.fromkeys(t.session_id for t in tick_turns))
+    if tick_turns or new_infos:
+        usage.engine.add_turns(tick_turns, new_infos.values())
+    if new_infos:
+        usage.index.add(new_infos.values())
+    usage.rollups.invalidate(touched_sids)
+
     # Queue this tick's deltas for background flush, as one batch.
-    if flush_queue is not None and (tick_turns or tick_sessions):
-        sessions_to_flush = [parse_cache._hot_sessions_by_id[s.session_id] for s in tick_sessions if s.session_id in parse_cache._hot_sessions_by_id]
+    if flush_queue is not None and tick_turns:
+        sessions_to_flush = []
+        for sid in touched_sids:
+            info = usage.index.get(sid)
+            if info is not None:
+                sessions_to_flush.append(
+                    Session(
+                        session_id=sid,
+                        source_file=info.source_file,
+                        is_sidechain=info.is_sidechain,
+                        cwd=info.cwd,
+                        turns=[],
+                    )
+                )
         flush_queue.enqueue(tick_turns, sessions_to_flush)
 
-    # Mark sessions whose JSONL is no longer on disk as archived.
-    live_sids = {p.stem for p in paths}
-    for sid, sess in parse_cache._hot_sessions_by_id.items():
-        sess.archived = sid not in live_sids
+    # Sessions whose JSONL is no longer on disk are archived.
+    usage.index.set_live_paths(paths)
 
-    return (
-        list(parse_cache._hot_turns),
-        list(parse_cache._hot_sessions_by_id.values()),
-        Counter(parse_cache._fired),
-    )
+    return Counter(parse_cache._fired)
 
 
 # ---------------------------------------------------------------------------
 # Main snapshot builder
 # ---------------------------------------------------------------------------
+
+
+def _usage_context(parse_cache: ParseCache) -> UsageContext:
+    """The cache's usage context, opening an empty one (no store) the first time it is needed."""
+    with parse_cache._lock:
+        if parse_cache.usage is None:
+            parse_cache.usage = UsageContext.open(None)
+        return parse_cache.usage
 
 
 def build_snapshot_full(
@@ -1118,14 +1133,12 @@ def build_snapshot_full(
 ) -> SnapshotResult:
     """Build the dashboard snapshot.
 
-    When *history_store* is supplied:
-    - First call: hydrate hot tier from DuckDB.
-    - Every call: parse only edge JSONLs (mtime > persisted mark) and append
-      derived deltas to the in-memory hot tier. New turns are queued on
-      *flush_queue* if present.
+    Every call first runs a tick (``_ingest_tick``): the JSONL files that changed are
+    parsed and their new turns go into the usage engine, and onto *flush_queue* if
+    present. Each section of the payload is then a query over the engine.
 
-    When *history_store* is None (CLI report tools, existing tests):
-    - Falls back to today's full re-derivation behavior. Backwards-compatible.
+    *history_store* is the writable store under --persist, else None; the tick uses it
+    only for the empty-store check on its first run.
     """
     now = datetime.now(tz=timezone.utc)
     today_date = now.date()
@@ -1145,45 +1158,30 @@ def build_snapshot_full(
         dirs = get_config_dirs(all_projects=all_projects)
         paths = find_jsonl_files(dirs)
 
-    if history_store is not None:
-        all_turns, all_sessions, _fired = _store_backed_derivation(
-            parse_cache, paths, history_store, flush_queue, mtime_by_path
-        )
-    else:
-        # Named apart from the `active_keys` parameter: this branch re-derives the
-        # keys from its own parse pass, and reusing the name made it read as though
-        # the caller's set were being mutated.
-        parsed_keys: set[tuple[str, int, int]] = set()
-        for path in paths:
-            try:
-                key, _events = parse_cache.get_or_parse(path)
-                parsed_keys.add(key)
-            except OSError:
-                pass
-        parse_cache.purge(parsed_keys)
-        all_turns, all_sessions, _fired = parse_cache.get_derived(frozenset(parsed_keys), _build_turns_and_sessions)
+    usage = _usage_context(parse_cache)
+    _fired = _ingest_tick(parse_cache, paths, history_store, flush_queue, mtime_by_path)
+    queries = usage.queries
+    # Before the first query: pushes each new session's grouped project into the engine.
+    # Without it a session added this tick would group under its raw cwd, or as "(unknown)".
+    usage.index.project_map()
 
-    turns_90d = [t for t in all_turns if t.timestamp.date() >= since_90d]
-    daily_90d = _build_daily_series(turns_90d, since_90d)
+    daily_90d = _build_daily_series(queries.daily(TurnFilter(since=since_90d), fill_since=since_90d))
 
-    cwd_by_sid = _grouped_cwd_by_sid(all_sessions)
-
-    period_since = range_since(period, today_date)
-    period_turns = [t for t in all_turns if t.timestamp.date() >= period_since] if period_since is not None else list(all_turns)
-    today_turns = [t for t in all_turns if t.timestamp.date() == today_date]
+    period_filter = TurnFilter(since=range_since(period, today_date))
 
     thresholds = thresholds if thresholds is not None else dict(DEFAULTS)
 
-    tiles = _build_tiles(period_turns, daily_90d, today_date, thresholds, now)
-    topbar = _build_topbar(today_turns)
+    tiles = _build_tiles(queries, period_filter, daily_90d, today_date, thresholds, now)
+    topbar = _build_topbar(queries, today_date)
     anomaly = _build_anomaly(tiles, today_date)
     # Daily default is a 30-day window regardless of global period.
     daily_default_since = today_date - timedelta(days=29)
-    daily_default_turns = [t for t in turns_90d if t.timestamp.date() >= daily_default_since]
-    hourly = _build_hourly(today_turns, today_date, all_turns, cwd_by_sid)
-    daily = _build_daily(daily_90d, period, today_date, daily_default_turns, cwd_by_sid)
-    models = _build_models(period_turns, period)
-    recent_activity = _build_recent_activity(all_turns, cwd_by_sid, now)
+    hourly = _build_hourly(queries, today_date)
+    daily = _build_daily(
+        daily_90d, period, today_date, _engine_active_entities(queries, TurnFilter(since=daily_default_since))
+    )
+    models = _models_payload(queries.model_rollups(period_filter), period)
+    recent_activity = _build_recent_activity(queries, now)
 
     payload = {
         "generated_at": now.isoformat(),
@@ -1204,10 +1202,10 @@ def build_snapshot_full(
             "interrupted_turn_skipped": _fired.get(AssumptionTag.INTERRUPTED_TURN_SKIPPED, 0),
             "gemini_unpriced": _fired.get(AssumptionTag.GEMINI_UNPRICED, 0),
         },
-        "estimated_models": estimated_models(all_turns),
+        "estimated_models": estimated_models(queries.distinct_values(SearchField.MODEL, TurnFilter())),
     }
 
-    return SnapshotResult(payload=payload, turns=all_turns, sessions=all_sessions)
+    return SnapshotResult(payload=payload)
 
 
 def compute_active_keys(all_projects: bool) -> frozenset[tuple[str, int, int]]:
@@ -1423,17 +1421,12 @@ def build_daily_panel(
     }
 
 
-def build_models_panel(turns: list[Turn], range_label: str) -> dict:
-    return _build_models(turns, range_label)
+def build_models_panel(rollups: list[ModelRollup], range_label: str) -> dict:
+    return _models_payload(rollups, range_label)
 
 
-def build_recent_activity_panel(
-    all_turns: list[Turn],
-    all_sessions: list[Session],
-    now: datetime,
-    window_minutes: int = 60,
-) -> dict:
-    return _build_recent_activity(all_turns, _grouped_cwd_by_sid(all_sessions), now, window_minutes)
+def build_recent_activity_panel(queries: UsageQueries, now: datetime, window_minutes: int = 60) -> dict:
+    return _build_recent_activity(queries, now, window_minutes)
 
 
 def build_model_detail(
@@ -1755,15 +1748,15 @@ def _accumulate_skill_costs(
     return cost, invs, last
 
 
-def estimated_models(turns: list[Turn]) -> list[dict]:
-    """Models in *turns* that are missing from the price list, and what each is priced as.
+def estimated_models(models: Iterable[str]) -> list[dict]:
+    """Models among *models* that are missing from the price list, and what each is priced as.
 
     Feeds the dashboard banner. A missing model is priced as its family's
     fallback until the table gains an entry, at which point every stored turn
     is repriced on read, so the banner is what prompts that correction.
     """
     out = []
-    for model in sorted({t.model for t in turns if t.model}):
+    for model in sorted({m for m in models if m}):
         if model_price_status(model) is PriceStatus.ESTIMATED:
             entry, _ = registry.resolve(model)
             out.append({"model": model, "priced_as": FAMILY_FALLBACKS[entry["family"]]})

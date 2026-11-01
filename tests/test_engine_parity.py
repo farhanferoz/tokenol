@@ -46,7 +46,6 @@ from tokenol.serve.app import _bucket_turns
 from tokenol.serve.state import (
     _accumulate_skill_costs,
     _accumulate_tool_costs,
-    _build_recent_activity,
     _build_series,
     _grouped_cwd_by_sid,
     _short_model,
@@ -311,22 +310,28 @@ def _skills(fx: Fixture, since: date | None):
     return mine, want
 
 
+# Frozen from the Python `_build_recent_activity` before it was converted to read the engine
+# (now = day 2 at 13:30 UTC, window 60 min; the window has no upper bound, so it reaches days 3-4):
+# project -> (latest session, last turn at, turns, primary model, visible tokens).
+_RECENT_WANT = {
+    "(unknown)": ("sD", "2026-05-05T23:14:00+00:00", 8, "haiku-4-5", 28600),
+    HOSTILE_CWD: ("s,1", "2026-05-05T23:15:00+00:00", 8, "sonnet-4-6", 32500),
+    "/p/one": ("sB", "2026-05-05T23:12:00+00:00", 16, "sonnet-4-6", 17800),
+    "/p/two": ("sC", "2026-05-05T23:13:00+00:00", 8, "sonnet-4-6", 23200),
+}
+
+
 def _recent(fx: Fixture):
-    since = FIRST_DAY + timedelta(days=2)
-    now = datetime.combine(since, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=1)
-    rows = _build_recent_activity(fx.turns, fx.cwd_by_sid, now, window_minutes=60)["rows"]
-    got = {r.project: r for r in fx.q.latest_turn_per_project(TurnFilter(since=since))}
-    want = {
-        r["cwd"]: (r["latest_session_id"], r["last_turn_at"], r["turns"], r["model_primary"],
-                   r["ctx_used_abs"]["visible"] if r["ctx_used_abs"] else None)
-        for r in rows
-    }
+    # Off midnight: a bound truncated to its date would keep day 2's earlier hours and change the answer.
+    now = datetime.combine(FIRST_DAY + timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc) + timedelta(
+        hours=13, minutes=30
+    )
+    got = {r.project: r for r in fx.q.latest_turn_per_project(TurnFilter(since_ts=now - timedelta(minutes=60)))}
     mine = {
-        p: (r.session_id, r.timestamp.isoformat(), r.turns, _short_model(r.primary_model),
-            r.pool if want[p][4] is not None else None)
+        p: (r.session_id, r.timestamp.isoformat(), r.turns, _short_model(r.primary_model), r.pool)
         for p, r in got.items()
     }
-    return mine, want
+    return mine, _RECENT_WANT
 
 
 def _cases(fx: Fixture) -> dict[str, Callable[[], tuple]]:

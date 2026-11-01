@@ -249,7 +249,7 @@ def test_accumulate_skill_costs_skips_interrupted():
 
 def test_derive_delta_turns_carries_skill_fields():
     evs = [_raw(skill="tiered-review", uuid="u1"), _raw(skill_names={"tiered-review": 1}, uuid="u2")]
-    turns, _sessions, _fired, _locs = derive_delta_turns(evs, set(), set())
+    turns, _sessions, _fired, _locs = derive_delta_turns(evs, set().intersection, set())
     by_uuid = {t.dedup_key: t for t in turns}
     assert by_uuid["u1"].attribution_skill == "tiered-review"
     assert by_uuid["u2"].skill_names == Counter({"tiered-review": 1})

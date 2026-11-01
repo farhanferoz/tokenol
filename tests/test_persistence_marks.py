@@ -21,6 +21,7 @@ import pytest
 from conftest import seed_history_store
 
 import tokenol.serve.state as _state_mod
+from tokenol.engine import UsageContext
 from tokenol.serve.state import ParseCache, build_snapshot_full
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -69,6 +70,21 @@ def persist_setup(tmp_path, monkeypatch):
     store.close()
 
 
+def _restart(store):
+    """A restart in start-up order: the engine reads the store file, then the writer reopens it.
+
+    Returns (usage context, reopened store, a fresh flush queue on it).
+    """
+    from tokenol.persistence.flusher import FlushQueue
+    from tokenol.persistence.store import HistoryStore
+
+    path = store.path
+    store.close()
+    usage = UsageContext.open(path)
+    reopened = HistoryStore(path)
+    return usage, reopened, FlushQueue(reopened, count_threshold=1_000_000, interval_seconds=1000)
+
+
 @pytest.mark.asyncio
 async def test_marks_are_saved_only_after_the_flush_is_written(persist_setup, monkeypatch) -> None:
     store, queue, src = persist_setup
@@ -110,23 +126,26 @@ async def test_a_restart_skips_files_whose_marks_are_persisted(persist_setup, mo
     monkeypatch.setattr(_state_mod, "parse_file", spy)
 
     # "Restart": a fresh ParseCache against the same store and sidecar.
+    usage, store, queue = _restart(store)
     second = ParseCache()
-    result = build_snapshot_full(second, history_store=store, flush_queue=queue)
+    second.usage = usage
+    build_snapshot_full(second, history_store=store, flush_queue=queue)
 
     assert parsed == [], f"unchanged files were re-parsed after restart: {parsed}"
-    # basic.jsonl is dated 2026-04-14, older than the 90-day hot window, so its
-    # turns live in the WARM tier after a restart, not in result.turns (hot
-    # only). Prove they are in the store and known to the dedup set instead.
+    # The skipped file's turns are in the store, and the engine loaded them from it:
+    # known to the dedup check, and held exactly once.
     stored = {k for k in store.dedup_keys() if not k.startswith("warm-")}
     assert len(stored) == BASIC_JSONL_TURNS, "the skipped file's turns must be in the store"
-    assert stored <= second._known_dedup_keys
-    assert not any(t.session_id == "sess-001" for t in result.turns), "old turns must not be rebuilt into the hot tier"
+    assert usage.engine.known_keys(stored) == stored
+    assert len(usage.engine.session_turns("sess-001")) == BASIC_JSONL_TURNS, "old turns were rebuilt into the engine"
 
     # A file that changed while the server was down IS parsed again.
     time.sleep(0.01)
     src.write_bytes(src.read_bytes() + b"\n")
     build_snapshot_full(second, history_store=store, flush_queue=queue)
     assert parsed == [src]
+    assert len(usage.engine.session_turns("sess-001")) == BASIC_JSONL_TURNS, "the re-read file added duplicates"
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -267,4 +286,4 @@ async def test_marks_are_distrusted_when_the_store_is_empty(persist_setup, monke
     build_snapshot_full(second, history_store=store, flush_queue=queue)
 
     assert parsed == [src], "an empty store must re-read every file despite its marks"
-    assert len(second._hot_turns) >= BASIC_JSONL_TURNS, "the re-read turns were not recovered"
+    assert len(second.usage.engine.session_turns("sess-001")) >= BASIC_JSONL_TURNS, "the re-read turns were not recovered"
