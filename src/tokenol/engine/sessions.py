@@ -41,6 +41,17 @@ _HOME_PARENTS: frozenset[str] = frozenset({"home", "Users", "mnt", "media", "srv
 _GROUPED_CWD_CACHE: dict[tuple, dict[str, str]] = {}
 _GROUPED_CWD_CACHE_MAX = 8
 
+# Path depths (PurePosixPath.parts, "/" included) of a filesystem root's children ("/home") and of
+# a home directory below a root-level container ("/home/x").
+_ROOT_LEVEL_PARTS = 2
+_HOME_LEVEL_PARTS = 3
+
+# Sessions whose turns are materialised together when rollups miss the cache (the first project
+# page or verdict: search). Every rollup of the real store (2,418 sessions, 711k turns) computed
+# cold, RSS after malloc_trim: all at once 1,253 MB (the surviving rollups pin the fragmented
+# heap); batches of 100 / 50 / 25 held 525 / 420 / 358 MB, in 6.4 / 8.0 / 7.9 s on a loaded box.
+ROLLUP_BATCH_SESSIONS = 25
+
 
 def is_container_cwd(cwd: str) -> bool:
     """Return True if *cwd* is a directory that holds projects rather than being one.
@@ -56,9 +67,9 @@ def is_container_cwd(cwd: str) -> bool:
     ``/root``, ``/mnt/x``.
     """
     parts = PurePosixPath(cwd).parts
-    if len(parts) <= 2:  # "/", "/home", "/Users", "/mnt", "/root"
+    if len(parts) <= _ROOT_LEVEL_PARTS:  # "/", "/home", "/Users", "/mnt", "/root"
         return True
-    return len(parts) == 3 and parts[1] in _HOME_PARENTS
+    return len(parts) == _HOME_LEVEL_PARTS and parts[1] in _HOME_PARENTS
 
 
 class _HasCwd(Protocol):
@@ -194,12 +205,13 @@ class SessionRollupCache:
         return self.rollups([session_id])[0]
 
     def rollups(self, session_ids: Iterable[str]) -> list[SessionRollup]:
-        """Rollups in the order asked; misses are computed in one batched engine read."""
+        """Rollups in the order asked; misses are computed ``ROLLUP_BATCH_SESSIONS`` sessions per engine read."""
         ids = list(session_ids)
         missing = [sid for sid in dict.fromkeys(ids) if sid not in self._cache]
-        if missing:
-            turns_by_sid = self._engine.session_turns_many(missing)
-            for sid in missing:
+        for start in range(0, len(missing), ROLLUP_BATCH_SESSIONS):
+            batch = missing[start : start + ROLLUP_BATCH_SESSIONS]
+            turns_by_sid = self._engine.session_turns_many(batch)
+            for sid in batch:
                 session = self._index.session(sid, turns_by_sid.get(sid, []))
                 rollup = build_session_rollup(session)
                 rollup.verdict = compute_verdict(rollup)
