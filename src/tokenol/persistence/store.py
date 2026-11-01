@@ -410,6 +410,18 @@ class HistoryStore:
         self._turn_cols = self._turn_column_sql()
         self._turn_cols_prefixed = self._turn_column_sql(prefix="turns.")
 
+    def engine_connection(self) -> duckdb.DuckDBPyConnection:
+        """The write connection, for the usage engine to attach its in-memory catalog to.
+
+        Callers must hold :attr:`connection_lock` while they use it (creating a
+        cursor counts as using it).
+        """
+        return self._con
+
+    @property
+    def connection_lock(self) -> threading.RLock:
+        return self._lock
+
     # Column order MUST match _row_to_turn's unpacking.
     _TURN_COLUMNS: tuple[tuple[str, str], ...] = (
         ("dedup_key", "NULL"), ("ts", "NULL"), ("session_id", "NULL"), ("model", "NULL"),
