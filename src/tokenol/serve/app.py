@@ -124,6 +124,9 @@ def _is_compare_form(param: str) -> bool:
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Upper bound on the hot_window_days preference (ten years).
+_MAX_HOT_WINDOW_DAYS = 3650
+
 
 def _open_readonly_store_if_present():
     """Open an existing history store read-only, or return None.
@@ -239,7 +242,41 @@ def _release_warm_cache(state) -> None:
         handle.cancel()
     state.warm_tier_cache = None
     state.warm_merged = None
+    state.warm_summary = None
     state.warm_tier_release = None
+
+
+def _warm_cutoff(request: Request) -> datetime:
+    """The boundary below which rows belong to the warm tier: the hot tier's own cutoff.
+
+    No derivation yet means no hot cutoff. The pref window stands in: it can
+    only overlap the hot tier once that exists, never leave a gap, and the merge
+    dedups overlap by dedup_key.
+    """
+    cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
+    if cutoff is None:
+        store = request.app.state.warm_store
+        window_days = getattr(store, "_hot_window_days", request.app.state.prefs.hot_window_days)
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+    return cutoff
+
+
+async def _warm_summary(request: Request) -> tuple[list, date | None]:
+    """The warm tier's sessions (no turns attached) and earliest turn date, cached.
+
+    A few thousand small Session objects and one GROUP BY, against the hundreds
+    of megabytes of Turns `_warm_tier` builds. Keyed on the cutoff it was taken
+    at; cleared with the rest of the warm state on forget.
+    """
+    state = request.app.state
+    cutoff = _warm_cutoff(request)
+    cached = getattr(state, "warm_summary", None)
+    if cached is not None and cached[0] == cutoff:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, lambda: state.warm_store.summarize_before(cutoff))
+    state.warm_summary = (cutoff, data)
+    return data
 
 
 async def _warm_tier(request: Request) -> tuple[list, list]:
@@ -274,14 +311,7 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
         if cached is not None:
             return cached
 
-        cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
-        if cutoff is None:
-            # No derivation has run yet. Using the pref window here can only
-            # overlap the hot tier once it exists, never leave a gap, and the
-            # merge dedups overlap by dedup_key.
-            window_days = getattr(store, "_hot_window_days", request.app.state.prefs.hot_window_days)
-            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
-
+        cutoff = _warm_cutoff(request)
         loop = asyncio.get_running_loop()
         data = await loop.run_in_executor(None, lambda: store.hydrate_before(cutoff))
         # Expiry runs from completion, not from a reading taken before the work
@@ -293,8 +323,21 @@ async def _warm_tier(request: Request) -> tuple[list, list]:
         return data
 
 
-async def _snapshot_with_warm_tier(request: Request, *, project: str | None = None) -> SnapshotResult:
+async def _snapshot_with_warm_tier(
+    request: Request,
+    *,
+    project: str | None = None,
+    since: date | None = None,
+) -> SnapshotResult:
     """Return the current snapshot with persisted (warm-tier) turns folded in.
+
+    *since* is the first date the caller will read turns from, for a caller
+    whose answer depends on nothing earlier. When it falls after the hot
+    cutoff's date, every warm turn would be filtered out by that caller, so
+    none are built: the result carries the warm sessions alone (no turns),
+    which keeps project grouping exactly as the full merge would have it. On a
+    real store this is the difference between holding ~166k extra Turns for as
+    long as a dashboard polls a 30-day chart, and holding none.
 
     The hot tier is only ever as complete as the JSONL still on disk, and Claude
     Code prunes old transcripts — so any endpoint answering a question about the
@@ -314,6 +357,19 @@ async def _snapshot_with_warm_tier(request: Request, *, project: str | None = No
     result = _current_snapshot_result(request)
     if getattr(request.app.state, "warm_store", None) is None:
         return result
+
+    hot_cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
+    # Strictly after the cutoff's DATE: warm rows on that same day, earlier
+    # than the cutoff's time of day, would still pass a `date >= since` filter.
+    if since is not None and hot_cutoff is not None and since > hot_cutoff.astimezone(timezone.utc).date():
+        stubs, _earliest = await _warm_summary(request)
+        existing_sids = {s.session_id for s in result.sessions}
+        extra = [s for s in stubs if s.session_id not in existing_sids and (project is None or s.cwd == project)]
+        if not extra:
+            return result
+        for session in extra:
+            session.archived = True  # JSONL is gone — content snippets unavailable
+        return replace(result, sessions=list(result.sessions) + extra)
 
     # Identify the DATA, not the build. This was keyed on `generated_at`, which
     # build_snapshot_full regenerates every tick, so with a 5s tick the merge was
@@ -613,7 +669,17 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"Unknown metric — valid: {sorted(VALID_METRICS)}")
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
-        result = await _snapshot_with_warm_tier(request)
+        today = date.today()
+        since = range_since(range, today) if range != "all" else None
+        # A compare view ranks its series over every turn passed in, and an
+        # explicit list keeps any entry that has turns at all, regardless of
+        # range — so only single-series requests may leave the warm turns out.
+        series_by_range_only = not (_is_compare_form(project) or _is_compare_form(model))
+        result = await _snapshot_with_warm_tier(request, since=since if series_by_range_only else None)
+        # The oldest date held across hot AND warm, whether or not the warm
+        # turns were built for this request. Taking the min again on a full
+        # merge is a no-op: the warm turns are already among result.turns.
+        warm_earliest = (await _warm_summary(request))[1] if request.app.state.warm_store is not None else None
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
         # Returning 400 here forced clients to special-case "policy" failures even though
@@ -621,16 +687,17 @@ def create_app(
         effective_range = range
         note: str | None = None
         have_days: int | None = None
-        if range != "all" and result.turns:
-            today = date.today()
-            since = range_since(range, today)
-            if since is not None:
-                earliest = min(t.timestamp.date() for t in result.turns)
-                if earliest > since:
-                    have_days = (today - earliest).days + 1
-                    effective_range = "all"
-                    note = f"Only {have_days} days of history available — showing all data instead of {range}."
-        panel = build_daily_panel(result.turns, result.sessions, effective_range, metric, project, model)
+        if since is not None and result.turns:
+            earliest = min(t.timestamp.date() for t in result.turns)
+            if warm_earliest is not None:
+                earliest = min(earliest, warm_earliest)
+            if earliest > since:
+                have_days = (today - earliest).days + 1
+                effective_range = "all"
+                note = f"Only {have_days} days of history available — showing all data instead of {range}."
+        panel = build_daily_panel(
+            result.turns, result.sessions, effective_range, metric, project, model, earliest_hint=warm_earliest
+        )
         if note is not None:
             panel["requested_range"] = range
             panel["have_days"] = have_days
@@ -723,10 +790,10 @@ def create_app(
 
         if "hot_window_days" in body:
             v = body["hot_window_days"]
-            if not isinstance(v, int) or isinstance(v, bool) or not (1 <= v <= 3650):
+            if not isinstance(v, int) or isinstance(v, bool) or not (1 <= v <= _MAX_HOT_WINDOW_DAYS):
                 raise HTTPException(
                     status_code=400,
-                    detail="hot_window_days must be an integer between 1 and 3650 (takes effect on next startup)",
+                    detail=f"hot_window_days must be an integer between 1 and {_MAX_HOT_WINDOW_DAYS} (takes effect on next startup)",
                 )
             prefs.hot_window_days = v
 
@@ -751,8 +818,8 @@ def create_app(
     @app.get("/api/breakdown/summary")
     async def api_breakdown_summary(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
+        result = await _snapshot_with_warm_tier(request, since=since)
         if since is None:
             turns = list(result.turns)
             sessions = list(result.sessions)
@@ -777,8 +844,8 @@ def create_app(
     @app.get("/api/breakdown/daily-tokens")
     async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
+        result = await _snapshot_with_warm_tier(request, since=since)
         if since is None:
             turns = list(result.turns)
             rollups = rollup_by_date(turns)
@@ -831,8 +898,8 @@ def create_app(
     @app.get("/api/breakdown/by-project")
     async def api_breakdown_by_project(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
+        result = await _snapshot_with_warm_tier(request, since=since)
 
         cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
 
@@ -867,8 +934,8 @@ def create_app(
     @app.get("/api/breakdown/by-model")
     async def api_breakdown_by_model(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, date.today()) if range != "all" else None
+        result = await _snapshot_with_warm_tier(request, since=since)
 
         buckets = _bucket_turns(
             result.sessions,
@@ -910,8 +977,8 @@ def create_app(
         # future mode in localStorage degrades gracefully on an older server.
         if mode not in _ATTRIBUTION_MODES:
             mode = AttributionMode.PRORATA.value
-        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
+        result = await _snapshot_with_warm_tier(request, since=since)
         filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
         tools = build_breakdown_tools(filtered, mode=mode)
         # Billable-token totals so the Tokens view can show what fraction of all
@@ -931,8 +998,8 @@ def create_app(
     @app.get("/api/breakdown/skills")
     async def api_breakdown_skills(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
-        result = await _snapshot_with_warm_tier(request)
         since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
+        result = await _snapshot_with_warm_tier(request, since=since)
         filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
         # One combined builder (two turn walks) instead of calling the ranked
         # list, the invoked-without-cost tally, and three cost/token sums

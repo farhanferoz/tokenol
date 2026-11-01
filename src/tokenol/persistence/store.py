@@ -15,6 +15,7 @@ import json as _json
 import logging
 import os
 import re
+import sys
 import tempfile
 import threading
 from collections import Counter
@@ -27,7 +28,16 @@ import duckdb
 
 from tokenol.ingest.parser import _attribute_cost
 from tokenol.metrics.cost import cost_for_turn
-from tokenol.model.events import Session, ToolCost, Turn, Usage
+from tokenol.model.events import (
+    EMPTY_ASSUMPTIONS,
+    EMPTY_SKILL_NAMES,
+    EMPTY_TOOL_COSTS,
+    EMPTY_TOOL_NAMES,
+    Session,
+    ToolCost,
+    Turn,
+    Usage,
+)
 from tokenol.model.registry import is_claude
 
 log = logging.getLogger(__name__)
@@ -36,6 +46,13 @@ SCHEMA_VERSION = 4
 
 # Per-chunk row count for the flush — see :meth:`HistoryStore.flush`.
 FLUSH_CHUNK_SIZE = 1000
+
+# Rows fetched per batch while hydrating. Fetching a whole tier at once held
+# every row tuple (and every boxed value in it) alive at the same moment as
+# the Turns built from them; freed afterwards, that space stayed with the
+# allocator. Measured on a 711k-turn store, 90-day hot tier: 1,842 MB resident
+# with fetchall against 1,424 MB in batches, same Turns, same load time.
+HYDRATE_BATCH_ROWS = 20_000
 
 # DuckDB reports a lock conflict as an IOException whose text carries the
 # holding PID, e.g.:
@@ -254,16 +271,24 @@ def _row_to_turn(r: tuple) -> Turn:
     # exactly and the parser's own attribution prices them at today's rates.
     turn_cost = cost_for_turn(model, usage, at=ts) if model else None
     repriced = turn_cost.total_usd if turn_cost is not None else float(cost)
-    # Counter({}) still runs update(), whose isinstance dispatch showed up as the
-    # single hottest leaf during hydration. Counter() with no argument skips it,
-    # and most rows have neither map populated.
-    tool_names = Counter(_json.loads(tool_names_json)) if tool_names_json else Counter()
-    skill_names = Counter(_json.loads(skill_names_json)) if skill_names_json else Counter()
+    # Every row arrives with its own copy of each string, so a few thousand
+    # distinct session ids, models and tool names were held as millions of
+    # objects (1,090,252 str objects for 1,705 distinct session/model values on a
+    # 545k-turn hot tier). Interning keeps one of each; the empty maps and lists
+    # share the read-only sentinels the parser already uses. Together with the
+    # batched fetch: 1,842 MB -> 1,100 MB for that tier, identical values.
+    sid = sys.intern(sid)
+    model = sys.intern(model) if model else model
+    stop_reason = sys.intern(stop_reason) if stop_reason else stop_reason
+    attribution_skill = sys.intern(attribution_skill) if attribution_skill else attribution_skill
+    tool_names = _interned_counter(tool_names_json, EMPTY_TOOL_NAMES)
+    skill_names = _interned_counter(skill_names_json, EMPTY_SKILL_NAMES)
     assumption_values = _json.loads(assumptions_json) if assumptions_json else []
-    assumptions = [AssumptionTag(v) for v in assumption_values]
+    assumptions = [AssumptionTag(v) for v in assumption_values] or EMPTY_ASSUMPTIONS
     tool_costs: dict[str, ToolCost] = {}
     if tool_costs_json:
         for name, tc_data in _json.loads(tool_costs_json).items():
+            name = sys.intern(name)
             tool_costs[name] = ToolCost(
                 tool_name=name,
                 input_tokens=float(tc_data.get("i", 0.0)),
@@ -292,13 +317,29 @@ def _row_to_turn(r: tuple) -> Turn:
         tool_error_count=int(te),
         tool_names=tool_names,
         assumptions=assumptions,
-        tool_costs=tool_costs,
+        tool_costs=tool_costs or EMPTY_TOOL_COSTS,
         unattributed_input_tokens=float(unattr_in or 0.0),
         unattributed_output_tokens=float(unattr_out or 0.0),
         unattributed_cost_usd=unattr_cost,
         attribution_skill=attribution_skill,
         skill_names=skill_names,
     )
+
+
+def _interned_counter(json_text: str | None, empty: Counter[str]) -> Counter[str]:
+    """Parse a stored name->count map, interning names; *empty* when there are none.
+
+    Most rows carry no names, so the shared *empty* sentinel is the common
+    return. It must never be mutated (see the contract on the EMPTY_* constants
+    in tokenol.model.events).
+    """
+    parsed = _json.loads(json_text) if json_text else None
+    if not parsed:
+        return empty
+    counter: Counter[str] = Counter()
+    for name, n in parsed.items():
+        counter[sys.intern(name)] = n
+    return counter
 
 
 def _claude_turns(rows: Iterable[tuple]) -> list[Turn]:
@@ -552,45 +593,70 @@ class HistoryStore:
         return self._hydrate_where("ts < ?", [self._naive_utc(cutoff)])
 
     def _hydrate_where(self, clause: str, params: list) -> tuple[list[Turn], list[Session]]:
-        # The lock exists to serialise use of the shared DuckDB connection, so it
-        # covers the queries only. Row conversion is pure Python over rows already
-        # fetched, and on a real store it is the bulk of the work — 91,131 rows,
-        # ~2s — during which holding the lock stalls the flusher and every other
-        # reader for no reason. Two short windows instead of one long one.
+        # Rows are converted batch by batch as they are fetched (see
+        # HYDRATE_BATCH_ROWS). A pending result lives on the connection that ran
+        # the query, so batching on the shared `_con` would mean holding its lock
+        # through the whole conversion — on a real store the bulk of the work,
+        # during which the flusher and every other reader would stall. The query
+        # runs on its own cursor instead: DuckDB's documented way for one thread
+        # to use the database while others use theirs. Only creating the cursor
+        # touches `_con`, so only that is under the lock.
         with self._lock:
-            turn_rows = self._con.execute(
-                f"SELECT {self._turn_cols} FROM turns WHERE {clause} ORDER BY ts",
-                params,
-            ).fetchall()
-
-        turns = _claude_turns(turn_rows)
+            cur = self._con.cursor()
+        try:
+            cur.execute(f"SELECT {self._turn_cols} FROM turns WHERE {clause} ORDER BY ts", params)
+            turns: list[Turn] = []
+            while rows := cur.fetchmany(HYDRATE_BATCH_ROWS):
+                turns.extend(_claude_turns(rows))
+        finally:
+            cur.close()
         if not turns:
             return [], []
-
-        session_ids = {t.session_id for t in turns}
-        placeholders = ",".join(["?"] * len(session_ids))
-        with self._lock:
-            session_rows = self._con.execute(
-                f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
-                list(session_ids),
-            ).fetchall()
 
         turns_by_sid: dict[str, list[Turn]] = {}
         for t in turns:
             turns_by_sid.setdefault(t.session_id, []).append(t)
+        return turns, self._sessions_for(turns_by_sid)
 
-        sessions: list[Session] = []
-        for sid, src, cwd, sidechain in session_rows:
-            sessions.append(
-                Session(
-                    session_id=sid,
-                    source_file=src or "",
-                    is_sidechain=bool(sidechain),
-                    cwd=cwd,
-                    turns=turns_by_sid.get(sid, []),
-                )
+    def _sessions_for(self, turns_by_sid: dict[str, list[Turn]]) -> list[Session]:
+        """Session rows for the keys of *turns_by_sid*, each carrying those turns."""
+        placeholders = ",".join(["?"] * len(turns_by_sid))
+        with self._lock:
+            session_rows = self._con.execute(
+                f"SELECT session_id, source_file, cwd, is_sidechain FROM sessions WHERE session_id IN ({placeholders})",
+                list(turns_by_sid),
+            ).fetchall()
+        return [
+            Session(
+                session_id=sid,
+                source_file=src or "",
+                is_sidechain=bool(sidechain),
+                cwd=cwd,
+                turns=turns_by_sid.get(sid, []),
             )
-        return turns, sessions
+            for sid, src, cwd, sidechain in session_rows
+        ]
+
+    def summarize_before(self, cutoff: datetime) -> tuple[list[Session], date | None]:
+        """The warm tier's sessions (with no turns attached) and its earliest turn date.
+
+        Exactly what `hydrate_before(cutoff)` would yield for those two things —
+        same Claude-only filter, same session rows — without building a Turn per
+        row. For a request whose range starts after the cutoff, every warm turn
+        would be filtered out anyway, but the warm *sessions* still matter:
+        project grouping rolls nested cwds up to their shortest ancestor across
+        every known session, and the daily panel reports the earliest date held.
+        """
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT session_id, model, min(ts) FROM turns WHERE ts < ? GROUP BY session_id, model",
+                [self._naive_utc(cutoff)],
+            ).fetchall()
+        claude = [(sid, ts) for sid, model, ts in rows if is_claude(model)]
+        if not claude:
+            return [], None
+        stubs = self._sessions_for({sid: [] for sid, _ in claude})
+        return stubs, min(ts for _, ts in claude).date()
 
     def last_ts_by_session(self) -> dict[str, datetime]:
         """High-water marks per session_id (UTC datetimes)."""
@@ -598,19 +664,31 @@ class HistoryStore:
             rows = self._con.execute("SELECT session_id, last_ts FROM sessions").fetchall()
         return {sid: ts.replace(tzinfo=timezone.utc) for sid, ts in rows}
 
-    def dedup_keys(self) -> set[str]:
-        """Every dedup_key in the store, in one query.
+    def dedup_keys(self, before: datetime | None = None) -> set[str]:
+        """Every dedup_key in the store, or only those of rows older than *before*.
 
         The derivation seeds its in-memory dedup set from this instead of from
         the hot window alone. Without it every turn older than the window was
         re-derived from JSONL on each cold start, appended to the hot tier,
         queued, and rejected by the PRIMARY KEY at the very last step — 96,867
         turns on the live store. Cost: one string per persisted turn, about
-        15 MB per 100k rows.
+        15 MB per 100k rows. With *before* set to the hot cutoff, the caller
+        takes the newer keys from the hot Turns it already holds instead of
+        holding a second copy of each.
         """
         with self._lock:
-            rows = self._con.execute("SELECT dedup_key FROM turns").fetchall()
+            if before is None:
+                rows = self._con.execute("SELECT dedup_key FROM turns").fetchall()
+            else:
+                rows = self._con.execute(
+                    "SELECT dedup_key FROM turns WHERE ts < ?", [self._naive_utc(before)]
+                ).fetchall()
         return {r[0] for r in rows}
+
+    def is_empty(self) -> bool:
+        """True when the store holds no turns at all."""
+        with self._lock:
+            return self._con.execute("SELECT 1 FROM turns LIMIT 1").fetchone() is None
 
     def query_turns(
         self,

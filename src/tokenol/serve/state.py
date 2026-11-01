@@ -946,7 +946,13 @@ def _store_backed_derivation(
         # it a cold start re-derived every row below the cutoff (96,867 on the
         # live store), appended it to the hot tier, queued it, and had the
         # database reject it as a key conflict at the last step.
-        parse_cache._known_dedup_keys = history_store.dedup_keys()
+        # Keys at or after the cutoff are taken from the hot Turns themselves,
+        # sharing their strings rather than holding a second copy of each. The
+        # only stored rows that leaves out are non-Claude ones, and
+        # derive_delta_turns drops non-Claude events before it ever consults
+        # this set.
+        parse_cache._known_dedup_keys = {t.dedup_key for t in hot_turns}
+        parse_cache._known_dedup_keys.update(history_store.dedup_keys(before=cutoff))
         parse_cache._known_passthrough_locs = set()
         parse_cache._last_ts_by_session = history_store.last_ts_by_session()
         # Marks persist across restarts ONLY under --persist (a flush queue
@@ -959,7 +965,7 @@ def _store_backed_derivation(
         # marks there would skip every transcript and serve an empty dashboard
         # for ever, silently. The marks lose. (forget --all clears them on its
         # own path; this covers the store going away behind our back.)
-        if parse_cache._last_mtime_ns_by_path and not parse_cache._known_dedup_keys:
+        if parse_cache._last_mtime_ns_by_path and history_store.is_empty():
             log.warning("history store is empty but parse marks exist; ignoring the marks and re-reading every transcript")
             parse_cache._last_mtime_ns_by_path = {}
             clear_marks()
@@ -1449,11 +1455,16 @@ def build_daily_panel(
     project: str = "all",
     model: str = "all",
     today_date: date | None = None,
+    earliest_hint: date | None = None,
 ) -> dict:
+    """*earliest_hint* is the oldest date of turns held but not passed in (the warm
+    tier, when the caller left its turns out); it only moves `earliest_available`."""
     today_date = today_date or date.today()
     since = range_since(range_str, today_date)
     cwd_by_sid = _grouped_cwd_by_sid(sessions)
     earliest_date = min((t.timestamp.date() for t in turns), default=today_date)
+    if earliest_hint is not None:
+        earliest_date = min(earliest_date, earliest_hint)
     earliest = str(earliest_date)
     # For range=all, anchor zero-fill at the earliest active day so step-plot gaps
     # render as broken lines instead of last-value-extending across inactive stretches.

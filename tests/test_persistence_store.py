@@ -621,6 +621,10 @@ def test_dedup_keys_returns_every_key_in_the_store(tmp_path: Path) -> None:
         keys = store.dedup_keys()
         assert keys == {f"k{i}" for i in range(5)}
         assert isinstance(keys, set)
+        # `before` keeps only rows strictly older than the cutoff (k2 sits 80 days
+        # back; the derivation takes the newer keys from its hot Turns instead).
+        assert store.dedup_keys(before=now - timedelta(days=60)) == {"k2", "k3", "k4"}
+        assert not store.is_empty()
     finally:
         store.close()
 
@@ -629,5 +633,71 @@ def test_dedup_keys_is_empty_on_an_empty_store(tmp_path: Path) -> None:
     store = HistoryStore(tmp_path / "h.duckdb")
     try:
         assert store.dedup_keys() == set()
+        assert store.is_empty()
+    finally:
+        store.close()
+
+
+def test_hydration_batches_rows_and_shares_repeated_values(tmp_path: Path, monkeypatch) -> None:
+    """Rows are converted in batches, in order, with one object per repeated value.
+
+    A batch size below the row count exercises the batch boundary; the identity
+    checks are what the memory saving rests on (1,090,252 str objects for 1,705
+    distinct values before, on a real store).
+    """
+    import tokenol.persistence.store as store_mod
+    from tokenol.model.events import (
+        EMPTY_ASSUMPTIONS,
+        EMPTY_SKILL_NAMES,
+        EMPTY_TOOL_COSTS,
+        EMPTY_TOOL_NAMES,
+    )
+
+    monkeypatch.setattr(store_mod, "HYDRATE_BATCH_ROWS", 2)
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        base = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        made = [_turn(f"k{i}", "sess-1", ts=base + timedelta(minutes=i)) for i in range(5)]
+        bare = made[4]
+        bare.tool_names, bare.assumptions = Counter(), []
+        store.flush(made, [_session("sess-1")])
+
+        turns, sessions = store.hydrate_since(base - timedelta(days=1))
+        assert [t.dedup_key for t in turns] == [f"k{i}" for i in range(5)]
+        assert len(sessions) == 1 and len(sessions[0].turns) == 5
+        first, second = turns[0], turns[1]
+        assert first.session_id is second.session_id
+        assert first.model is second.model
+        assert first.stop_reason is second.stop_reason
+        assert next(iter(first.tool_names)) is next(iter(second.tool_names))
+        assert turns[4].tool_names is EMPTY_TOOL_NAMES
+        assert turns[4].assumptions is EMPTY_ASSUMPTIONS
+        assert first.tool_costs is EMPTY_TOOL_COSTS
+        assert first.skill_names is EMPTY_SKILL_NAMES
+    finally:
+        store.close()
+
+
+def test_summarize_before_matches_what_hydrate_before_would_yield(tmp_path: Path) -> None:
+    """Sessions without their turns, plus the earliest date, Claude rows only."""
+    store = HistoryStore(tmp_path / "h.duckdb")
+    try:
+        cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        store.flush(
+            [
+                _turn("old-a", "sess-a", ts=cutoff - timedelta(days=10)),
+                _turn("old-a2", "sess-a", ts=cutoff - timedelta(days=3)),
+                _turn("old-x", "sess-x", ts=cutoff - timedelta(days=30), model="gpt-4o"),
+                _turn("new-b", "sess-b", ts=cutoff + timedelta(days=1)),
+            ],
+            [_session("sess-a", cwd="/dev/a"), _session("sess-x"), _session("sess-b")],
+        )
+        stubs, earliest = store.summarize_before(cutoff)
+        _, warm_sessions = store.hydrate_before(cutoff)
+
+        assert [(s.session_id, s.cwd) for s in stubs] == [(s.session_id, s.cwd) for s in warm_sessions]
+        assert [s.turns for s in stubs] == [[]]
+        assert earliest == (cutoff - timedelta(days=10)).date()
+        assert store.summarize_before(cutoff - timedelta(days=60)) == ([], None)
     finally:
         store.close()

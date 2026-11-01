@@ -97,3 +97,57 @@ async def test_warm_tier_falls_back_to_the_pref_window_without_a_hot_cutoff(tmp_
     assert abs(seen[0] - expected) < timedelta(minutes=5)
     # 200-day-old rows are below the 90-day fallback cutoff; 5-day-old rows are not.
     assert {t.session_id for t in turns} == {"warm-old"}
+
+
+def _app_with_nested_projects(tmp_path, monkeypatch):
+    """A warm-only session at /dev/proj and a hot one at /dev/proj/backend.
+
+    Project grouping rolls a nested cwd up to its shortest ancestor across every
+    known session, so the hot session's project label depends on the warm one.
+    """
+    from tokenol.serve.app import ServerConfig, create_app
+
+    (tmp_path / "projects").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(_state_mod, "get_config_dirs", lambda all_projects=False: [tmp_path])
+    db = tmp_path / ".tokenol" / "history.duckdb"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    seed_history_store(db, days_ago=200, turns=4, session_id="old", cwd="/dev/proj")
+    seed_history_store(db, days_ago=5, turns=3, session_id="new", cwd="/dev/proj/backend")
+    return create_app(ServerConfig(persist=False), prefs_path=tmp_path / "prefs.json")
+
+
+@pytest.mark.asyncio
+async def test_range_inside_the_hot_window_builds_no_warm_turns_and_answers_the_same(tmp_path, monkeypatch) -> None:
+    """A 30-day request never builds warm Turns, yet grouping and earliest date are unchanged.
+
+    Every warm row predates the hot cutoff, so a 30-day filter drops all of them;
+    the dashboard polls exactly such a request every minute, which kept the whole
+    warm tier resident. What must survive the skip: the warm session's cwd (the
+    hot session still groups under /dev/proj) and the oldest date held (the
+    daily panel's `earliest_available`, read by the UI's range picker).
+    """
+    pytest.importorskip("duckdb")
+    from httpx import ASGITransport, AsyncClient
+
+    app = _app_with_nested_projects(tmp_path, monkeypatch)
+    calls: list[datetime] = []
+    real = app.state.warm_store.hydrate_before
+    app.state.warm_store.hydrate_before = lambda cutoff: calls.append(cutoff) or real(cutoff)
+    oldest = (datetime.now(tz=timezone.utc) - timedelta(days=200)).date().isoformat()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        daily = (await client.get("/api/daily?range=30d&metric=cost&project=all&model=all")).json()
+        by_project = (await client.get("/api/breakdown/by-project?range=30d")).json()
+        for endpoint in ("summary", "daily-tokens", "by-model", "tools", "skills"):
+            assert (await client.get(f"/api/breakdown/{endpoint}?range=30d")).status_code == 200
+        assert calls == [], "a range inside the hot window must not build warm Turns"
+
+        assert daily["earliest_available"] == oldest
+        assert "note" not in daily
+        assert [p["value"] for p in daily["active_projects"]] == ["/dev/proj"]
+        assert [p["cwd"] for p in by_project["projects"]] == ["/dev/proj"]
+
+        # A compare view ranks series over every turn, so it still needs them all.
+        assert (await client.get("/api/daily?range=30d&metric=cost&project=compare&model=all")).status_code == 200
+        assert len(calls) == 1

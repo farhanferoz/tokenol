@@ -99,7 +99,7 @@ def _extract_tool_blocks(content: list) -> tuple[Counter[str], int, int]:
             tool_use_total += 1
             name = block.get("name")
             if _is_real_tool_name(name):
-                tool_names[name] += 1
+                tool_names[sys.intern(name)] += 1
         elif btype == "tool_result" and block.get("is_error") is True:
             tool_error += 1
     if not tool_names:
@@ -117,7 +117,7 @@ def _extract_skill_names(content: list) -> Counter[str]:
             inp = block.get("input")
             slug = inp.get("skill") if isinstance(inp, dict) else None
             if _is_real_skill_name(slug):
-                skills[slug] += 1
+                skills[sys.intern(slug)] += 1
     return skills
 
 
@@ -200,6 +200,7 @@ def _attribute_cost(
     for name in names:
         out_share = output_shares.get(name, 0.0)
         in_share = input_shares.get(name, 0.0)
+        name = sys.intern(name)  # one copy per tool name, however many turns hold it
         tool_costs[name] = ToolCost(
             tool_name=name,
             input_tokens=input_token_pool * in_share,

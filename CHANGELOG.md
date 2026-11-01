@@ -4,6 +4,22 @@ All notable changes to tokenol are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.5 — 2026-11-01
+
+### Changed
+
+- **`tokenol serve` uses about 40% less memory, with every answer unchanged.** Measured on a
+  711,000-turn history store: 2,124 MB → 1,274 MB while the dashboard shows its default 30-day
+  views, and 2,153 MB → 1,553 MB after an all-time view. All 44 dashboard and breakdown
+  responses compared were identical before and after. Three causes:
+  - History was read from the store in one piece, and the space that briefly took stayed with
+    the process. It is now read in batches.
+  - Every stored turn carried its own copy of repeated text: session ids, model names and tool
+    names. Turns now share one copy of each.
+  - A request for the last 7, 30 or 90 days loaded all older history too, only to filter it
+    out, and the dashboard's once-a-minute refresh kept it in memory permanently. Those
+    requests no longer load it. All-time views still do.
+
 ## 0.8.4 — 2026-10-23
 
 ### Added
