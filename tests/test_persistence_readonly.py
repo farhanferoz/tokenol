@@ -166,7 +166,6 @@ async def test_serve_without_a_store_is_unchanged(tmp_path: Path, monkeypatch) -
 
     app = create_app(ServerConfig(persist=False), prefs_path=tmp_path / "prefs.json")
     assert app.state.history_store is None
-    assert app.state.warm_store is None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         resp = await client.get("/api/breakdown/summary?range=all")
     assert resp.status_code == HTTP_OK

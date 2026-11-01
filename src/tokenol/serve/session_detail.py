@@ -153,7 +153,7 @@ def build_turn_detail(session: Session, turn_idx: int) -> dict | None:
             "output": t.usage.output_tokens,
             "cache_read": t.usage.cache_read_input_tokens,
             "cache_creation": t.usage.cache_creation_input_tokens,
-            "total_visible": (t.usage.input_tokens + t.usage.cache_read_input_tokens + t.usage.cache_creation_input_tokens),
+            "total_visible": t.usage.input_token_pool,
         },
         "tool_calls": tool_calls,
         "user_prompt": user_prompt,

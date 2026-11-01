@@ -13,6 +13,8 @@ from pathlib import Path
 
 import tokenol.serve.state as _state_mod
 from tokenol.engine import UsageContext
+from tokenol.engine.queries import ToolCosts
+from tokenol.engine.sessions import _GROUPED_CWD_CACHE, grouped_project_cwds, is_container_cwd
 from tokenol.metrics.cost import cost_for_turn
 from tokenol.model.events import RawEvent, Session, ToolCost, Turn, Usage
 from tokenol.persistence.store import HistoryStore
@@ -416,9 +418,14 @@ def test_snapshot_empty_state(tmp_path: Path) -> None:
     assert cache.usage.index.all() == []
 
 
-def test_snapshot_recent_activity_shape(tmp_path: Path) -> None:
-    """recent_activity has window, aggregate, rows fields; a session new this tick is grouped by project."""
+def test_snapshot_recent_activity_shape(tmp_path: Path, monkeypatch) -> None:
+    """recent_activity has window, aggregate, rows fields; a session new this tick is grouped by project.
+
+    Each build also hands the allocator's freed heap back (RSS otherwise climbs ~14 MB a build)."""
     from datetime import datetime, timedelta, timezone
+
+    trims: list[int] = []
+    monkeypatch.setattr(_state_mod, "release_free_memory", lambda: trims.append(1) or (None, None))
 
     recent_ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     proj = tmp_path / "projects"
@@ -439,6 +446,7 @@ def test_snapshot_recent_activity_shape(tmp_path: Path) -> None:
         assert key in agg, f"recent_activity.aggregate missing: {key}"
     # Sessions first seen in this very tick: their project grouping must already be in the engine.
     assert [(r["cwd"], r["turns"]) for r in ra["rows"]] == [("/home/u/proj", 2)]
+    assert trims == [1]
 
 
 def test_snapshot_daily_shape(tmp_path: Path) -> None:
@@ -652,8 +660,6 @@ def test_project_detail_cache_trend_key(tmp_path: Path) -> None:
 def test_grouped_cwd_rolls_child_under_parent(tmp_path: Path) -> None:
     """Sessions in a nested cwd get remapped to the shortest active ancestor."""
     from tokenol.model.events import Session
-    from tokenol.serve.state import _grouped_cwd_by_sid
-
     sessions = [
         Session(session_id="a", source_file="", is_sidechain=False, cwd="/dev/StratSense"),
         Session(session_id="b", source_file="", is_sidechain=False, cwd="/dev/StratSense/StratSense-Backend"),
@@ -661,7 +667,7 @@ def test_grouped_cwd_rolls_child_under_parent(tmp_path: Path) -> None:
         Session(session_id="d", source_file="", is_sidechain=False, cwd="/dev/OtherProj"),
         Session(session_id="e", source_file="", is_sidechain=False, cwd=None),
     ]
-    m = _grouped_cwd_by_sid(sessions)
+    m = grouped_project_cwds(sessions)
     assert m["a"] == "/dev/StratSense"
     assert m["b"] == "/dev/StratSense"
     assert m["c"] == "/dev/StratSense"
@@ -672,13 +678,11 @@ def test_grouped_cwd_rolls_child_under_parent(tmp_path: Path) -> None:
 def test_grouped_cwd_siblings_stay_separate(tmp_path: Path) -> None:
     """When the parent dir has no activity, sibling children stay separate."""
     from tokenol.model.events import Session
-    from tokenol.serve.state import _grouped_cwd_by_sid
-
     sessions = [
         Session(session_id="a", source_file="", is_sidechain=False, cwd="/dev/StratSense/Backend"),
         Session(session_id="b", source_file="", is_sidechain=False, cwd="/dev/StratSense/Frontend"),
     ]
-    m = _grouped_cwd_by_sid(sessions)
+    m = grouped_project_cwds(sessions)
     assert m["a"] == "/dev/StratSense/Backend"
     assert m["b"] == "/dev/StratSense/Frontend"
 
@@ -1253,181 +1257,41 @@ def _btt_turns_fixture() -> list[Turn]:
     ]
 
 
-def test_build_breakdown_tools_prorata_matches_legacy_inline_loop():
-    """Regression guard: build_breakdown_tools(turns, mode='prorata') must
-    produce the same tools list (per-tool cost_usd, count, last_active, ordering,
-    __unattributed__ residual) as the inline loop in api_breakdown_tools today."""
-    turns = _btt_turns_fixture()
-
-    # Reproduce the inline loop's behaviour to lock in the expected output.
-    from collections import Counter as _C
-
-    from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
-    from tokenol.metrics.rollups import _rank_dict_with_others
-
-    cost_by_tool: dict[str, float] = {}
-    tokens_by_tool: _C[str] = _C()
-    unattr_cost = 0.0
-    last_active: dict[str, datetime] = {}
-    for t in turns:
-        tokens_by_tool.update(t.tool_names)
-        for name, tc in t.tool_costs.items():
-            if name == UNKNOWN_TOOL:
-                unattr_cost += tc.cost_usd
-                continue
-            cost_by_tool[name] = cost_by_tool.get(name, 0.0) + tc.cost_usd
-            if name in t.tool_names and (name not in last_active or t.timestamp > last_active[name]):
-                last_active[name] = t.timestamp
-        unattr_cost += t.unattributed_cost_usd
-    expected = _rank_dict_with_others(cost_by_tool, top_n=10)
-    head = {r["name"] for r in expected if r["name"] != "other"}
-    tail_calls = sum(c for n, c in tokens_by_tool.items() if n not in head)
-    for row in expected:
-        name = row["name"]
-        if name == "other":
-            row["count"] = tail_calls
-        elif name in tokens_by_tool:
-            row["count"] = tokens_by_tool[name]
-        if name in last_active:
-            row["last_active"] = last_active[name].isoformat()
-        row["cost_usd"] = row.pop("value")
-    expected.append({"name": UNATTRIBUTED_TOOL, "cost_usd": unattr_cost})
-
-    got = build_breakdown_tools(turns, mode="prorata")
-    assert got == expected
-
-
-def test_build_breakdown_tools_excl_cache_read_total_invariant():
-    """Sum of per-tool cost_usd + __unattributed__ cost_usd under
-    mode='excl_cache_read' must equal sum of cost_for_turn().total_usd
-    across the non-interrupted turns (total cost is mode-invariant)."""
-    turns = _btt_turns_fixture()
-    expected_total = sum(cost_for_turn(t.model, t.usage).total_usd for t in turns if not t.is_interrupted)
-
-    got = build_breakdown_tools(turns, mode="excl_cache_read")
-    got_total = sum(row["cost_usd"] for row in got)
-    assert got_total == pytest.approx(expected_total, rel=1e-9)
-
-
-def test_build_breakdown_tools_excl_cache_read_shifts_cache_read_to_unattributed():
-    """The __unattributed__ row in excl_cache_read mode must be strictly larger
-    than in prorata mode by the amount of cache_read_usd that previously
-    flowed to tools (since cache_read now flows 100% to unattributed)."""
-    # Build a realistic fixture where tool_costs track token shares correctly
-    # and include pre-computed costs as they would be in real operation.
-    t0 = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
-    usage = Usage(input_tokens=1_000, output_tokens=100, cache_read_input_tokens=9_000, cache_creation_input_tokens=0)
-    turn_cost = cost_for_turn("claude-opus-4-7", usage)
-    # Tool uses 50% of input pool (5_000 / 10_000), 40% of output (40 / 100).
-    # In prorata, tool cost = 0.5 * (input_usd + cache_read_usd + 0) + 0.4 * output_usd
-    in_share = 0.5
-    out_share = 0.4
-    tool_cost_prorata = in_share * (turn_cost.input_usd + turn_cost.cache_read_usd) + out_share * turn_cost.output_usd
-    unattr_cost_prorata = turn_cost.total_usd - tool_cost_prorata
-
-    turns = [
-        Turn(
-            dedup_key="k0",
-            timestamp=t0,
-            session_id="s1",
-            model="claude-opus-4-7",
-            usage=usage,
-            is_sidechain=False,
-            stop_reason="tool_use",
-            tool_use_count=1,
-            tool_names=Counter({"Read": 1}),
-            tool_costs={
-                "Read": ToolCost(tool_name="Read", input_tokens=5_000.0, output_tokens=40.0, cost_usd=tool_cost_prorata),
-            },
-            unattributed_input_tokens=5_000.0,
-            unattributed_output_tokens=60.0,
-            unattributed_cost_usd=unattr_cost_prorata,
-        ),
-    ]
-
-    pro = {row["name"]: row["cost_usd"] for row in build_breakdown_tools(turns, mode="prorata")}
-    exc = {row["name"]: row["cost_usd"] for row in build_breakdown_tools(turns, mode="excl_cache_read")}
-
-    # The cache_read share that flows to tools in prorata is:
-    # in_share * cache_read_usd = 0.5 * cache_read_usd
-    # In excl mode, this entire amount flows to unattributed instead.
-    expected_unattr_growth = in_share * turn_cost.cache_read_usd
-    actual_growth = exc["__unattributed__"] - pro["__unattributed__"]
-    assert actual_growth == pytest.approx(expected_unattr_growth, rel=1e-9)
-
-    # Multi-tool guard: on _btt_turns_fixture, every real tool's bucket must
-    # shrink (or stay equal) under excl_cache_read — the cache_read share that
-    # flowed to them in prorata moves entirely to the residual.
-    pro_mt = {r["name"]: r["cost_usd"] for r in build_breakdown_tools(_btt_turns_fixture(), mode="prorata")}
-    exc_mt = {r["name"]: r["cost_usd"] for r in build_breakdown_tools(_btt_turns_fixture(), mode="excl_cache_read")}
-    for name in ("Read", "Bash"):
-        if name in pro_mt and name in exc_mt:
-            assert exc_mt[name] <= pro_mt[name] + 1e-12, f"{name} grew under excl mode"
-
-
-def test_build_breakdown_tools_non_cost_fields_are_mode_invariant():
-    """count, last_active, tool_count, and tool ordering must be identical
-    between prorata and excl_cache_read modes (only cost_usd is recomputed)."""
-    turns = _btt_turns_fixture()
-    pro = build_breakdown_tools(turns, mode="prorata")
-    exc = build_breakdown_tools(turns, mode="excl_cache_read")
-
-    assert [r["name"] for r in pro] == [r["name"] for r in exc]
-    for p, e in zip(pro, exc, strict=True):
-        for key in ("count", "last_active", "tool_count"):
-            if key in p or key in e:
-                assert p.get(key) == e.get(key), f"{p['name']} {key} drift"
-
-
-def test_build_breakdown_tools_excludes_interrupted_turns():
-    """Interrupted turns must contribute to neither mode."""
-    t_ok = _btt_turns_fixture()[0]
-    t_interrupt = Turn(
-        dedup_key="k-int",
-        timestamp=datetime(2026, 5, 14, 13, 0, tzinfo=timezone.utc),
-        session_id="s1",
-        model="claude-opus-4-7",
-        usage=Usage(),
-        is_sidechain=False,
-        stop_reason=None,
-        is_interrupted=True,
-        tool_use_count=1,
-        tool_names=Counter({"Read": 1}),
+def test_build_breakdown_tools_ranks_ten_collapses_the_tail_and_ends_with_the_residual():
+    """Top ten tools by cost; one 'other' row whose `count` is the collapsed tools' calls (not their
+    number); calls and last-active only where the engine reports them; __unattributed__ last."""
+    when = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
+    names = [f"t{i:02d}" for i in range(12)]  # t00 costs the most
+    tool_costs = ToolCosts(
+        cost_by_tool={n: float(12 - i) for i, n in enumerate(names)},
+        calls_by_tool={**{n: i + 1 for i, n in enumerate(names)}, "called-without-cost": 5},
+        last_active={"t00": when},
+        unattributed_usd=0.75,
     )
-    got_pro = build_breakdown_tools([t_ok, t_interrupt], mode="prorata")
-    got_exc = build_breakdown_tools([t_ok, t_interrupt], mode="excl_cache_read")
-    # The Read row's count should be 1 (from the one healthy turn) in both.
-    by_name_pro = {r["name"]: r for r in got_pro}
-    by_name_exc = {r["name"]: r for r in got_exc}
-    assert by_name_pro["Read"]["count"] == 1
-    assert by_name_exc["Read"]["count"] == 1
+
+    rows = build_breakdown_tools(tool_costs)
+
+    assert [r["name"] for r in rows[:10]] == names[:10]
+    assert rows[0] == {"name": "t00", "cost_usd": 12.0, "count": 1, "last_active": when.isoformat()}
+    assert "last_active" not in rows[1]
+    # t10 and t11 are collapsed: 11 + 12 calls, plus the 5 of a tool that has calls but no cost.
+    assert rows[10] == {"name": "other", "cost_usd": 3.0, "tool_count": 2, "count": 28}
+    assert rows[11] == {"name": "__unattributed__", "cost_usd": 0.75}
 
 
-def test_build_breakdown_tools_unknown_mode_falls_back_to_prorata():
-    """Function-level fallback for unknown mode. The API endpoint also normalises
-    bad values, but this guards the function contract directly in case the API
-    layer is ever bypassed (e.g., by a future internal caller)."""
-    turns = _btt_turns_fixture()
-    prorata = build_breakdown_tools(turns, mode="prorata")
-    garbage = build_breakdown_tools(turns, mode="not_a_real_mode")
-    assert garbage == prorata
+# ---- grouped_project_cwds memoization tests ----------------------------
 
 
-# ---- _grouped_cwd_by_sid memoization tests ----------------------------
-
-
-def test_grouped_cwd_by_sid_cache_keys_on_content_not_id():
+def test_grouped_project_cwds_cache_keys_on_content_not_id():
     """Regression guard: `_GROUPED_CWD_CACHE` must use a content fingerprint as
     its key, not `id(sessions)`. Python recycles ids for freed objects, so an
     id-keyed cache could return a stale prior remap for a fresh sessions list
     that happens to land at a recycled address (real production bug — surfaced
     by a declared-order test run during the 0.6.1 release-gate review)."""
-    from tokenol.serve.state import _GROUPED_CWD_CACHE, _grouped_cwd_by_sid
-
     _GROUPED_CWD_CACHE.clear()
     try:
         sessions_a = [Session(session_id="sX", source_file="a.jsonl", is_sidechain=False, cwd="/p/A")]
-        _grouped_cwd_by_sid(sessions_a)
+        grouped_project_cwds(sessions_a)
 
         # Verify the key is a tuple of (sid, cwd) pairs, NOT an int.
         assert len(_GROUPED_CWD_CACHE) == 1
@@ -1439,7 +1303,7 @@ def test_grouped_cwd_by_sid_cache_keys_on_content_not_id():
         # cache key and a different result (even if Python were to recycle the
         # underlying list id).
         sessions_b = [Session(session_id="sY", source_file="b.jsonl", is_sidechain=False, cwd="/p/B")]
-        result_b = _grouped_cwd_by_sid(sessions_b)
+        result_b = grouped_project_cwds(sessions_b)
         assert result_b == {"sY": "/p/B"}
         assert len(_GROUPED_CWD_CACHE) == 2
     finally:
@@ -1488,15 +1352,13 @@ def test_home_dir_session_does_not_swallow_every_project() -> None:
     shortest-active-ancestor rule would otherwise roll them all up into it.
     """
     from tokenol.model.events import Session
-    from tokenol.serve.state import _grouped_cwd_by_sid
-
     sessions = [
         Session(session_id="home", source_file="", is_sidechain=False, cwd="/home/ff235"),
         Session(session_id="a", source_file="", is_sidechain=False, cwd="/home/ff235/dev/StratSense"),
         Session(session_id="b", source_file="", is_sidechain=False, cwd="/home/ff235/dev/StratSense/Backend"),
         Session(session_id="c", source_file="", is_sidechain=False, cwd="/home/ff235/dev/OtherProj"),
     ]
-    m = _grouped_cwd_by_sid(sessions)
+    m = grouped_project_cwds(sessions)
     assert m["a"] == "/home/ff235/dev/StratSense"
     assert m["b"] == "/home/ff235/dev/StratSense"
     assert m["c"] == "/home/ff235/dev/OtherProj"
@@ -1508,8 +1370,6 @@ def test_home_dir_session_does_not_swallow_every_project() -> None:
 def test_container_cwd_shapes() -> None:
     """Container dirs are matched by shape, so cwds mirrored in from another
     machine (with its own home path) are classified without consulting $HOME."""
-    from tokenol.serve.state import is_container_cwd
-
     for cwd in ("/", "/home", "/Users", "/mnt", "/home/ff235", "/Users/someone", "/mnt/scratch"):
         assert is_container_cwd(cwd), cwd
     for cwd in ("/home/ff235/dev", "/Users/someone/code", "/opt/app", "/mnt/scratch/proj"):

@@ -5,7 +5,8 @@ projects with a nested cwd, a session without a cwd, interrupted turns that stil
 carry tool and skill tags; the engine holds Claude turns only) is loaded into one engine and
 into Python ``Turn`` lists. Each case runs one engine method and the existing
 function it replaces over the same selection, and compares to relative 1e-9
-(SQL sums in a different order than Python).
+(SQL sums in a different order than Python). A reference the serve layer no longer has
+is a literal frozen from its last green run (the ``_*_WANT`` constants).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from test_engine_ingest import (
 from tokenol.engine import SessionInfo, UsageEngine
 from tokenol.engine.filters import GroupKey, InterruptedPolicy, SearchField, TurnFilter
 from tokenol.engine.queries import UsageQueries
+from tokenol.engine.sessions import grouped_project_cwds
 from tokenol.enums import AttributionMode
 from tokenol.ingest.parser import UNATTRIBUTED_TOOL, UNKNOWN_TOOL
 from tokenol.metrics.cost import cache_saved_usd, cost_for_turn, rollup_by_date, rollup_by_hour
@@ -42,16 +44,10 @@ from tokenol.metrics.rollups import (
     build_tool_cost_daily,
 )
 from tokenol.model.events import Session, Turn, Usage
-from tokenol.serve.app import _bucket_turns
 from tokenol.serve.state import (
     _accumulate_skill_costs,
     _accumulate_tool_costs,
-    _build_series,
-    _grouped_cwd_by_sid,
     _short_model,
-    billable_token_totals,
-    build_breakdown_tools,
-    build_skill_breakdown,
     build_tool_detail,
 )
 
@@ -61,7 +57,6 @@ INCLUDE, EXCLUDE = InterruptedPolicy.INCLUDE, InterruptedPolicy.EXCLUDE
 FIRST_DAY = BASE.date()
 LAST_DAY = FIRST_DAY + timedelta(days=4)
 SKILL = "brainstorm"
-TOP_TOOLS = 10  # build_breakdown_tools collapses the tail past this many tools
 
 SESSIONS = [
     ("sA", "/p/one", SONNET),
@@ -113,6 +108,138 @@ def _build_turns() -> list[Turn]:
     return turns
 
 
+# Frozen from the Python functions the serve layer used before Task 6 converted them
+# (`_build_series` in compare mode, `_bucket_turns`, `build_breakdown_tools`,
+# `build_skill_breakdown`, `billable_token_totals`), run over this fixture. The engine side of
+# each case is unchanged. Series rows are the non-empty buckets: (day or hour, turns, input,
+# output, cache read, cache creation, cost[, interrupted turns]); the leading number is the
+# length of the filled series, which proves the zero-fill without listing it.
+_DAILY_BY_WANT = {'project': {'/p/one': (8,
+                        [('2026-05-01', 6, 2850, 285, 70500, 2450, 0.025812499999999995, 1),
+                         ('2026-05-02', 6, 10750, 1075, 80500, 2150, 0.0558375, 1),
+                         ('2026-05-03', 6, 21900, 2190, 80000, 2700, 0.089775, 0),
+                         ('2026-05-04', 6, 30900, 3090, 75000, 2700, 0.11227500000000001, 0),
+                         ('2026-05-05', 6, 33350, 3335, 90500, 2450, 0.1105125, 1)]),
+             '/p/two': (8,
+                        [('2026-05-01', 3, 2400, 240, 50000, 2700, 0.036599999999999994, 0),
+                         ('2026-05-02', 3, 6900, 690, 30000, 2700, 0.05085, 0),
+                         ('2026-05-03', 3, 8150, 815, 20500, 1850, 0.0504375, 1),
+                         ('2026-05-04', 3, 15900, 1590, 60000, 2700, 0.10035000000000002, 0),
+                         ('2026-05-05', 3, 20400, 2040, 40000, 2700, 0.11460000000000001, 0)]),
+             '/home/ünï/"quo,te"\nnext line': (8,
+                                               [('2026-05-01', 3, 3000, 300, 45000, 0, 0.027000000000000003, 0),
+                                                ('2026-05-02', 3, 7500, 750, 60000, 0, 0.051750000000000004, 0),
+                                                ('2026-05-03', 3, 12000, 1200, 40000, 0, 0.066, 0),
+                                                ('2026-05-04', 3, 11050, 1105, 25500, 50, 0.057562499999999996, 1),
+                                                ('2026-05-05', 3, 21000, 2100, 35000, 0, 0.10500000000000001, 0)])},
+ 'model': {'claude-sonnet-4-6': (8,
+                                 [('2026-05-01', 9, 6150, 615, 130500, 3350, 0.08028749999999998, 1),
+                                  ('2026-05-02', 9, 20700, 2070, 125000, 3600, 0.1455, 0),
+                                  ('2026-05-03', 9, 30950, 3095, 110500, 2750, 0.1840875, 1),
+                                  ('2026-05-04', 9, 42250, 4225, 115500, 3650, 0.2398125, 1),
+                                  ('2026-05-05', 9, 54650, 5465, 105500, 3350, 0.2914875, 1)]),
+           'claude-haiku-4-5': (8,
+                                [('2026-05-01', 6, 4800, 480, 65000, 5400, 0.0209, 0),
+                                 ('2026-05-02', 6, 11650, 1165, 90500, 4850, 0.0329625, 1),
+                                 ('2026-05-03', 6, 18450, 1845, 80500, 4250, 0.0413375, 1),
+                                 ('2026-05-04', 6, 31800, 3180, 85000, 5400, 0.0634, 0),
+                                 ('2026-05-05', 6, 40800, 4080, 115000, 5400, 0.0799, 0)])}}
+
+_HOURLY_BY_WANT = {'project': {'/p/one': (24,
+                        [('2026-05-03T00:00:00+00:00', 2, 6300, 630, 35000, 900, 0.027499999999999997),
+                         ('2026-05-03T13:00:00+00:00', 2, 7300, 730, 15000, 900, 0.0262),
+                         ('2026-05-03T23:00:00+00:00', 2, 8300, 830, 30000, 900, 0.036075)]),
+             '/home/ünï/"quo,te"\nnext line': (24,
+                                               [('2026-05-03T00:00:00+00:00', 1, 3500, 350, 0, 0, 0.01575),
+                                                ('2026-05-03T13:00:00+00:00',
+                                                 1,
+                                                 4000,
+                                                 400,
+                                                 25000,
+                                                 0,
+                                                 0.025500000000000002),
+                                                ('2026-05-03T23:00:00+00:00', 1, 4500, 450, 15000, 0, 0.02475)]),
+             '/p/two': (24,
+                        [('2026-05-03T00:00:00+00:00', 1, 50, 5, 500, 50, 0.0005625000000000001),
+                         ('2026-05-03T13:00:00+00:00', 1, 3800, 380, 15000, 900, 0.025425000000000003),
+                         ('2026-05-03T23:00:00+00:00', 1, 4300, 430, 5000, 900, 0.02445)])},
+ 'model': {'claude-sonnet-4-6': (24,
+                                 [('2026-05-03T00:00:00+00:00', 3, 6650, 665, 15500, 350, 0.0361125),
+                                  ('2026-05-03T13:00:00+00:00', 3, 11400, 1140, 45000, 1200, 0.06975),
+                                  ('2026-05-03T23:00:00+00:00', 3, 12900, 1290, 50000, 1200, 0.078225)]),
+           'claude-haiku-4-5': (24,
+                                [('2026-05-03T00:00:00+00:00', 2, 6600, 660, 50000, 1800, 0.017375),
+                                 ('2026-05-03T13:00:00+00:00', 2, 7600, 760, 30000, 1800, 0.016725),
+                                 ('2026-05-03T23:00:00+00:00', 2, 4250, 425, 500, 650, 0.0072375)])}}
+
+_BUCKET_WANT = {'project': {'/p/one': (99600,
+                        9960,
+                        395000,
+                        12300,
+                        0.1922000000000001,
+                        0.09610000000000005,
+                        0.07550000000000001,
+                        0.029100000000000008,
+                        0.3928999999999999),
+             '/p/two': (53700, 5370, 200000, 12600, 0.1611, 0.08055, 0.06, 0.05062500000000001, 0.352275),
+             '(unknown)': (54100,
+                           5410,
+                           220000,
+                           16800,
+                           0.05410000000000001,
+                           0.027050000000000005,
+                           0.022,
+                           0.021974999999999998,
+                           0.12512500000000001),
+             '/home/ünï/"quo,te"\nnext line': (54500,
+                                               5450,
+                                               205000,
+                                               0,
+                                               0.1635,
+                                               0.08175,
+                                               0.0615,
+                                               0.0,
+                                               0.30674999999999997)},
+ 'model': {'claude-sonnet-4-6': (127700,
+                                 12770,
+                                 330000,
+                                 9600,
+                                 0.3831000000000001,
+                                 0.19155000000000005,
+                                 0.09900000000000003,
+                                 0.04005,
+                                 0.7137000000000001),
+           'claude-haiku-4-5': (91000,
+                                9100,
+                                280000,
+                                15000,
+                                0.09100000000000001,
+                                0.045500000000000006,
+                                0.027999999999999997,
+                                0.01995,
+                                0.18445000000000003)}}
+
+_TOOLS_WANT = {'prorata': {'Bash': (0.055645, 24, '2026-05-05T23:15:00+00:00'),
+             'Edit': (0.037425, None, None),
+             'Read': (0.021585, 11, '2026-05-05T23:12:00+00:00'),
+             'mcp__sé,rver__"do\nit"': (0.0107925, None, None),
+             '__unattributed__': (1.04081, None, None)},
+ 'excl-cache-read': {'Bash': (0.045720000000000004, 24, '2026-05-05T23:15:00+00:00'),
+                     'Edit': (0.03285, None, None),
+                     'Read': (0.017384999999999998, 11, '2026-05-05T23:12:00+00:00'),
+                     'mcp__sé,rver__"do\nit"': (0.008692499999999999, None, None),
+                     '__unattributed__': (1.06371, None, None)},
+ 'prorata-since': {'Bash': (0.039607500000000004, 14, '2026-05-05T23:15:00+00:00'),
+                   'Edit': (0.0303225, None, None),
+                   'Read': (0.014750000000000001, 6, '2026-05-05T23:12:00+00:00'),
+                   'mcp__sé,rver__"do\nit"': (0.0073750000000000005, None, None),
+                   '__unattributed__': (0.7987200000000001, None, None)}}
+
+_SKILL_TOTALS_WANT = {'all': (1.1770500000000004, 288090.0, 59950.0), 'since': (0.89815, 240570.0, 48400.0)}
+
+_BILLABLE_WANT = {'all': (256212.0, 288090.0), 'since': (215082.0, 240570.0)}
+
+
 class Fixture:
     def __init__(self) -> None:
         self.turns = _build_turns()
@@ -121,7 +248,7 @@ class Fixture:
             Session(i.session_id, i.source_file, i.is_sidechain, i.cwd, [t for t in self.turns if t.session_id == i.session_id])
             for i in infos
         ]
-        self.cwd_by_sid = _grouped_cwd_by_sid(self.sessions)
+        self.cwd_by_sid = grouped_project_cwds(self.sessions)
         self.engine = UsageEngine.open(None)
         self.engine.add_turns(self.turns, infos)
         with self.engine.cursor() as cur:
@@ -177,40 +304,33 @@ def _close(got, want, path: str = "") -> None:
         assert got == want, path
 
 
-def _series(fx: Fixture, project: str, model: str, turns: list[Turn], points_fn) -> dict[str, list]:
-    return {s["label"]: s["points"] for s in _build_series(turns, fx.cwd_by_sid, project, model, points_fn)}
+def _rows(rollups: list, label_attr: str) -> list[tuple]:
+    """The non-empty buckets of a filled series, in the frozen literals' shape."""
+    return [
+        (getattr(r, label_attr).isoformat(), *dataclasses.astuple(r)[1:]) for r in rollups if r.turns
+    ]
 
 
 def _daily_by(fx: Fixture, key: GroupKey, fill_until: date):
-    f = TurnFilter(until=fill_until)
     since = FIRST_DAY - timedelta(days=1)
+    want = _DAILY_BY_WANT[key.value]
     names = fx.q.top_keys_by_cost(TurnFilter(), key, 8)
-    got = fx.q.daily_by(f, key, since, fill_until)
-    project, model = ("compare", "all") if key is GroupKey.PROJECT else ("all", "compare")
-    want = _series(fx, project, model, fx.turns, lambda sub: rollup_by_date(sub, since, fill_until))
-    assert names == list(want)  # same top-8 order as the compare mode ranks
-    return {name: got[name] for name in names}, want
+    assert names == list(want)  # the top-8 order compare mode ranks by
+    got = fx.q.daily_by(TurnFilter(until=fill_until), key, since, fill_until)
+    return {name: (len(got[name]), _rows(got[name], "date")) for name in names}, want
 
 
 def _hourly_by(fx: Fixture, key: GroupKey, day: date):
     got = fx.q.hourly_by(TurnFilter(), key, day, True)
-    day_turns = fx.pick(since=day, until=day)
-    project, model = ("compare", "all") if key is GroupKey.PROJECT else ("all", "compare")
-    want = _series(fx, project, model, day_turns, lambda sub: rollup_by_hour(sub, day, True))
-    return {name: got[name] for name in want}, want
+    want = _HOURLY_BY_WANT[key.value]
+    return {name: (len(got[name]), _rows(got[name], "hour")) for name in want}, want
 
 
 def _bucket_want(fx: Fixture, key: GroupKey, since: date | None):
-    key_fn = (
-        (lambda s, _t: fx.cwd_by_sid.get(s.session_id, "(unknown)"))
-        if key is GroupKey.PROJECT
-        else (lambda _s, t: t.model or "(unknown)")
-    )
-    names = ("input", "output", "cache_read", "cache_creation", "input_cost", "output_cost",
-             "cache_read_cost", "cache_creation_cost", "total_cost")
-    want = {k: {n: v[n] for n in names} for k, v in _bucket_turns(fx.sessions, since, key_fn).items()}
     got = fx.q.bucket(TurnFilter(since=since, interrupted=EXCLUDE), key)
-    return {k: {n: getattr(b, n) for n in names} for k, b in got.items()}, want
+    fields = ("input", "output", "cache_read", "cache_creation", "input_cost", "output_cost",
+              "cache_read_cost", "cache_creation_cost", "total_cost")
+    return {k: tuple(getattr(b, n) for n in fields) for k, b in got.items()}, _BUCKET_WANT[key.value]
 
 
 def _totals(fx: Fixture, since: date | None):
@@ -240,19 +360,14 @@ def _components(fx: Fixture):
     return {d: dataclasses.astuple(c) for d, c in got.items()}, want
 
 
-def _breakdown_tools(fx: Fixture, mode: AttributionMode, since: date | None):
-    f = TurnFilter(since=since, interrupted=EXCLUDE)
-    rows = build_breakdown_tools(fx.pick(since=since, policy=EXCLUDE), mode=mode.value)
-    assert len(rows) <= TOP_TOOLS, "fixture must stay below the top-10 cut"
-    got = fx.q.tool_costs(f, mode)
-    want = {r["name"]: (r["cost_usd"], r.get("count"), r.get("last_active")) for r in rows[:-1]}
+def _breakdown_tools(fx: Fixture, mode: AttributionMode, since: date | None, case: str):
+    got = fx.q.tool_costs(TurnFilter(since=since, interrupted=EXCLUDE), mode)
     mine = {
         name: (cost, got.calls_by_tool.get(name), got.last_active[name].isoformat() if name in got.last_active else None)
         for name, cost in got.cost_by_tool.items()
     }
     mine[UNATTRIBUTED_TOOL] = (got.unattributed_usd, None, None)
-    want[UNATTRIBUTED_TOOL] = (rows[-1]["cost_usd"], None, None)
-    return mine, want
+    return mine, _TOOLS_WANT[case]
 
 
 def _tool_accumulate(fx: Fixture):
@@ -297,17 +412,12 @@ def _tool_detail(fx: Fixture, tool: str):
     return mine, want
 
 
-def _skills(fx: Fixture, since: date | None):
-    f = TurnFilter(since=since, interrupted=EXCLUDE)
-    turns = fx.pick(since=since, policy=EXCLUDE)
-    cost, invs, last = _accumulate_skill_costs(turns)
-    breakdown = build_skill_breakdown(turns)
-    got = fx.q.skill_costs(f)
+def _skills(fx: Fixture, since: date | None, case: str):
+    cost, invs, last = _accumulate_skill_costs(fx.pick(since=since, policy=EXCLUDE))
+    got = fx.q.skill_costs(TurnFilter(since=since, interrupted=EXCLUDE))
     mine = (got.cost_by_skill, got.invocations_by_skill, got.last_active,
             got.total_cost, got.total_billable_tokens, got.skill_billable_tokens)
-    want = (dict(cost), dict(invs), last, breakdown["total_cost"],
-            breakdown["total_billable_tokens"], breakdown["skill_billable_tokens"])
-    return mine, want
+    return mine, (dict(cost), dict(invs), last, *_SKILL_TOTALS_WANT[case])
 
 
 # Frozen from the Python `_build_recent_activity` before it was converted to read the engine
@@ -376,9 +486,9 @@ def _cases(fx: Fixture) -> dict[str, Callable[[], tuple]]:
         "totals": lambda: _totals(fx, None),
         "totals-since": lambda: _totals(fx, mid),
         "cost-components-by-date": lambda: _components(fx),
-        "tools-prorata": lambda: _breakdown_tools(fx, AttributionMode.PRORATA, None),
-        "tools-excl-cache-read": lambda: _breakdown_tools(fx, AttributionMode.EXCL_CACHE_READ, None),
-        "tools-prorata-since": lambda: _breakdown_tools(fx, AttributionMode.PRORATA, mid),
+        "tools-prorata": lambda: _breakdown_tools(fx, AttributionMode.PRORATA, None, "prorata"),
+        "tools-excl-cache-read": lambda: _breakdown_tools(fx, AttributionMode.EXCL_CACHE_READ, None, "excl-cache-read"),
+        "tools-prorata-since": lambda: _breakdown_tools(fx, AttributionMode.PRORATA, mid, "prorata-since"),
         "tools-accumulate-includes-interrupted": lambda: _tool_accumulate(fx),
         "tool-detail-bash": lambda: _tool_detail(fx, "Bash"),
         "tool-detail-no-cost-entry": lambda: _tool_detail(fx, "Grep"),
@@ -387,19 +497,19 @@ def _cases(fx: Fixture) -> dict[str, Callable[[], tuple]]:
             fx.q.tool_cost_daily(TurnFilter(interrupted=EXCLUDE), "Bash", today=LAST_DAY),
             build_tool_cost_daily(fx.pick(), tool_name="Bash", today=LAST_DAY),
         ),
-        "skills": lambda: _skills(fx, None),
-        "skills-since": lambda: _skills(fx, mid),
+        "skills": lambda: _skills(fx, None, "all"),
+        "skills-since": lambda: _skills(fx, mid, "since"),
         "skill-cost-daily": lambda: (
             fx.q.skill_cost_daily(TurnFilter(interrupted=EXCLUDE), SKILL, today=LAST_DAY),
             build_skill_cost_daily(fx.pick(), skill_name=SKILL, today=LAST_DAY),
         ),
         "billable-totals": lambda: (
             fx.q.billable_totals(TurnFilter(interrupted=EXCLUDE)),
-            billable_token_totals(fx.turns),
+            _BILLABLE_WANT["all"],
         ),
         "billable-totals-since": lambda: (
             fx.q.billable_totals(TurnFilter(since=mid, interrupted=EXCLUDE)),
-            billable_token_totals(fx.pick(since=mid)),
+            _BILLABLE_WANT["since"],
         ),
         "latest-turn-per-project": lambda: _recent(fx),
         "distinct-models": lambda: (

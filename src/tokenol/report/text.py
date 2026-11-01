@@ -10,6 +10,7 @@ from rich.table import Table
 
 from tokenol import assumptions as assumption_recorder
 from tokenol.enums import BlowUpVerdict
+from tokenol.metrics.context import tool_error_rate
 from tokenol.metrics.cost import DailyRollup, HourlyRollup
 from tokenol.metrics.rollups import ModelRollup, ProjectRollup, SessionRollup
 from tokenol.metrics.windows import Window
@@ -318,7 +319,8 @@ def print_models(
     tbl.add_column("Tool-error %", justify="right")
 
     for mr in rollups:
-        tool_err_pct = f"{mr.tool_error_count / mr.tool_use_count * 100:.1f}%" if mr.tool_use_count > 0 else "—"
+        err_rate = tool_error_rate(mr.tool_error_count, mr.tool_use_count)
+        tool_err_pct = f"{err_rate * 100:.1f}%" if err_rate is not None else "—"
         tbl.add_row(
             _fmt_model(mr.model),
             str(mr.turns),

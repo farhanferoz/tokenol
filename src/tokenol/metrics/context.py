@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable, Mapping
+from typing import TypeVar
+
 from tokenol.model.events import Turn
+
+_K = TypeVar("_K", bound=Hashable)
 
 
 def context_tokens(turn: Turn) -> int:
@@ -65,6 +70,23 @@ def cost_per_kw(cost_usd: float, output_tokens: int) -> float | None:
     if output_tokens <= 0:
         return None
     return cost_usd * 1000.0 / output_tokens
+
+
+def tool_error_rate(errors: int, uses: int) -> float | None:
+    """Failed tool calls as a fraction of all tool calls. Returns None when there were no calls."""
+    if uses <= 0:
+        return None
+    return errors / uses
+
+
+def cost_share(costs: Mapping[_K, float]) -> dict[_K, float]:
+    """Each key's share of the summed cost, in the mapping's order.
+
+    The denominator is floored at 1.0 when the sum is 0, so an all-free set gives
+    zero shares instead of a division by zero.
+    """
+    total = sum(costs.values()) or 1.0
+    return {key: cost / total for key, cost in costs.items()}
 
 
 def ctx_used_latest(latest_turn: Turn, model_context_window: int | None) -> float | None:

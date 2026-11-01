@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tokenol.engine.queries import SkillCosts
 from tokenol.ingest.builder import build_turns
 from tokenol.ingest.parser import _extract_skill_names, _is_real_skill_name
 from tokenol.metrics.rollups import build_skill_cost_daily
@@ -11,9 +12,7 @@ from tokenol.model.events import EMPTY_SKILL_NAMES, RawEvent, Session, ToolCost,
 from tokenol.serve.state import (
     _accumulate_skill_costs,
     _accumulate_tool_costs,
-    billable_token_totals,
     build_breakdown_skills,
-    build_breakdown_tools,
     build_skill_breakdown,
     build_skill_detail,
     derive_delta_turns,
@@ -141,25 +140,6 @@ def test_build_skill_detail_splits_inline_vs_subagent():
 
 def test_build_skill_detail_unknown_returns_none():
     assert build_skill_detail("nope", [], []) is None
-
-
-def test_tool_mix_excludes_literal_skill_row():
-    t = Turn(
-        dedup_key="k",
-        timestamp=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
-        session_id="s",
-        model="claude-opus-4-8",
-        usage=Usage(input_tokens=1000, output_tokens=100),
-        is_sidechain=False,
-        stop_reason="tool_use",
-    )
-    t.cost_usd = 0.10
-    t.tool_names = Counter({"Skill": 1, "Read": 2})
-    t.tool_costs = {"Skill": ToolCost("Skill", cost_usd=0.02), "Read": ToolCost("Read", cost_usd=0.05)}
-    rows = build_breakdown_tools([t])
-    names = {r["name"] for r in rows}
-    assert "Skill" not in names
-    assert "Read" in names
 
 
 def test_accumulate_skill_costs_groups_turns():
@@ -311,52 +291,15 @@ def test_model_price_status_classifies_pricing_confidence():
     assert model_price_status("(unknown)") == "unpriced"
 
 
-def test_billable_token_totals_scales_input_share_off_the_cache_pool():
-    # input 1000 (+1000 cache read), output 200. A tool took half the visible
-    # bytes, so the stored non-tool share over the input+cache pool is
-    # 0.5*(1000+1000)=1000, and non-tool output is 0.5*200=100.
-    t = Turn(
-        dedup_key="k",
-        timestamp=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
-        session_id="s",
-        model="claude-opus-4-8",
-        usage=Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=1000, cache_creation_input_tokens=0),
-        is_sidechain=False,
-        stop_reason=None,
-    )
-    t.unattributed_input_tokens = 1000.0
-    t.unattributed_output_tokens = 100.0
-    non_tool, total = billable_token_totals([t])
-    assert total == 1200  # input + output only, cache excluded
-    # non-tool input fraction = 1000/2000 = 0.5 -> 0.5*1000 = 500; + 100 output
-    assert non_tool == 600.0
-
-
-def test_build_skill_breakdown_matches_separate_builders_in_one_pass():
-    # Same results as calling the individual builders, but consolidated.
-    turns = [
-        _turn("tiered-review", 4.0, out=2000, skill_names={"tiered-review": 1}),
-        _turn(None, 1.0, out=500, skill_names={"brainstorming": 2}),  # uncharged
-        _turn("simplify", 0.9, out=300),
-    ]
-    p = build_skill_breakdown(turns)
-    assert p["skills"] == build_breakdown_skills(turns)
-    assert p["total_cost"] == 4.0 + 1.0 + 0.9
-    # _turn sets Usage(output_tokens=out), input defaults 0 -> billable = output.
-    assert p["total_billable_tokens"] == 2000 + 500 + 300
-    assert p["skill_billable_tokens"] == 2000 + 300  # attributed turns only
-
-
 def test_skill_breakdown_counts_started_but_uncharged_skills():
-    turns = [
-        _turn("tiered-review", 4.0, skill_names={"tiered-review": 1}),  # charged + started
-        _turn(None, 0.0, skill_names={"brainstorming": 2}),  # started, no charge
-        _turn("simplify", 0.9),  # charged, not started
-    ]
+    when = datetime(2026, 6, 10, 12, tzinfo=timezone.utc)
+
+    def breakdown(cost_by_skill, invocations_by_skill):
+        costs = SkillCosts(cost_by_skill, invocations_by_skill, dict.fromkeys(cost_by_skill, when), 0.0, 0.0, 0.0)
+        return build_skill_breakdown(costs)
+
     # Only brainstorming was started without any cost billed to it.
-    assert build_skill_breakdown(turns)["invoked_no_cost"] == {"skills": 1, "uses": 2}
+    started = breakdown({"tiered-review": 4.0, "simplify": 0.9}, {"tiered-review": 1, "brainstorming": 2})
+    assert started["invoked_no_cost"] == {"skills": 1, "uses": 2}
     # No invocations at all -> zeros.
-    assert build_skill_breakdown([_turn("simplify", 0.9)])["invoked_no_cost"] == {
-        "skills": 0,
-        "uses": 0,
-    }
+    assert breakdown({"simplify": 0.9}, {})["invoked_no_cost"] == {"skills": 0, "uses": 0}

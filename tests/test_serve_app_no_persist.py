@@ -52,7 +52,6 @@ def test_default_reports_an_unreadable_store_without_failing_startup(tmp_path, m
     app = create_app(ServerConfig())
     captured = capsys.readouterr()
     assert "could not be read" in captured.err.replace("\n", "")
-    assert app.state.warm_store is None
     assert app.state.history_store is None
 
 

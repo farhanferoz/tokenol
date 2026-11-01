@@ -11,10 +11,12 @@ from tokenol.metrics.context import (
     context_growth_rate,
     context_tokens,
     cost_per_kw,
+    cost_share,
     ctx_ratio_n_to_1,
     ctx_used_latest,
     max_turn_input,
     non_cached_input_ratio,
+    tool_error_rate,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -113,9 +115,11 @@ def test_cache_reuse_zero_reads():
 # ---- cost_per_kw -------------------------------------------------------
 
 
-def test_cost_per_kw_none_when_output_zero():
+def test_zero_denominators_never_divide():
     assert cost_per_kw(0.0, 0) is None
     assert cost_per_kw(1.0, 0) is None
+    assert tool_error_rate(0, 0) is None  # no tool calls: no rate, not 0 %
+    assert cost_share({"a": 0.0, "b": 0.0}) == {"a": 0.0, "b": 0.0}  # an all-free set: zero shares
 
 
 def test_cost_per_kw_basic():

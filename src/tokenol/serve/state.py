@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tokenol.engine.context import UsageContext
+from tokenol.engine.engine import release_free_memory
 from tokenol.engine.filters import (
     UNKNOWN_LABEL,
     GroupKey,
@@ -36,16 +37,16 @@ from tokenol.engine.filters import (
     SearchField,
     TurnFilter,
 )
-from tokenol.engine.queries import BucketTotals, LatestTurn, Totals, UsageQueries
-from tokenol.engine.sessions import (  # noqa: F401  (_GROUPED_CWD_CACHE, is_container_cwd: re-exported for callers and tests; Task 6 removes the alias)
-    _GROUPED_CWD_CACHE,
-    SessionInfo,
-    is_container_cwd,
+from tokenol.engine.queries import (
+    BucketTotals,
+    LatestTurn,
+    SkillCosts,
+    ToolCosts,
+    Totals,
+    UsageQueries,
 )
-from tokenol.engine.sessions import (
-    grouped_project_cwds as _grouped_cwd_by_sid,
-)
-from tokenol.enums import AssumptionTag, AttributionMode, BlowUpVerdict, PriceStatus
+from tokenol.engine.sessions import SessionInfo, grouped_project_cwds
+from tokenol.enums import AssumptionTag, BlowUpVerdict, PriceStatus
 from tokenol.ingest.discovery import find_jsonl_files, get_config_dirs, select_edge_paths
 from tokenol.ingest.parser import (
     SKILL_TOOL,
@@ -65,7 +66,9 @@ from tokenol.metrics.context import (
     cache_hit_rate,
     cache_reuse_n_to_1,
     cost_per_kw,
+    cost_share,
     ctx_ratio_n_to_1,
+    tool_error_rate,
 )
 from tokenol.metrics.cost import (
     DailyRollup,
@@ -467,7 +470,7 @@ def decode_cwd(cwd_b64: str) -> str:
 
 def _session_rollup_to_dict(sr: SessionRollup) -> dict:
     hit = cache_hit_rate(sr.cache_read_tokens, sr.cache_creation_tokens, sr.input_tokens)
-    tool_error_rate = sr.tool_error_count / sr.tool_use_count if sr.tool_use_count > 0 else 0.0
+    error_rate = tool_error_rate(sr.tool_error_count, sr.tool_use_count) or 0.0
 
     return {
         "id": sr.session_id,
@@ -480,7 +483,7 @@ def _session_rollup_to_dict(sr: SessionRollup) -> dict:
         "cwd": sr.cwd or "",
         "context_growth_rate": sr.context_growth_rate_val,
         "cache_hit_rate": hit if hit is not None else 0.0,
-        "tool_error_rate": tool_error_rate,
+        "tool_error_rate": error_rate,
         "cost_per_kw": sr.cost_per_kw_val,
         "ctx_ratio": sr.ctx_ratio_n_to_1,
     }
@@ -537,7 +540,7 @@ def _models_in_window(turns: list[Turn], since: date) -> list[dict]:
                 "output_tokens": mr.output_tokens,
                 "cache_read_tokens": mr.cache_read_tokens,
                 "cache_creation_tokens": mr.cache_creation_tokens,
-                "tool_error_rate": mr.tool_error_count / mr.tool_use_count if mr.tool_use_count > 0 else 0.0,
+                "tool_error_rate": tool_error_rate(mr.tool_error_count, mr.tool_use_count) or 0.0,
                 "sidechain_ratio": sidechain_ratio,
                 "interrupted_turn_rate": interrupted_turn_rate,
                 "cost_breakdown": {
@@ -604,9 +607,9 @@ def _excluding_interrupted(f: TurnFilter) -> TurnFilter:
 def _model_mix(by_model: dict[str, BucketTotals]) -> dict[str, float]:
     """Each model's share of cost, short-named and largest first; the unknown group is left out."""
     model_costs = {m: b.total_cost for m, b in by_model.items() if m != UNKNOWN_LABEL}
-    total_mc = sum(model_costs.values()) or 1.0
+    shares = cost_share(model_costs)
     # Ties by name: the SQL group order is arbitrary, and the mix must not depend on it.
-    return {_short_model(m): c / total_mc for m, c in sorted(model_costs.items(), key=lambda x: (-x[1], x[0]))}
+    return {_short_model(m): shares[m] for m, _cost in sorted(model_costs.items(), key=lambda x: (-x[1], x[0]))}
 
 
 def _build_topbar(queries: UsageQueries, today: date) -> dict:
@@ -785,26 +788,8 @@ def _format_active_entities(cwds: Iterable[str], models: Iterable[str]) -> dict[
     return {"active_projects": projects, "active_models": models_out}
 
 
-def _active_entities(turns: list[Turn], cwd_by_sid: dict[str, str]) -> dict[str, list[dict]]:
-    """Distinct cwds and models active across *turns*, formatted for a UI dropdown.
-
-    Excludes the '(unknown)' cwd (turns whose session isn't indexed) — compare views
-    treat those as noise. Used by the hourly and daily panels until Task 6 moves them
-    to ``_engine_active_entities``.
-    """
-    cwds: set[str] = set()
-    models: list[str] = []
-    for t in turns:
-        cwd = cwd_by_sid.get(t.session_id, UNKNOWN_LABEL)
-        if cwd != UNKNOWN_LABEL:
-            cwds.add(cwd)
-        if t.model:
-            models.append(t.model)
-    return _format_active_entities(cwds, models)
-
-
 def _engine_active_entities(queries: UsageQueries, f: TurnFilter) -> dict[str, list[dict]]:
-    """``_active_entities`` over the engine: the filter's projects (never the unknown one) and models.
+    """The filter's distinct projects (never the unknown one) and models, formatted for a UI dropdown.
 
     Models come sorted, so a short name shared by two full ids takes the alphabetically first id.
     """
@@ -868,7 +853,7 @@ def _models_payload(rollups: list[ModelRollup], range_label: str) -> dict:
                 "cost_per_kw": mr.cost_per_kw_val,
                 "ctx_ratio": mr.ctx_ratio_n_to_1,
                 "cache_reuse": mr.cache_reuse_n_to_1,
-                "tool_error_rate": mr.tool_error_count / mr.tool_use_count if mr.tool_use_count > 0 else None,
+                "tool_error_rate": tool_error_rate(mr.tool_error_count, mr.tool_use_count),
                 "input_usd": mr.input_usd,
                 "output_usd": mr.output_usd,
                 "cache_read_usd": mr.cache_read_usd,
@@ -1205,6 +1190,14 @@ def build_snapshot_full(
         "estimated_models": estimated_models(queries.distinct_values(SearchField.MODEL, TurnFilter())),
     }
 
+    # Each build leaves the allocator holding the memory its queries used. On the real store RSS
+    # climbed 587 -> 915 MB over 16 builds and reached ~970 MB over 50, and malloc_trim returned
+    # it to ~450 MB. Trimming after every build holds RSS at 380-420 MB over 50 builds for a median
+    # 11-13 ms against a 215 ms build; capping the arenas instead (mallopt) left 499 MB and slowed
+    # builds by 60 %.
+    before, after = release_free_memory()
+    log.debug("snapshot build trimmed the heap: RSS %s -> %s bytes", before, after)
+
     return SnapshotResult(payload=payload)
 
 
@@ -1280,15 +1273,8 @@ def _cwd_basename(cwd: str) -> str:
 
 
 _COMPARE_TOP_N = 8
-
-
-def _top_n_by_cost(
-    buckets: dict[str, list[Turn]],
-    n: int = _COMPARE_TOP_N,
-) -> list[tuple[str, list[Turn]]]:
-    """Return the N buckets with the highest summed cost, sorted cost-desc."""
-    by_cost = sorted(buckets.items(), key=lambda kv: -sum(t.cost_usd for t in kv[1]))
-    return by_cost[:n]
+# Tools and skills ranked past this many collapse into one 'other' row.
+_BREAKDOWN_TOP_N = 10
 
 
 def _parse_filter(param: str) -> str | list[str]:
@@ -1302,122 +1288,112 @@ def _parse_filter(param: str) -> str | list[str]:
     return [s.strip() for s in param.split(",") if s.strip()]
 
 
+def _is_compare(spec: str | list[str]) -> bool:
+    return spec == "compare" or (isinstance(spec, list) and len(spec) > 1)
+
+
+def _scoped(f: TurnFilter, key: GroupKey, spec: str | list[str]) -> TurnFilter:
+    """*f* limited, on the *key* dimension, to the explicit values in *spec* (no limit for a sentinel)."""
+    values = tuple(spec) if isinstance(spec, list) else ()
+    return replace(f, projects=values) if key is GroupKey.PROJECT else replace(f, models=values)
+
+
 def _build_series(
-    turns: list[Turn],
-    cwd_by_sid: dict[str, str],
+    queries: UsageQueries,
+    base: TurnFilter,
+    points: TurnFilter,
     project: str,
     model: str,
-    points_fn: Callable[[list[Turn]], list[dict]],
+    points_fn: Callable[[TurnFilter], list[dict]],
 ) -> list[dict]:
     """Build series list for timeline endpoints.
 
     project/model may each be: 'all', 'compare' (top-N by cost), a single value, or
     a comma-separated list of values (explicit compare). The "(unknown)" cwd is
     dropped from compare results.
+
+    *base* is the set compare mode ranks and explicit lists are checked against (the
+    series a chart can offer); *points* is the set each series' points cover, and may
+    be narrower. A ranked or listed label with no turn in *points* still gets its
+    series, all zeros, from *points_fn* over that empty selection.
     """
-    p = _parse_filter(project)
-    m = _parse_filter(model)
+    spec = {GroupKey.PROJECT: _parse_filter(project), GroupKey.MODEL: _parse_filter(model)}
+    for key, other in ((GroupKey.PROJECT, GroupKey.MODEL), (GroupKey.MODEL, GroupKey.PROJECT)):
+        if not _is_compare(spec[key]):
+            continue
+        # The other dimension's explicit list narrows what is ranked and what is plotted.
+        ranked_over = _scoped(base, other, spec[other])
+        if spec[key] == "compare":
+            labels = queries.top_keys_by_cost(ranked_over, key, _COMPARE_TOP_N)
+        else:
+            # Explicit list: keep the user's order, skip silently entries with no turns.
+            listed = spec[key]
+            present = set(queries.top_keys_by_cost(_scoped(ranked_over, key, listed), key, len(listed)))
+            labels = [value for value in listed if value in present]
+        plotted = _scoped(points, other, spec[other])
+        return [{"label": label, "points": points_fn(_scoped(plotted, key, [label]))} for label in labels]
 
-    p_is_compare = p == "compare" or (isinstance(p, list) and len(p) > 1)
-    m_is_compare = m == "compare" or (isinstance(m, list) and len(m) > 1)
-
-    if p_is_compare:
-        by_cwd: defaultdict[str, list[Turn]] = defaultdict(list)
-        for t in turns:
-            cwd = cwd_by_sid.get(t.session_id, "(unknown)")
-            if cwd == "(unknown)":
-                continue
-            if isinstance(p, list) and cwd not in p:
-                continue
-            if isinstance(m, list) and t.model not in m:
-                continue
-            by_cwd[cwd].append(t)
-        if p == "compare":
-            return [{"label": cwd, "points": points_fn(sub)} for cwd, sub in _top_n_by_cost(by_cwd)]
-        # Explicit list: preserve user-supplied order, skip silently missing entries.
-        return [{"label": cwd, "points": points_fn(by_cwd[cwd])} for cwd in p if cwd in by_cwd]
-
-    if m_is_compare:
-        by_model: defaultdict[str, list[Turn]] = defaultdict(list)
-        for t in turns:
-            if not t.model:
-                continue
-            if isinstance(p, list) and cwd_by_sid.get(t.session_id, "(unknown)") not in p:
-                continue
-            if isinstance(m, list) and t.model not in m:
-                continue
-            by_model[t.model].append(t)
-        if m == "compare":
-            return [{"label": name, "points": points_fn(sub)} for name, sub in _top_n_by_cost(by_model)]
-        return [{"label": name, "points": points_fn(by_model[name])} for name in m if name in by_model]
-
-    # Single-filter or all/all mode. p and m are either 'all' or a length-1 list here.
-    filtered = turns
-    if isinstance(p, list):
-        filtered = [t for t in filtered if cwd_by_sid.get(t.session_id, "(unknown)") == p[0]]
-    if isinstance(m, list):
-        filtered = [t for t in filtered if t.model == m[0]]
+    # Single-filter or all/all mode. project and model are either 'all' or a length-1 list here.
+    plotted = _scoped(_scoped(points, GroupKey.PROJECT, spec[GroupKey.PROJECT]), GroupKey.MODEL, spec[GroupKey.MODEL])
+    p, m = spec[GroupKey.PROJECT], spec[GroupKey.MODEL]
     label = p[0] if isinstance(p, list) else (m[0] if isinstance(m, list) else "all")
-    return [{"label": label, "points": points_fn(filtered)}]
+    return [{"label": label, "points": points_fn(plotted)}]
 
 
 def build_hourly_panel(
+    queries: UsageQueries,
     target_date: date,
-    turns: list[Turn],
-    sessions: list[Session],
     metric: str = "hit_pct",
     project: str = "all",
     model: str = "all",
 ) -> dict:
-    cwd_by_sid = _grouped_cwd_by_sid(sessions)
-    date_turns = [t for t in turns if t.timestamp.date() == target_date]
+    day = TurnFilter(since=target_date, until=target_date)
 
-    def _points(sub: list[Turn]) -> list[dict]:
-        return [{"hour": r.hour.isoformat(), "value": _extract_metric(r, metric), "turns": r.turns} for r in rollup_by_hour(sub, target_date=target_date, fill_day=True)]
+    def _points(f: TurnFilter) -> list[dict]:
+        return [
+            {"hour": r.hour.isoformat(), "value": _extract_metric(r, metric), "turns": r.turns}
+            for r in queries.hourly(f, target_date=target_date, fill_day=True)
+        ]
 
     return {
         "date": str(target_date),
         "metric": metric,
         "y_unit": _METRIC_Y_UNIT.get(metric, "unknown"),
-        "series": _build_series(date_turns, cwd_by_sid, project, model, _points),
-        **_active_entities(date_turns, cwd_by_sid),
+        "series": _build_series(queries, day, day, project, model, _points),
+        **_engine_active_entities(queries, day),
     }
 
 
 def build_daily_panel(
-    turns: list[Turn],
-    sessions: list[Session],
+    queries: UsageQueries,
     range_str: str,
     metric: str = "hit_pct",
     project: str = "all",
     model: str = "all",
     today_date: date | None = None,
-    earliest_hint: date | None = None,
 ) -> dict:
-    """*earliest_hint* is the oldest date of turns held but not passed in (the warm
-    tier, when the caller left its turns out); it only moves `earliest_available`."""
     today_date = today_date or date.today()
     since = range_since(range_str, today_date)
-    cwd_by_sid = _grouped_cwd_by_sid(sessions)
-    earliest_date = min((t.timestamp.date() for t in turns), default=today_date)
-    if earliest_hint is not None:
-        earliest_date = min(earliest_date, earliest_hint)
-    earliest = str(earliest_date)
+    earliest_date = queries.earliest_date(TurnFilter()) or today_date
     # For range=all, anchor zero-fill at the earliest active day so step-plot gaps
     # render as broken lines instead of last-value-extending across inactive stretches.
     fill_since = since if since is not None else earliest_date
 
-    def _points(sub: list[Turn]) -> list[dict]:
-        return [{"date": str(r.date), "value": _extract_metric(r, metric), "turns": r.turns} for r in rollup_by_date(sub, since=fill_since, until=today_date)]
+    def _points(f: TurnFilter) -> list[dict]:
+        return [
+            {"date": str(r.date), "value": _extract_metric(r, metric), "turns": r.turns}
+            for r in queries.daily(f, fill_since=fill_since, fill_until=today_date)
+        ]
 
-    range_turns = [t for t in turns if t.timestamp.date() >= fill_since]
     return {
         "range": range_str,
         "metric": metric,
         "y_unit": _METRIC_Y_UNIT.get(metric, "unknown"),
-        "earliest_available": earliest,
-        "series": _build_series(turns, cwd_by_sid, project, model, _points),
-        **_active_entities(range_turns, cwd_by_sid),
+        "earliest_available": str(earliest_date),
+        "series": _build_series(
+            queries, TurnFilter(), TurnFilter(since=fill_since, until=today_date), project, model, _points
+        ),
+        **_engine_active_entities(queries, TurnFilter(since=fill_since)),
     }
 
 
@@ -1441,7 +1417,7 @@ def build_model_detail(
     rollups = build_model_rollups(model_turns)
     mr = rollups[0] if rollups else None
 
-    cwd_by_sid = _grouped_cwd_by_sid(sessions)
+    cwd_by_sid = grouped_project_cwds(sessions)
     proj_costs: defaultdict[str, float] = defaultdict(float)
     proj_turn_counts: defaultdict[str, int] = defaultdict(int)
     proj_last_turn: dict[str, Turn] = {}
@@ -1532,82 +1508,36 @@ def _recompute_excl_cache_read(
     return out
 
 
-def build_breakdown_tools(
-    turns: list[Turn],
-    *,
-    mode: str = AttributionMode.PRORATA.value,
-) -> list[dict]:
+def build_breakdown_tools(tool_costs: ToolCosts) -> list[dict]:
     """Build the ranked tool list for GET /api/breakdown/tools.
 
-    Walks *turns* once, accumulating per-tool cost, invocation counts, and
-    last-active timestamps. The `mode` parameter selects which attribution
-    formula computes the per-tool cost contribution:
-
-    - ``AttributionMode.PRORATA`` (default) — sums the stored ``tc.cost_usd``;
-      residual is ``t.unattributed_cost_usd`` plus any ``UNKNOWN_TOOL`` slice.
-    - ``AttributionMode.EXCL_CACHE_READ`` — recomputes per-tool cost via
-      ``_recompute_excl_cache_read``; residual is
-      ``turn_total_usd - sum(real_tool_cost)``.
-
-    Returns the ranked tools list (top-10 + 'other' tail + ``__unattributed__``
-    row). The caller wraps it in the response envelope.
+    *tool_costs* holds the per-tool cost in the requested attribution mode, the call
+    counts, last-active times and the residual no tool accounts for (the engine
+    computes all of it). This ranks them: top-N tools by cost, an 'other' row for the
+    tail, then a ``__unattributed__`` row. The caller wraps it in the response envelope.
     """
-    cost_by_tool: dict[str, float] = {}
-    tokens_by_tool: Counter[str] = Counter()
-    unattr_cost = 0.0
-    last_active: dict[str, datetime] = {}
-
-    excl = mode == AttributionMode.EXCL_CACHE_READ.value
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        if t.tool_names:
-            # The literal `Skill` tool is the trigger-call byte-share only; its
-            # real cost is owned by the dedicated Skill dimension. Strip it so
-            # the two don't double-read.
-            tokens_by_tool.update({n: c for n, c in t.tool_names.items() if n != SKILL_TOOL})
-
-        if excl:
-            turn_cost = cost_for_turn(t.model, t.usage, at=t.timestamp)
-            per_tool = _recompute_excl_cache_read(t, turn_cost)
-            per_tool.pop(UNKNOWN_TOOL, None)
-            # Clamp at 0 to swallow float drift (~1e-16 from total_usd
-            # subtraction) that would otherwise render as `-$0.00`.
-            residual = max(0.0, turn_cost.total_usd - sum(per_tool.values()))
-        else:
-            per_tool = {n: tc.cost_usd for n, tc in t.tool_costs.items()}
-            residual = t.unattributed_cost_usd + per_tool.pop(UNKNOWN_TOOL, 0.0)
-
-        for name, cost in per_tool.items():
-            if name == SKILL_TOOL:
-                continue  # represented by the dedicated Skill dimension
-            cost_by_tool[name] = cost_by_tool.get(name, 0.0) + cost
-            if name in t.tool_names and (name not in last_active or t.timestamp > last_active[name]):
-                last_active[name] = t.timestamp
-        unattr_cost += residual
-
-    ranked = _rank_dict_with_others(cost_by_tool, top_n=10)
+    ranked = _rank_dict_with_others(tool_costs.cost_by_tool, top_n=_BREAKDOWN_TOP_N)
     head_names = {row["name"] for row in ranked if row["name"] != "other"}
     # The "other" row collapses tail tools — its `count` (used as the bar
     # value in tokens mode) must be the sum of those tools' invocations,
     # not the *number* of collapsed tools. `tool_count` (set inside
     # `_rank_dict_with_others`) preserves the latter for the UI label.
-    tail_call_sum = sum(c for n, c in tokens_by_tool.items() if n not in head_names)
+    tail_call_sum = sum(c for n, c in tool_costs.calls_by_tool.items() if n not in head_names)
     for row in ranked:
         name = row["name"]
         if name == "other":
             row["count"] = tail_call_sum
-        elif name in tokens_by_tool:
-            row["count"] = tokens_by_tool[name]
-        if name in last_active:
-            row["last_active"] = last_active[name].isoformat()
+        elif name in tool_costs.calls_by_tool:
+            row["count"] = tool_costs.calls_by_tool[name]
+        if name in tool_costs.last_active:
+            row["last_active"] = tool_costs.last_active[name].isoformat()
         row["cost_usd"] = row.pop("value")
-    ranked.append({"name": UNATTRIBUTED_TOOL, "cost_usd": unattr_cost})
+    ranked.append({"name": UNATTRIBUTED_TOOL, "cost_usd": tool_costs.unattributed_usd})
 
     return ranked
 
 
-def build_breakdown_skills(turns: list[Turn], top_n: int = 10) -> list[dict]:
+def build_breakdown_skills(turns: list[Turn], top_n: int = _BREAKDOWN_TOP_N) -> list[dict]:
     """Build the ranked skill list for GET /api/breakdown/skills.
 
     Skill cost is turn-level: a turn's full cost_usd is credited to its
@@ -1629,7 +1559,7 @@ def _rank_skill_costs(
     inv_by_skill: dict[str, int],
     last_active: dict[str, datetime],
     *,
-    top_n: int = 10,
+    top_n: int = _BREAKDOWN_TOP_N,
 ) -> list[dict]:
     """Rank pre-accumulated skill costs into the Skill Mix rows (no turn walk)."""
     # Skill Mix ranks by cost, so a skill that was triggered but accrued no
@@ -1652,37 +1582,21 @@ def _rank_skill_costs(
     return ranked
 
 
-def build_skill_breakdown(turns: list[Turn], top_n: int = 10) -> dict:
-    """Full GET /api/breakdown/skills payload in a single pair of turn walks.
+def build_skill_breakdown(skill_costs: SkillCosts, top_n: int = _BREAKDOWN_TOP_N) -> dict:
+    """Full GET /api/breakdown/skills payload from the engine's per-skill sums.
 
-    Ranking the rows, tallying the invoked-but-uncharged skills, and summing
-    cost/billable tokens separately would walk ``turns`` five times and
-    accumulate skills twice. This does one ``_accumulate_skill_costs`` pass
-    (reused for the ranked rows and the invoked-without-cost tally) plus one
-    sweep for the spend/billable-token totals, then derives everything else in
-    O(skills). Returns ``{skills, total_cost, total_billable_tokens,
-    skill_billable_tokens, invoked_no_cost}``.
+    Returns ``{skills, total_cost, total_billable_tokens, skill_billable_tokens,
+    invoked_no_cost}``: the ranked rows, the spend totals, and the skills that were
+    started but had no cost billed to them.
     """
-    cost_by_skill, inv_by_skill, last_active = _accumulate_skill_costs(turns)
-
-    total_cost = 0.0
-    total_billable = 0.0
-    skill_billable = 0.0
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        total_cost += t.cost_usd
-        billable = t.usage.input_tokens + t.usage.output_tokens
-        total_billable += billable
-        if t.attribution_skill:
-            skill_billable += billable
-
     return {
-        "skills": _rank_skill_costs(cost_by_skill, inv_by_skill, last_active, top_n=top_n),
-        "total_cost": total_cost,
-        "total_billable_tokens": total_billable,
-        "skill_billable_tokens": skill_billable,
-        "invoked_no_cost": _invoked_without_cost(cost_by_skill, inv_by_skill),
+        "skills": _rank_skill_costs(
+            skill_costs.cost_by_skill, skill_costs.invocations_by_skill, skill_costs.last_active, top_n=top_n
+        ),
+        "total_cost": skill_costs.total_cost,
+        "total_billable_tokens": skill_costs.total_billable_tokens,
+        "skill_billable_tokens": skill_costs.skill_billable_tokens,
+        "invoked_no_cost": _invoked_without_cost(skill_costs.cost_by_skill, skill_costs.invocations_by_skill),
     }
 
 
@@ -1763,33 +1677,6 @@ def estimated_models(models: Iterable[str]) -> list[dict]:
     return out
 
 
-def billable_token_totals(turns: list[Turn]) -> tuple[float, float]:
-    """``(non_tool_billable, total_billable)`` on the input+output token basis.
-
-    "Billable" matches the rest of the UI: input + output, excluding cache.
-    Output is already billable, so its non-tool slice is ``unattributed_output_tokens``
-    directly. The stored ``unattributed_input_tokens`` is a share of the *input +
-    cache* pool, so we recover the non-tool input *fraction* and apply it to the
-    billable input alone — keeping the token share off the (huge) cache pool.
-
-    The pool divisor here must be the exact one the parser multiplied by when it
-    stored ``unattributed_input_tokens``; both go through ``Usage.input_token_pool``
-    so the round-trip can't drift.
-    """
-    total = 0.0
-    non_tool = 0.0
-    for t in turns:
-        if t.is_interrupted:
-            continue
-        bill_in = t.usage.input_tokens
-        bill_out = t.usage.output_tokens
-        total += bill_in + bill_out
-        input_pool = t.usage.input_token_pool
-        nontool_in_share = (t.unattributed_input_tokens / input_pool) if input_pool > 0 else 0.0
-        non_tool += nontool_in_share * bill_in + t.unattributed_output_tokens
-    return non_tool, total
-
-
 def _invoked_without_cost(
     cost_by_skill: dict[str, float],
     inv_by_skill: dict[str, int],
@@ -1819,7 +1706,7 @@ def build_tool_detail(
     if not tool_turns:
         return None
 
-    cwd_by_sid = _grouped_cwd_by_sid(sessions)
+    cwd_by_sid = grouped_project_cwds(sessions)
 
     total_cost = 0.0
     total_output_tokens = 0.0
@@ -1916,7 +1803,7 @@ def build_skill_detail(
     trigger blocks across all turns. `split` partitions attributed cost into
     inline (main-thread) vs sub-agent (sidechain) — the dimension's headline.
     """
-    cwd_by_sid = _grouped_cwd_by_sid(sessions)
+    cwd_by_sid = grouped_project_cwds(sessions)
     today_utc = datetime.now(tz=timezone.utc).date()
     seven_days_ago_ts = datetime.combine(today_utc - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc)
 
@@ -2043,7 +1930,7 @@ def build_search_results(
     elif q.startswith("cwd:"):
         val = q[4:].strip()
         seen: set[str] = set()
-        cwd_by_sid = _grouped_cwd_by_sid(sessions)
+        cwd_by_sid = grouped_project_cwds(sessions)
         for s in sessions:
             cwd = cwd_by_sid.get(s.session_id, "(unknown)")
             if cwd in seen:
@@ -2174,7 +2061,7 @@ def build_project_detail(
     days_back = _RANGE_DAYS[range_key]
     since = (today_date - timedelta(days=days_back)) if days_back is not None else date.min
 
-    cwd_by_sid = _grouped_cwd_by_sid(all_sessions)
+    cwd_by_sid = grouped_project_cwds(all_sessions)
     project_sessions = [s for s in all_sessions if cwd_by_sid.get(s.session_id) == cwd]
     if not project_sessions:
         return None

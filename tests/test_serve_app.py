@@ -340,7 +340,10 @@ async def test_hourly_active_projects_scoped_to_target_date(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_daily_active_projects_scoped_to_range(tmp_path: Path) -> None:
-    """GET /api/daily?range=7d.active_projects excludes cwds whose only turns are older than 7 days."""
+    """GET /api/daily?range=7d.active_projects excludes cwds whose only turns are older than 7 days.
+
+    Compare mode still ranks over all history and still plots every ranked project: one with
+    no turn in the range gets a zero series, and the order is the all-time cost order."""
     import json
     from datetime import datetime, timedelta, timezone
 
@@ -381,6 +384,12 @@ async def test_daily_active_projects_scoped_to_range(tmp_path: Path) -> None:
     # Spread turns across 10 days to satisfy the 7d range history check.
     for i in range(10):
         (proj / f"sess-recent-{i}.jsonl").write_text(_event(f"sess-recent-{i}", "/home/u/recent", now - timedelta(days=i), f"r{i}"))
+    # Costliest all-time, but 12 of its 13 turns are 15 days old: first in the all-time ranking,
+    # second in the 7-day one.
+    (proj / "sess-heavy.jsonl").write_text(
+        "".join(_event("sess-heavy", "/home/u/heavyold", now - timedelta(days=15), f"h{i}") for i in range(12))
+        + _event("sess-heavy", "/home/u/heavyold", now, "h-today")
+    )
     # Old cwd only has a turn 15 days ago — should not appear for range=7d.
     (proj / "sess-old.jsonl").write_text(
         _event(
@@ -398,15 +407,23 @@ async def test_daily_active_projects_scoped_to_range(tmp_path: Path) -> None:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp_7d = await client.get("/api/daily?range=7d&metric=cost")
             resp_all = await client.get("/api/daily?range=all&metric=cost")
+            resp_compare = await client.get("/api/daily?range=7d&metric=cost&project=compare")
 
     assert resp_7d.status_code == 200
     projects_7d = sorted(p["value"] for p in resp_7d.json()["active_projects"])
-    assert projects_7d == ["/home/u/recent"]
+    assert projects_7d == ["/home/u/heavyold", "/home/u/recent"]
 
     # range=all picks up everything, including the 15-day-old project.
     assert resp_all.status_code == 200
     projects_all = sorted(p["value"] for p in resp_all.json()["active_projects"])
-    assert projects_all == ["/home/u/oldproj", "/home/u/recent"]
+    assert projects_all == ["/home/u/heavyold", "/home/u/oldproj", "/home/u/recent"]
+
+    assert resp_compare.status_code == 200
+    series = {s["label"]: s["points"] for s in resp_compare.json()["series"]}
+    assert list(series) == ["/home/u/heavyold", "/home/u/recent", "/home/u/oldproj"]
+    assert [len(points) for points in series.values()] == [7, 7, 7]
+    assert sum(p["turns"] for p in series["/home/u/oldproj"]) == 0  # ranked, but nothing in the range
+    assert sum(p["turns"] for p in series["/home/u/heavyold"]) == 1
 
 
 @pytest.mark.asyncio
@@ -1004,6 +1021,20 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     dst = tmp_path / "projects" / "sess-001.jsonl"
     dst.parent.mkdir(parents=True)
     dst.write_bytes((FIXTURES_DIR / "basic.jsonl").read_bytes())
+    # A project whose only turn was interrupted has nothing to bill: it is not a row.
+    (tmp_path / "projects" / "sess-int.jsonl").write_text(
+        '{"type":"system","timestamp":"2026-04-14T12:00:00Z","sessionId":"sess-int","uuid":"sys-int","isSidechain":false,"cwd":"/home/u/only-interrupted"}\n'
+        '{"type":"assistant","timestamp":"2026-04-14T12:00:00Z","sessionId":"sess-int","requestId":"req-int","uuid":"evt-int",'
+        '"isSidechain":false,"model":"claude-opus-4-7","message":{"id":"msg-int","role":"assistant","stop_reason":null}}\n'
+    )
+    # A nested pair: the child groups under its parent until the parent is forgotten.
+    for sid, cwd in (("sess-parent", "/home/u/proj"), ("sess-child", "/home/u/proj/sub")):
+        (tmp_path / "projects" / f"{sid}.jsonl").write_text(
+            f'{{"type":"system","timestamp":"2026-04-14T12:00:00Z","sessionId":"{sid}","uuid":"sys-{sid}","isSidechain":false,"cwd":"{cwd}"}}\n'
+            f'{{"type":"assistant","timestamp":"2026-04-14T12:00:00Z","sessionId":"{sid}","requestId":"req-{sid}","uuid":"evt-{sid}",'
+            '"isSidechain":false,"model":"claude-opus-4-7","message":{"id":"msg-' + sid + '","role":"assistant","stop_reason":"end_turn",'
+            '"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n'
+        )
 
     from httpx import ASGITransport, AsyncClient
 
@@ -1017,6 +1048,7 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     assert data["range"] == "all"
     assert "projects" in data
     assert len(data["projects"]) >= 1
+    assert "/home/u/only-interrupted" not in [pp["cwd"] for pp in data["projects"]]
     p = data["projects"][0]
     for key in [
         "project",
@@ -1053,6 +1085,18 @@ async def test_breakdown_by_project_returns_project_array(tmp_path: Path) -> Non
     expected_output_cost = sum(cost_for_turn(t.model, t.usage).output_usd for s in snap.sessions for t in s.turns if not t.is_interrupted)
     assert abs(sum(p["input_cost"] for p in data["projects"]) - expected_input_cost) < 1e-9
     assert abs(sum(p["output_cost"] for p in data["projects"]) - expected_output_cost) < 1e-9
+
+    # A child groups under its parent until the parent is forgotten. A forget drops the session
+    # and re-reads the index (streaming.py); the next request, with no snapshot build in between,
+    # must group the survivors afresh.
+    cwds = [p["cwd"] for p in data["projects"]]
+    assert "/home/u/proj" in cwds and "/home/u/proj/sub" not in cwds
+    app.state.usage.engine.forget(session_ids=["sess-parent"])
+    app.state.usage.index.replace_all(app.state.usage.engine.session_infos())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        after_forget = await client.get("/api/breakdown/by-project?range=all")
+    cwds = [p["cwd"] for p in after_forget.json()["projects"]]
+    assert "/home/u/proj/sub" in cwds and "/home/u/proj" not in cwds
 
 
 @pytest.mark.asyncio

@@ -12,9 +12,11 @@ from tokenol.metrics.context import (
     cache_reuse_ratio,
     context_growth_rate,
     cost_per_kw,
+    cost_share,
     ctx_ratio_n_to_1,
     ctx_used_latest,
     max_turn_input,
+    tool_error_rate,
 )
 from tokenol.metrics.cost import cost_for_turn
 from tokenol.metrics.thresholds import (
@@ -250,7 +252,7 @@ def build_project_rollups(
 
         total_tool_uses = sum(sr.tool_use_count for sr in srs)
         total_tool_errors = sum(sr.tool_error_count for sr in srs)
-        tool_error_rate = total_tool_errors / total_tool_uses if total_tool_uses > 0 else 0.0
+        error_rate = tool_error_rate(total_tool_errors, total_tool_uses) or 0.0
 
         peak_window_cost = max((sr.peak_window_cost for sr in srs), default=0.0)
 
@@ -262,7 +264,7 @@ def build_project_rollups(
             (cache_hit_rate is not None and cache_hit_rate < CACHE_HIT_RATE_RED)
             or cache_creation_dominance > CACHE_CREATION_DOMINANCE_AMBER
             or avg_context_growth > CONTEXT_GROWTH_AMBER
-            or tool_error_rate > TOOL_ERROR_RATE_AMBER
+            or error_rate > TOOL_ERROR_RATE_AMBER
             or any(v != BlowUpVerdict.OK.value and cnt > 0 for v, cnt in verdict_mix.items())
         )
 
@@ -277,8 +279,7 @@ def build_project_rollups(
         for sr in srs:
             if sr.model:
                 model_costs[sr.model] += sr.cost_usd
-        cost_denom = sum(model_costs.values()) or 1.0
-        model_mix = {m: c / cost_denom for m, c in sorted(model_costs.items(), key=lambda x: -x[1])}
+        model_mix = cost_share(dict(sorted(model_costs.items(), key=lambda x: -x[1])))
 
         result.append(
             ProjectRollup(
@@ -294,7 +295,7 @@ def build_project_rollups(
                 cache_hit_rate=cache_hit_rate,
                 cache_creation_dominance=cache_creation_dominance,
                 avg_context_growth=avg_context_growth,
-                tool_error_rate=tool_error_rate,
+                tool_error_rate=error_rate,
                 interrupted_turn_rate=None,
                 peak_window_cost=peak_window_cost,
                 verdict_mix=verdict_mix,
@@ -354,7 +355,7 @@ def build_model_rollups(turns: list[Turn]) -> list[ModelRollup]:
         b["tool_use_count"] += turn.tool_use_count
         b["tool_error_count"] += turn.tool_error_count
 
-    total_cost = sum(b["cost_usd"] for b in buckets.values()) or 1.0
+    shares = cost_share({model: b["cost_usd"] for model, b in buckets.items()})
 
     result: list[ModelRollup] = []
     for model, b in buckets.items():
@@ -382,7 +383,7 @@ def build_model_rollups(turns: list[Turn]) -> list[ModelRollup]:
                 ctx_ratio_n_to_1=ctx_ratio_n_to_1(reads, outputs),
                 cache_reuse_n_to_1=cache_reuse_n_to_1(reads, creates),
                 cost_per_kw_val=cost_per_kw(cost, outputs),
-                cost_share=cost / total_cost,
+                cost_share=shares[model],
             )
         )
 

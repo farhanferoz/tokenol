@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tokenol.enums import BlowUpVerdict
+from tokenol.metrics.context import tool_error_rate
 from tokenol.metrics.rollups import SessionRollup
 
 # Thresholds (v0.1 — hardcoded; configurable in a future release)
@@ -25,7 +26,8 @@ def compute_verdict(sr: SessionRollup) -> BlowUpVerdict:
     if sr.max_turn_input > _CONTEXT_CREEP_MAX_INPUT_TOKENS and sr.context_growth_rate_val > _CONTEXT_CREEP_GROWTH_RATE:
         return BlowUpVerdict.CONTEXT_CREEP
 
-    if sr.tool_use_count >= _TOOL_ERROR_STORM_MIN_USES and sr.tool_error_count / sr.tool_use_count > _TOOL_ERROR_STORM_ERROR_RATIO:
+    error_rate = tool_error_rate(sr.tool_error_count, sr.tool_use_count)
+    if sr.tool_use_count >= _TOOL_ERROR_STORM_MIN_USES and error_rate is not None and error_rate > _TOOL_ERROR_STORM_ERROR_RATIO:
         return BlowUpVerdict.TOOL_ERROR_STORM
 
     if sr.is_sidechain and sr.cost_usd > _SIDECHAIN_HEAVY_COST_USD:

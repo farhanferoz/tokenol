@@ -308,7 +308,7 @@ def parse_file(path: Path) -> Iterator[RawEvent]:
             block_sizes = [(b, _block_bytes(b)) for b in content if isinstance(b, dict)]
 
             if event_type == "assistant" and usage is not None:
-                input_pool = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+                input_pool = usage.input_token_pool
                 if peak_input_tokens > 0 and input_pool < COMPACTION_DROP_RATIO * peak_input_tokens:
                     tool_use_id_to_name.clear()
                     bytes_in_context_by_tool.clear()

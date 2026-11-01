@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
 from tokenol.engine.context import UsageContext
-from tokenol.engine.filters import TurnFilter
+from tokenol.engine.filters import UNKNOWN_LABEL, GroupKey, InterruptedPolicy, TurnFilter
+from tokenol.engine.queries import ComponentCosts
 from tokenol.enums import AttributionMode
-from tokenol.metrics.cost import cache_saved_usd, rollup_by_date
+from tokenol.metrics.context import cache_hit_rate, cost_share
 from tokenol.metrics.thresholds import DEFAULTS
 from tokenol.persistence.store import default_path as default_store_path
 from tokenol.serve.prefs import Preferences, default_path
@@ -32,8 +32,6 @@ from tokenol.serve.state import (
     LegacyTurnView,
     ParseCache,
     SnapshotResult,
-    _grouped_cwd_by_sid,
-    billable_token_totals,
     build_breakdown_tools,
     build_daily_panel,
     build_day_detail,
@@ -67,58 +65,6 @@ def _validate_breakdown_range(range_: str) -> None:
             status_code=400,
             detail="range must be 7d, 30d, 90d, or all",
         )
-
-
-def _bucket_turns(
-    sessions: list,
-    since,
-    key_fn,
-) -> dict[str, dict[str, float]]:
-    """Group non-interrupted turns into buckets and sum the usage + cost fields.
-
-    `key_fn` receives `(session, turn)` and returns the bucket key; handlers
-    pass a lambda that closes over whatever grouping dict they precomputed
-    (e.g. `cwd_by_sid`). Returns a dict mapping each key to a sub-dict with
-    token totals (`input`, `output`, `cache_read`, `cache_creation`) and
-    per-component cost totals in USD (`input_cost`, `output_cost`,
-    `cache_read_cost`, `cache_creation_cost`). Callers may ignore unused
-    fields.
-    """
-    from tokenol.metrics.cost import cost_for_turn
-
-    buckets: dict[str, dict[str, float]] = {}
-    for s in sessions:
-        for t in s.turns:
-            if since is not None and t.timestamp.date() < since:
-                continue
-            if t.is_interrupted:
-                continue
-            key = key_fn(s, t)
-            b = buckets.setdefault(
-                key,
-                {
-                    "input": 0,
-                    "output": 0,
-                    "cache_read": 0,
-                    "cache_creation": 0,
-                    "input_cost": 0.0,
-                    "output_cost": 0.0,
-                    "cache_read_cost": 0.0,
-                    "cache_creation_cost": 0.0,
-                    "total_cost": 0.0,
-                },
-            )
-            b["input"] += t.usage.input_tokens
-            b["output"] += t.usage.output_tokens
-            b["cache_read"] += t.usage.cache_read_input_tokens
-            b["cache_creation"] += t.usage.cache_creation_input_tokens
-            tc = cost_for_turn(t.model, t.usage, at=t.timestamp)
-            b["input_cost"] += tc.input_usd
-            b["output_cost"] += tc.output_usd
-            b["cache_read_cost"] += tc.cache_read_usd
-            b["cache_creation_cost"] += tc.cache_creation_usd
-            b["total_cost"] += tc.total_usd
-    return buckets
 
 
 def _is_compare_form(param: str) -> bool:
@@ -187,241 +133,24 @@ def _build_snapshot(request: Request, period: str = "today") -> SnapshotResult:
 
 
 def _usage_after_a_tick(request: Request) -> UsageContext:
-    """The usage context; if no tick has run yet (no dashboard connected), run one first.
+    """The usage context every engine-backed endpoint reads, ready to be queried.
 
-    Nothing but a snapshot build ingests the JSONL, so an endpoint reached before any
-    build would otherwise answer from the history store alone.
+    If no tick has run yet (no dashboard connected) run one first: nothing but a snapshot
+    build ingests the JSONL, so an endpoint reached before any build would otherwise answer
+    from the history store alone. Then push each new session's grouped project into the
+    engine (memoised), which a query must not run without: a session added since the last
+    call would group under its raw cwd, or as "(unknown)".
     """
     if not getattr(request.app.state.parse_cache, "_tick_initialized", False):
         _build_snapshot(request)
-    return request.app.state.usage
+    usage: UsageContext = request.app.state.usage
+    usage.index.project_map()
+    return usage
 
 
 def _legacy_turn_view(request: Request) -> LegacyTurnView:
     """TRANSITIONAL: every turn and session as Python objects, for endpoints Task 6-7 migrate."""
     return legacy_turn_view(_usage_after_a_tick(request))
-
-
-# Seconds of no use after which the hydrated warm tier is dropped. The warm set
-# (rows below the hot cutoff) cannot change for the life of the process except
-# through forget, so this is an idle timeout, not a time-to-live: a use inside
-# the window extends it, and a use after release rebuilds. A TTL instead forced
-# a rebuild every two minutes while anyone was watching, holding the old and new
-# lists at once, which is where the process's peak memory came from.
-_WARM_TIER_IDLE_SECONDS = 120.0
-
-
-def _touch_warm_cache(request: Request) -> tuple[list, list] | None:
-    """Return the cached warm tier and push its idle deadline out, or None."""
-    state = request.app.state
-    cached = getattr(state, "warm_tier_cache", None)
-    if cached is None:
-        return None
-    _arm_warm_release(request)
-    return cached[1]
-
-
-def _arm_warm_release(request: Request) -> None:
-    """(Re)schedule the idle release of the warm cache."""
-    state = request.app.state
-    handle = getattr(state, "warm_tier_release", None)
-    if handle is not None:
-        handle.cancel()
-    loop = asyncio.get_running_loop()
-    state.warm_tier_release = loop.call_later(_WARM_TIER_IDLE_SECONDS, _release_warm_cache, state)
-
-
-def _release_warm_cache(state) -> None:
-    """Drop the hydrated warm tier and the merged snapshot built from it.
-
-    Serves as both the idle-timer callback and the forget hook. Cancelling the
-    stored handle covers the second case: a forget arriving mid-window would
-    otherwise leave a timer that fires later and clears a cache someone has
-    since rebuilt and is using. Cancelling the handle that is currently firing
-    is a no-op, so the timer case is unaffected.
-    """
-    handle = getattr(state, "warm_tier_release", None)
-    if handle is not None:
-        handle.cancel()
-    state.warm_tier_cache = None
-    state.warm_merged = None
-    state.warm_summary = None
-    state.warm_tier_release = None
-
-
-def _warm_cutoff(request: Request) -> datetime:
-    """The boundary below which rows belong to the warm tier: the hot tier's own cutoff.
-
-    No derivation yet means no hot cutoff. The pref window stands in: it can
-    only overlap the hot tier once that exists, never leave a gap, and the merge
-    dedups overlap by dedup_key.
-    """
-    cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
-    if cutoff is None:
-        store = request.app.state.warm_store
-        window_days = getattr(store, "_hot_window_days", request.app.state.prefs.hot_window_days)
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
-    return cutoff
-
-
-async def _warm_summary(request: Request) -> tuple[list, date | None]:
-    """The warm tier's sessions (no turns attached) and earliest turn date, cached.
-
-    A few thousand small Session objects and one GROUP BY, against the hundreds
-    of megabytes of Turns `_warm_tier` builds. Keyed on the cutoff it was taken
-    at; cleared with the rest of the warm state on forget.
-    """
-    state = request.app.state
-    cutoff = _warm_cutoff(request)
-    cached = getattr(state, "warm_summary", None)
-    if cached is not None and cached[0] == cutoff:
-        return cached[1]
-    loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, lambda: state.warm_store.summarize_before(cutoff))
-    state.warm_summary = (cutoff, data)
-    return data
-
-
-async def _warm_tier(request: Request) -> tuple[list, list]:
-    """Return (turns, sessions) for the part of the store the hot tier does not hold.
-
-    The hot tier was hydrated once at `parse_cache._hot_cutoff` and has only
-    ever been appended to since, so every persisted row at or after that cutoff
-    is already in memory. Hydrating those again built tens of thousands of Turn
-    objects that `_snapshot_with_warm_tier` then dropped as duplicates — on a
-    --persist server, the whole last 90 days twice. Measured on a real store:
-    286,553 of 383,420 rows, 604 MB of the 711 MB the full hydration cost.
-
-    Goes through ``hydrate_before`` rather than ``query_turns`` + a
-    ``query_session`` per id: one query answers both, where the per-session form
-    costs one DuckDB round-trip per session — 300+ of them on a real store, each
-    contending with the flusher for the connection lock, which is enough to push
-    a breakdown request past a 25-second timeout.
-    """
-    store = request.app.state.warm_store
-    cached = _touch_warm_cache(request)
-    if cached is not None:
-        return cached
-
-    # Single-flight. Without it, every request arriving while a hydration is in
-    # flight starts its own: the check above and the fill below were unguarded, and
-    # the breakdown page fires six endpoints at once, so one page load hydrated the
-    # whole store six times over — measured as six hydrations of 91,131 rows for a
-    # single page load, against a TTL that should permit one every two minutes.
-    async with request.app.state.warm_tier_lock:
-        # Re-check inside the lock: whoever held it may have just filled the cache.
-        cached = _touch_warm_cache(request)
-        if cached is not None:
-            return cached
-
-        cutoff = _warm_cutoff(request)
-        loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, lambda: store.hydrate_before(cutoff))
-        # Expiry runs from completion, not from a reading taken before the work
-        # started — on a large store the old form spent much of its own TTL hydrating.
-        # First element is the fill time, kept so the entry stays a 2-tuple;
-        # expiry is the timer's job now, not a deadline comparison.
-        request.app.state.warm_tier_cache = (time.monotonic(), data)
-        _arm_warm_release(request)
-        return data
-
-
-async def _snapshot_with_warm_tier(
-    request: Request,
-    *,
-    project: str | None = None,
-    since: date | None = None,
-) -> LegacyTurnView:
-    """Return the current snapshot with persisted (warm-tier) turns folded in.
-
-    *since* is the first date the caller will read turns from, for a caller
-    whose answer depends on nothing earlier. When it falls after the hot
-    cutoff's date, every warm turn would be filtered out by that caller, so
-    none are built: the result carries the warm sessions alone (no turns),
-    which keeps project grouping exactly as the full merge would have it. On a
-    real store this is the difference between holding ~166k extra Turns for as
-    long as a dashboard polls a 30-day chart, and holding none.
-
-    The hot tier is only ever as complete as the JSONL still on disk, and Claude
-    Code prunes old transcripts — so any endpoint answering a question about the
-    past has to read the warm tier or it silently reports "all the history that
-    happens to survive" as if it were all the history. Measured on a real store:
-    April 2026 read $790 from JSONL alone against $6,513 of persisted turns for
-    the same month.
-
-    Overlap is resolved on ``dedup_key``, so the merge is safe to apply to every
-    range rather than only ``all`` — a 30- or 90-day window reaches past the
-    JSONL horizon just as easily once pruning has run.
-
-    Cached against the snapshot's ``generated_at`` (not ``id()`` — Python
-    recycles ids for freed objects) so a page firing six breakdown requests off
-    one snapshot pays for the merge once.
-    """
-    result = _legacy_turn_view(request)
-    if getattr(request.app.state, "warm_store", None) is None:
-        return result
-
-    hot_cutoff = getattr(request.app.state.parse_cache, "_hot_cutoff", None)
-    # Strictly after the cutoff's DATE: warm rows on that same day, earlier
-    # than the cutoff's time of day, would still pass a `date >= since` filter.
-    if since is not None and hot_cutoff is not None and since > hot_cutoff.astimezone(timezone.utc).date():
-        stubs, _earliest = await _warm_summary(request)
-        existing_sids = {s.session_id for s in result.sessions}
-        extra = [s for s in stubs if s.session_id not in existing_sids and (project is None or s.cwd == project)]
-        if not extra:
-            return result
-        for session in extra:
-            session.archived = True  # JSONL is gone — content snippets unavailable
-        return replace(result, sessions=list(result.sessions) + extra)
-
-    # Identify the DATA, not the build. This was keyed on `generated_at`, which
-    # build_snapshot_full regenerates every tick, so with a 5s tick the merge was
-    # thrown away before it could ever be reused and the next breakdown request
-    # re-deduped and re-sorted the whole union — ~350,000 turns on a real corpus.
-    # The hot tier is append-only within a process, so length plus the first and
-    # last dedup_key tracks it; the session count catches a forget().
-    stamp = (
-        len(result.turns),
-        result.turns[0].dedup_key if result.turns else "",
-        result.turns[-1].dedup_key if result.turns else "",
-        len(result.sessions),
-        project,
-    )
-    cached = getattr(request.app.state, "warm_merged", None)
-    if cached is not None and cached[0] == stamp:
-        # Serving the merged snapshot counts as USE. Without this the idle
-        # release only ever saw hydrations, so a busy server — which hits this
-        # cache on almost every request — looked idle, dropped its warm tier
-        # mid-use and rebuilt it, the exact churn the idle timeout removes.
-        _arm_warm_release(request)
-        return cached[1]
-
-    warm_turns, warm_all_sessions = await _warm_tier(request)
-    if not warm_turns:
-        return result
-
-    if project is not None:
-        warm_all_sessions = [s for s in warm_all_sessions if s.cwd == project]
-        keep = {s.session_id for s in warm_all_sessions}
-        warm_turns = [t for t in warm_turns if t.session_id in keep]
-        if not warm_turns:
-            return result
-
-    existing_keys = {t.dedup_key for t in result.turns}
-    merged_turns = list(result.turns) + [t for t in warm_turns if t.dedup_key not in existing_keys]
-    merged_turns.sort(key=lambda t: t.timestamp)
-
-    existing_sids = {s.session_id for s in result.sessions}
-    warm_sessions = []
-    for session in warm_all_sessions:
-        if session.session_id in existing_sids:
-            continue
-        session.archived = True  # JSONL is gone — content snippets unavailable
-        warm_sessions.append(session)
-
-    merged = replace(result, turns=merged_turns, sessions=list(result.sessions) + warm_sessions)
-    request.app.state.warm_merged = (stamp, merged)
-    return merged
 
 
 def create_app(
@@ -479,7 +208,7 @@ def create_app(
         get_thresholds=lambda: prefs.thresholds,
         history_store=history_store,
         flush_queue=flush_queue,
-        on_forget=lambda: _release_warm_cache(app.state),
+        on_forget=None,
     )
 
     @asynccontextmanager
@@ -508,16 +237,8 @@ def create_app(
     app.state.prefs_path = _prefs_path
     app.state.parse_cache = parse_cache
     app.state.usage = usage
-    app.state.warm_merged = None
-    app.state.warm_tier_cache = None
-    app.state.warm_tier_release = None
     app.state.broadcaster = broadcaster
     app.state.history_store = history_store
-    # Guards the warm-tier hydration against a stampede; see _warm_tier.
-    app.state.warm_tier_lock = asyncio.Lock()
-    # The warm tier is gone (the engine holds all history); Task 6 deletes the functions
-    # that still read this, which are inert while it is None.
-    app.state.warm_store = None
     app.state.flush_queue = flush_queue
 
     if STATIC_DIR.exists():
@@ -596,7 +317,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid cwd encoding") from None
         if range not in ("1d", "7d", "14d", "30d", "all"):
             raise HTTPException(status_code=400, detail="Invalid range — use 1d, 7d, 14d, 30d, or all")
-        result = await _snapshot_with_warm_tier(request, project=cwd)
+        result = _legacy_turn_view(request)
         detail = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: build_project_detail(cwd, result.sessions, range_key=range),
@@ -650,8 +371,8 @@ def create_app(
             parsed = date.fromisoformat(target_date)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD") from None
-        result = _legacy_turn_view(request)
-        return JSONResponse(build_hourly_panel(parsed, result.turns, result.sessions, metric, project, model))
+        usage = _usage_after_a_tick(request)
+        return JSONResponse(build_hourly_panel(usage.queries, parsed, metric, project, model))
 
     @app.get("/api/daily")
     async def api_daily(
@@ -667,17 +388,9 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"Unknown metric — valid: {sorted(VALID_METRICS)}")
         if range not in ("7d", "30d", "90d", "all"):
             raise HTTPException(status_code=400, detail="range must be 7d, 30d, 90d, or all")
+        usage = _usage_after_a_tick(request)
         today = date.today()
         since = range_since(range, today) if range != "all" else None
-        # A compare view ranks its series over every turn passed in, and an
-        # explicit list keeps any entry that has turns at all, regardless of
-        # range — so only single-series requests may leave the warm turns out.
-        series_by_range_only = not (_is_compare_form(project) or _is_compare_form(model))
-        result = await _snapshot_with_warm_tier(request, since=since if series_by_range_only else None)
-        # The oldest date held across hot AND warm, whether or not the warm
-        # turns were built for this request. Taking the min again on a full
-        # merge is a no-op: the warm turns are already among result.turns.
-        warm_earliest = (await _warm_summary(request))[1] if request.app.state.warm_store is not None else None
         # Fall back silently to the longest available window when the requested range
         # exceeds the data we have — return 200 with a `note` so the UI can caption it.
         # Returning 400 here forced clients to special-case "policy" failures even though
@@ -685,17 +398,12 @@ def create_app(
         effective_range = range
         note: str | None = None
         have_days: int | None = None
-        if since is not None and result.turns:
-            earliest = min(t.timestamp.date() for t in result.turns)
-            if warm_earliest is not None:
-                earliest = min(earliest, warm_earliest)
-            if earliest > since:
-                have_days = (today - earliest).days + 1
-                effective_range = "all"
-                note = f"Only {have_days} days of history available — showing all data instead of {range}."
-        panel = build_daily_panel(
-            result.turns, result.sessions, effective_range, metric, project, model, earliest_hint=warm_earliest
-        )
+        earliest = usage.queries.earliest_date(TurnFilter()) if since is not None else None
+        if earliest is not None and earliest > since:
+            have_days = (today - earliest).days + 1
+            effective_range = "all"
+            note = f"Only {have_days} days of history available — showing all data instead of {range}."
+        panel = build_daily_panel(usage.queries, effective_range, metric, project, model, today_date=today)
         if note is not None:
             panel["requested_range"] = range
             panel["have_days"] = have_days
@@ -713,7 +421,6 @@ def create_app(
         if window not in _WINDOW_MINUTES:
             raise HTTPException(status_code=400, detail=f"window must be one of: {list(_WINDOW_MINUTES)}")
         usage = _usage_after_a_tick(request)
-        usage.index.project_map()  # before the first query: pushes new sessions' project into the engine
         now = datetime.now(tz=timezone.utc)
         return JSONResponse(build_recent_activity_panel(usage.queries, now, _WINDOW_MINUTES[window]))
 
@@ -817,25 +524,19 @@ def create_app(
     async def api_breakdown_summary(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         since = range_since(range, date.today()) if range != "all" else None
-        result = await _snapshot_with_warm_tier(request, since=since)
-        if since is None:
-            turns = list(result.turns)
-            sessions = list(result.sessions)
-        else:
-            turns = [t for t in result.turns if t.timestamp.date() >= since]
-            sessions = [s for s in result.sessions if any(t.timestamp.date() >= since for t in s.turns)]
-
+        # Interrupted turns count here: the turn total is every turn in the range.
+        totals = _usage_after_a_tick(request).queries.totals(TurnFilter(since=since))
         return JSONResponse(
             {
                 "range": range,
-                "sessions": len(sessions),
-                "turns": len(turns),
-                "input_tokens": sum(t.usage.input_tokens for t in turns),
-                "output_tokens": sum(t.usage.output_tokens for t in turns),
-                "cache_read_tokens": sum(t.usage.cache_read_input_tokens for t in turns),
-                "cache_creation_tokens": sum(t.usage.cache_creation_input_tokens for t in turns),
-                "cost_usd": sum(t.cost_usd for t in turns),
-                "cache_saved_usd": cache_saved_usd(turns),
+                "sessions": totals.sessions,
+                "turns": totals.turns,
+                "input_tokens": totals.input_tokens,
+                "output_tokens": totals.output_tokens,
+                "cache_read_tokens": totals.cache_read_tokens,
+                "cache_creation_tokens": totals.cache_creation_tokens,
+                "cost_usd": totals.cost_usd,
+                "cache_saved_usd": totals.cache_saved_usd,
             }
         )
 
@@ -843,35 +544,13 @@ def create_app(
     async def api_breakdown_daily_tokens(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         since = range_since(range, date.today()) if range != "all" else None
-        result = await _snapshot_with_warm_tier(request, since=since)
-        if since is None:
-            turns = list(result.turns)
-            rollups = rollup_by_date(turns)
-        else:
-            turns = [t for t in result.turns if t.timestamp.date() >= since]
-            rollups = rollup_by_date(turns, since=since)
-
+        queries = _usage_after_a_tick(request).queries
+        rollups = queries.daily(TurnFilter(since=since), fill_since=since)
         # Per-component cost per day. Includes cache_read so the visible stack
         # in $ mode sums to cost_usd (cache_read is the largest cost component
         # on heavy-cache days and would otherwise be silently missing).
-        from tokenol.metrics.cost import cost_for_turn
-
-        cost_by_date: dict = {}
-        for t in turns:
-            if t.is_interrupted:
-                continue
-            d = t.timestamp.date()
-            slot = cost_by_date.setdefault(
-                d,
-                {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0},
-            )
-            tc = cost_for_turn(t.model, t.usage, at=t.timestamp)
-            slot["input"] += tc.input_usd
-            slot["output"] += tc.output_usd
-            slot["cache_creation"] += tc.cache_creation_usd
-            slot["cache_read"] += tc.cache_read_usd
-
-        _empty_cost = {"input": 0.0, "output": 0.0, "cache_creation": 0.0, "cache_read": 0.0}
+        components = queries.cost_components_by_date(TurnFilter(since=since, interrupted=InterruptedPolicy.EXCLUDE))
+        no_cost = ComponentCosts(0.0, 0.0, 0.0, 0.0)
         return JSONResponse(
             {
                 "range": range,
@@ -883,10 +562,10 @@ def create_app(
                         "cache_creation": r.cache_creation_tokens,
                         "cache_read": r.cache_read_tokens,
                         "cost_usd": r.cost_usd,
-                        "input_cost": cost_by_date.get(r.date, _empty_cost)["input"],
-                        "output_cost": cost_by_date.get(r.date, _empty_cost)["output"],
-                        "cache_creation_cost": cost_by_date.get(r.date, _empty_cost)["cache_creation"],
-                        "cache_read_cost": cost_by_date.get(r.date, _empty_cost)["cache_read"],
+                        "input_cost": components.get(r.date, no_cost).input,
+                        "output_cost": components.get(r.date, no_cost).output,
+                        "cache_creation_cost": components.get(r.date, no_cost).cache_creation,
+                        "cache_read_cost": components.get(r.date, no_cost).cache_read,
                     }
                     for r in rollups
                 ],
@@ -897,70 +576,55 @@ def create_app(
     async def api_breakdown_by_project(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         since = range_since(range, date.today()) if range != "all" else None
-        result = await _snapshot_with_warm_tier(request, since=since)
-
-        cwd_by_sid = _grouped_cwd_by_sid(result.sessions)
-
-        buckets = _bucket_turns(
-            result.sessions,
-            since,
-            key_fn=lambda s, _t: cwd_by_sid.get(s.session_id, "(unknown)"),
-        )
+        queries = _usage_after_a_tick(request).queries
+        buckets = queries.bucket(TurnFilter(since=since, interrupted=InterruptedPolicy.EXCLUDE), GroupKey.PROJECT)
 
         projects = []
         for cwd, b in buckets.items():
-            denom = b["cache_read"] + b["cache_creation"] + b["input"]
-            hit_rate = (b["cache_read"] / denom) if denom > 0 else None
+            known = cwd != UNKNOWN_LABEL
             projects.append(
                 {
-                    "project": Path(cwd).name if cwd != "(unknown)" else "(unknown)",
+                    "project": Path(cwd).name if known else UNKNOWN_LABEL,
                     "cwd": cwd,
-                    "cwd_b64": encode_cwd(cwd) if cwd != "(unknown)" else None,
-                    "input": b["input"],
-                    "output": b["output"],
-                    "cache_creation": b["cache_creation"],
-                    "input_cost": b["input_cost"],
-                    "output_cost": b["output_cost"],
-                    "cache_creation_cost": b["cache_creation_cost"],
-                    "cache_read_cost": b["cache_read_cost"],
-                    "cache_hit_rate": hit_rate,
+                    "cwd_b64": encode_cwd(cwd) if known else None,
+                    "input": b.input,
+                    "output": b.output,
+                    "cache_creation": b.cache_creation,
+                    "input_cost": b.input_cost,
+                    "output_cost": b.output_cost,
+                    "cache_creation_cost": b.cache_creation_cost,
+                    "cache_read_cost": b.cache_read_cost,
+                    "cache_hit_rate": cache_hit_rate(b.cache_read, b.cache_creation, b.input),
                 }
             )
-        projects.sort(key=lambda p: p["input"] + p["output"], reverse=True)
+        # Biggest first; ties by label, so the order does not depend on SQL group order.
+        projects.sort(key=lambda p: (-(p["input"] + p["output"]), p["cwd"]))
         return JSONResponse({"range": range, "projects": projects})
 
     @app.get("/api/breakdown/by-model")
     async def api_breakdown_by_model(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         since = range_since(range, date.today()) if range != "all" else None
-        result = await _snapshot_with_warm_tier(request, since=since)
+        queries = _usage_after_a_tick(request).queries
+        buckets = queries.bucket(TurnFilter(since=since, interrupted=InterruptedPolicy.EXCLUDE), GroupKey.MODEL)
 
-        buckets = _bucket_turns(
-            result.sessions,
-            since,
-            key_fn=lambda _s, t: t.model or "(unknown)",
-        )
-
-        total_billable = sum(b["input"] + b["output"] for b in buckets.values()) or 1
-        total_cost = sum(b["total_cost"] for b in buckets.values())
-        models = []
-        for name, b in buckets.items():
-            billable = b["input"] + b["output"]
-            cost_usd = b["total_cost"]
-            models.append(
-                {
-                    "model": name,
-                    "input": b["input"],
-                    "output": b["output"],
-                    "share": billable / total_billable,
-                    "cost_usd": cost_usd,
-                    "cost_share": (cost_usd / total_cost) if total_cost > 0 else 0,
-                    # "known" | "estimated" | "unpriced" — lets the UI flag models
-                    # whose cost is a fallback estimate or shown as $0 (no price).
-                    "price_status": model_price_status(name),
-                }
-            )
-        models.sort(key=lambda m: m["input"] + m["output"], reverse=True)
+        total_billable = sum(b.input + b.output for b in buckets.values()) or 1
+        cost_shares = cost_share({name: b.total_cost for name, b in buckets.items()})
+        models = [
+            {
+                "model": name,
+                "input": b.input,
+                "output": b.output,
+                "share": (b.input + b.output) / total_billable,
+                "cost_usd": b.total_cost,
+                "cost_share": cost_shares[name],
+                # "known" | "estimated" | "unpriced" — lets the UI flag models
+                # whose cost is a fallback estimate or shown as $0 (no price).
+                "price_status": model_price_status(name),
+            }
+            for name, b in buckets.items()
+        ]
+        models.sort(key=lambda m: (-(m["input"] + m["output"]), m["model"]))
         return JSONResponse({"range": range, "models": models})
 
     @app.get("/api/breakdown/tools")
@@ -976,13 +640,13 @@ def create_app(
         if mode not in _ATTRIBUTION_MODES:
             mode = AttributionMode.PRORATA.value
         since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
-        result = await _snapshot_with_warm_tier(request, since=since)
-        filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
-        tools = build_breakdown_tools(filtered, mode=mode)
+        queries = _usage_after_a_tick(request).queries
+        f = TurnFilter(since=since, interrupted=InterruptedPolicy.EXCLUDE)
+        tools = build_breakdown_tools(queries.tool_costs(f, AttributionMode(mode)))
         # Billable-token totals so the Tokens view can show what fraction of all
         # tokens ran through tool calls — a different number than the cost share,
         # since $/token varies by model and cache.
-        nontool_billable, total_billable = billable_token_totals(filtered)
+        nontool_billable, total_billable = queries.billable_totals(f)
         return JSONResponse(
             {
                 "range": range,
@@ -997,11 +661,8 @@ def create_app(
     async def api_breakdown_skills(request: Request, range: str = "30d"):
         _validate_breakdown_range(range)
         since = range_since(range, datetime.now(tz=timezone.utc).date()) if range != "all" else None
-        result = await _snapshot_with_warm_tier(request, since=since)
-        filtered = [t for t in result.turns if not t.is_interrupted and (since is None or t.timestamp.date() >= since)]
-        # One combined builder (two turn walks) instead of calling the ranked
-        # list, the invoked-without-cost tally, and three cost/token sums
-        # separately — which would walk `filtered` five times.
-        return JSONResponse({"range": range, **build_skill_breakdown(filtered)})
+        queries = _usage_after_a_tick(request).queries
+        skill_costs = queries.skill_costs(TurnFilter(since=since, interrupted=InterruptedPolicy.EXCLUDE))
+        return JSONResponse({"range": range, **build_skill_breakdown(skill_costs)})
 
     return app

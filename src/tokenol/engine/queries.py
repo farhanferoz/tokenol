@@ -48,7 +48,7 @@ from tokenol.engine.schema import (
 )
 from tokenol.enums import AttributionMode
 from tokenol.ingest.parser import SKILL_TOOL, UNATTRIBUTED_TOOL, UNKNOWN_TOOL
-from tokenol.metrics.context import cache_reuse_n_to_1, cost_per_kw, ctx_ratio_n_to_1
+from tokenol.metrics.context import cache_reuse_n_to_1, cost_per_kw, cost_share, ctx_ratio_n_to_1
 from tokenol.metrics.cost import DailyRollup, HourlyRollup
 from tokenol.metrics.rollups import DailyToolCost, ModelRollup
 
@@ -72,7 +72,7 @@ _POOL_SQL = f"({_T}.input_tokens + {_T}.cache_read_tokens + {_T}.cache_creation_
 
 @dataclass(frozen=True, slots=True)
 class BucketTotals:
-    """Tokens and the four cost components of one group (the shape of ``_bucket_turns``)."""
+    """Tokens and the four cost components of one group."""
 
     input: int
     output: int
@@ -325,7 +325,7 @@ class UsageQueries:
             f,
             "GROUP BY 1",
         )
-        total_cost = sum(row[6] for row in rows) or 1.0
+        shares = cost_share({row[0]: row[6] for row in rows})
         result = [
             ModelRollup(
                 model=model,
@@ -346,7 +346,7 @@ class UsageQueries:
                 ctx_ratio_n_to_1=ctx_ratio_n_to_1(reads, out),
                 cache_reuse_n_to_1=cache_reuse_n_to_1(reads, creates),
                 cost_per_kw_val=cost_per_kw(cost, out),
-                cost_share=cost / total_cost,
+                cost_share=shares[model],
             )
             for (
                 model, turns, inp, out, reads, creates, cost, tool_uses, tool_errors, input_usd,
@@ -398,7 +398,12 @@ class UsageQueries:
         return {day: ComponentCosts(*values) for day, *values in rows}
 
     def billable_totals(self, f: TurnFilter) -> tuple[float, float]:
-        """``(non_tool, total)`` input+output tokens, as ``billable_token_totals`` defines them."""
+        """``(non_tool, total)`` input+output tokens.
+
+        "Billable" is input + output, cache excluded. The stored unattributed input is a share of the
+        input + cache pool, so the non-tool input fraction is applied to the billable input alone,
+        keeping the token share off the (huge) cache pool; unattributed output is already billable.
+        """
         pool = _POOL_SQL
         ((nontool, total),) = self._query(
             f"coalesce(sum(CASE WHEN {pool} > 0 THEN {_T}.unattributed_input_tokens / {pool} "
