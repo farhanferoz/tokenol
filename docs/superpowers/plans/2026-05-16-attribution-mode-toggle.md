@@ -1143,7 +1143,7 @@ git commit -m "chore(release): 0.6.1 — Tool Mix attribution-mode toggle"
 ## Task 9: Final integration smoke + RESUME.md
 
 **Files:**
-- Modify: `/home/ff235/dev/claude_rate_limit/RESUME.md` (gitignored, repo root — outside this worktree)
+- Modify: `~/dev/claude_rate_limit/RESUME.md` (gitignored, repo root — outside this worktree)
 
 ### Step 1: Final manual smoke
 
@@ -1186,7 +1186,7 @@ Expected (8 commits since the spec amendment):
 
 ### Step 5: Update RESUME.md
 
-Edit `/home/ff235/dev/claude_rate_limit/RESUME.md` (outside the worktree) — bump branch status to "0.6.1 ready", note the new commits and test count, flag any remaining smoke-test feedback. Lean update; refer to CHANGELOG and the spec for detail.
+Edit `~/dev/claude_rate_limit/RESUME.md` (outside the worktree) — bump branch status to "0.6.1 ready", note the new commits and test count, flag any remaining smoke-test feedback. Lean update; refer to CHANGELOG and the spec for detail.
 
 ### Step 6: Hand back to the user
 

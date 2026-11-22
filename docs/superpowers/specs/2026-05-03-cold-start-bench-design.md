@@ -45,8 +45,8 @@ A single Python script `_local/cold_start_bench.py` (gitignored — `_local/` is
 **Run order:** PR1 first, v0.3.2 second. PR1 is the heavier case (DuckDB backfill from cold); running it first prevents v0.3.2 from getting an unfair OS-page-cache advantage from the prior run. Between runs the JSONL eviction step runs again to re-cool the cache.
 
 **Process model:**
-- v0.3.2 invocation: `/home/ff235/miniconda3/bin/tokenol serve --port 8788`
-- PR1 invocation: same launcher, with `PYTHONPATH=/home/ff235/dev/claude_rate_limit/.worktrees/persistent-history-pr1/src` prepended so `from tokenol.cli import app` resolves to the worktree before the installed wheel. Verified: with the shim in place, `tokenol.__file__` resolves to the worktree's `__init__.py`. This avoids disturbing the installed v0.3.2 wheel — no re-install / re-cleanup needed between runs. Neither package ships `--no-open`; the script just relies on the default (no browser), so we omit it.
+- v0.3.2 invocation: `~/miniconda3/bin/tokenol serve --port 8788`
+- PR1 invocation: same launcher, with `PYTHONPATH=~/dev/claude_rate_limit/.worktrees/persistent-history-pr1/src` prepended so `from tokenol.cli import app` resolves to the worktree before the installed wheel. Verified: with the shim in place, `tokenol.__file__` resolves to the worktree's `__init__.py`. This avoids disturbing the installed v0.3.2 wheel — no re-install / re-cleanup needed between runs. Neither package ships `--no-open`; the script just relies on the default (no browser), so we omit it.
 
 **Sampling:** the harness reads `/proc/<pid>/status` (`VmRSS`, `RssAnon`, `RssFile`, `Threads`) and `/proc/<pid>/stat` (`utime + stime`) for the serve PID and any children, at 0.5 Hz. CPU% per sample is `(Δ(utime+stime) ticks / clk_tck) / Δ wall`. fd count from `len(os.listdir(f'/proc/{pid}/fd'))`. No `psutil` dependency — `/proc` reads are stdlib-only.
 

@@ -39,6 +39,17 @@ Project page — cache efficiency trend, verdict distribution, top turns, **and 
 
 Requires Python 3.10+. See [tokenol on PyPI](https://pypi.org/project/tokenol/).
 
+To work from a clone instead, install it as an editable tool and check the command:
+
+    uv tool install --editable '.[serve]'
+    tokenol --help
+
+Inside a virtualenv or conda environment that you control, `python3 -m pip install --editable '.[serve]'` does the same. A system Python refuses it (PEP 668), which is why `uv tool` is the primary path.
+
+## How it fits the setup
+
+tokenol is the cost and cache-health audit in the [claude-code-setup](https://github.com/farhanferoz/claude-code-setup) map. It reads the transcripts that Claude Code writes, so it needs no hook and no change to your Claude Code configuration. The setup repository installs it from this repository with the editable command above.
+
 ## Quick start
 
 ```bash
@@ -91,19 +102,17 @@ You can also set `CLAUDE_CONFIG_DIR` to a colon- or comma-separated list of path
 | `verify`   | Cross-check tokenol totals against `ccusage --json` (if installed)          |
 | `serve`    | Launch a local browser dashboard with live burn-rate gauge and all panels   |
 
-Every command accepts:
+Every command except `serve` accepts `--all-projects` / `-A`, which scans every `~/.claude*` directory and ignores `CLAUDE_CONFIG_DIR`. The other options differ by command:
 
-- `--since 14d` — lookback window (e.g. `7d`, `30d`, or an ISO date)
-- `--all-projects` / `-A` — scan every `~/.claude*` directory (ignores `CLAUDE_CONFIG_DIR`)
-- `--strict` — exit non-zero if any cost-computation assumption fired
-- `--show-assumptions` — always print the assumption footer
-- `--log-level debug|info|warning`
+- `--since 14d` (default `14d`) sets the lookback window, for example `7d`, `30d`, or an ISO date. It applies to `daily`, `sessions`, `projects`, `models`, and `verify`. `hourly` takes a day as its argument instead, and `live` takes `--last`.
+- `--strict` exits non-zero if any cost-computation assumption fired. `--show-assumptions` always prints the assumption footer. `--log-level debug|info|warning` (default `info`) sets the log verbosity. `--strict` and `--show-assumptions` apply to `daily`, `hourly`, `live`, `sessions`, `projects`, and `models`. `serve` takes only `--log-level` of the three.
+- `verify` takes `--tolerance` (default `0.02`), the largest fractional difference from ccusage that it accepts.
 
 `tokenol models` accepts `--all-models` to include non-Claude providers (DeepSeek, Qwen, GLM, etc.) in the count.
 
 `tokenol sessions` additionally takes `--sort` (`cost`, `input`, `output`, `cache_read`, `turns`, `max_input`, `duration`) and `--top`.
 
-`tokenol live` takes `--last 20m|2h|30s` and exits non-zero if the projected window cost exceeds the configured reference.
+`tokenol live` requires `--last 20m|2h|30s` and exits non-zero if the projected window cost exceeds $50. This reference is fixed in `src/tokenol/metrics/windows.py`. The `--reference` option belongs to `tokenol serve`.
 
 ## Live dashboard
 
@@ -188,8 +197,9 @@ Shape:
 
 ```json
 {
-  "tick_seconds": 300,
+  "tick_seconds": 5,
   "reference_usd": 50.0,
+  "hot_window_days": 90,
   "thresholds": {
     "hit_rate_good_pct": 95,
     "hit_rate_red_pct": 85,
@@ -202,7 +212,17 @@ Shape:
 }
 ```
 
-`tick_seconds` is how often the server stat-checks the JSONL files for changes (cheap). The full snapshot only rebuilds on a detected change or once per ~60 s heartbeat — so a long `tick_seconds` mainly reduces stat-syscall noise, not rebuild cost.
+`tick_seconds` (default 5) is how often the server stat-checks the JSONL files for changes (cheap). The full snapshot only rebuilds on a detected change or once per ~60 s heartbeat — so a long `tick_seconds` mainly reduces stat-syscall noise, not rebuild cost.
+
+`reference_usd` (default 50) is the $/window alarm threshold, and `hot_window_days` (default 90) is the persistent-history hot tier described above. The command-line flags `--tick` and `--reference` of `tokenol serve` take the same defaults.
+
+Environment variables:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CLAUDE_CONFIG_DIR` | unset (scan every `~/.claude*`) | Path, or colon- or comma-separated paths, to scan. The dashboard ignores it unless you pass `--scoped`. |
+| `TOKENOL_HISTORY_PATH` | `~/.tokenol/history.duckdb` | Location of the persistent history store. |
+| `XDG_CONFIG_HOME` | `~/.config` | Base directory of `tokenol/prefs.json`. |
 
 Reset to defaults via the Settings modal (`POST /api/prefs {"thresholds": "reset"}`).
 
@@ -259,8 +279,8 @@ For every session, `tokenol` computes a blow-up verdict against spec-defined thr
 
 | Verdict (table label)         | Trigger                                                |
 | ----------------------------- | ------------------------------------------------------ |
-| `RUNAWAY_WINDOW` (`runaway`)  | Any 5-hour window costs ≥ \$50                         |
-| `CONTEXT_CREEP` (`ctx-creep`) | Max single-turn input ≥ 500k **and** growth ≥ 2k/turn  |
+| `RUNAWAY_WINDOW` (`runaway`)  | Any 5-hour window costs > \$50                         |
+| `CONTEXT_CREEP` (`ctx-creep`) | Max single-turn input > 500k **and** growth > 2k/turn  |
 | `TOOL_ERROR_STORM` (`tool-errs`) | ≥ 10 tool uses with > 30% error rate                |
 | `SIDECHAIN_HEAVY` (`sidechain`) | Sidechain session costing > \$5                      |
 | `OK` (`ok`)                   | Everything else                                        |
@@ -294,4 +314,4 @@ uv run ruff check
 
 ## Licence
 
-MIT
+MIT, see [LICENSE](LICENSE).

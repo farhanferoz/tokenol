@@ -270,8 +270,8 @@ def test_snapshot_daily_active_projects_disambiguates_collisions(tmp_path: Path)
     base_ts = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     proj = tmp_path / "projects"
     proj.mkdir(parents=True)
-    # Two cwds share basename 'task_a', one lives under mercor/, the other plain.
-    _write_session(proj, "sess-1", "/home/u/dev/mercor/task_a", "claude-opus-4-7", base_ts, "1")
+    # Two cwds share basename 'task_a', one lives under clientco/, the other plain.
+    _write_session(proj, "sess-1", "/home/u/dev/clientco/task_a", "claude-opus-4-7", base_ts, "1")
     _write_session(proj, "sess-2", "/home/u/dev/task_a", "claude-opus-4-7", base_ts, "2")
     _write_session(proj, "sess-3", "/home/u/dev/unique", "claude-opus-4-7", base_ts, "3")
 
@@ -279,7 +279,7 @@ def test_snapshot_daily_active_projects_disambiguates_collisions(tmp_path: Path)
         result = build_snapshot_full(ParseCache(), all_projects=False)
 
     by_value = {p["value"]: p["label"] for p in result.payload["daily"]["active_projects"]}
-    assert by_value["/home/u/dev/mercor/task_a"] == "mercor/task_a"
+    assert by_value["/home/u/dev/clientco/task_a"] == "clientco/task_a"
     assert by_value["/home/u/dev/task_a"] == "dev/task_a"
     # Non-colliding cwd keeps its plain basename.
     assert by_value["/home/u/dev/unique"] == "unique"
@@ -641,16 +641,16 @@ def test_grouped_cwd_rolls_child_under_parent(tmp_path: Path) -> None:
     from tokenol.serve.state import _grouped_cwd_by_sid
 
     sessions = [
-        Session(session_id="a", source_file="", is_sidechain=False, cwd="/dev/StratSense"),
-        Session(session_id="b", source_file="", is_sidechain=False, cwd="/dev/StratSense/StratSense-Backend"),
-        Session(session_id="c", source_file="", is_sidechain=False, cwd="/dev/StratSense/StratSense-Backend/deep/dir"),
+        Session(session_id="a", source_file="", is_sidechain=False, cwd="/dev/WebApp"),
+        Session(session_id="b", source_file="", is_sidechain=False, cwd="/dev/WebApp/WebApp-Backend"),
+        Session(session_id="c", source_file="", is_sidechain=False, cwd="/dev/WebApp/WebApp-Backend/deep/dir"),
         Session(session_id="d", source_file="", is_sidechain=False, cwd="/dev/OtherProj"),
         Session(session_id="e", source_file="", is_sidechain=False, cwd=None),
     ]
     m = _grouped_cwd_by_sid(sessions)
-    assert m["a"] == "/dev/StratSense"
-    assert m["b"] == "/dev/StratSense"
-    assert m["c"] == "/dev/StratSense"
+    assert m["a"] == "/dev/WebApp"
+    assert m["b"] == "/dev/WebApp"
+    assert m["c"] == "/dev/WebApp"
     assert m["d"] == "/dev/OtherProj"
     assert m["e"] == "(unknown)"
 
@@ -661,12 +661,12 @@ def test_grouped_cwd_siblings_stay_separate(tmp_path: Path) -> None:
     from tokenol.serve.state import _grouped_cwd_by_sid
 
     sessions = [
-        Session(session_id="a", source_file="", is_sidechain=False, cwd="/dev/StratSense/Backend"),
-        Session(session_id="b", source_file="", is_sidechain=False, cwd="/dev/StratSense/Frontend"),
+        Session(session_id="a", source_file="", is_sidechain=False, cwd="/dev/WebApp/Backend"),
+        Session(session_id="b", source_file="", is_sidechain=False, cwd="/dev/WebApp/Frontend"),
     ]
     m = _grouped_cwd_by_sid(sessions)
-    assert m["a"] == "/dev/StratSense/Backend"
-    assert m["b"] == "/dev/StratSense/Frontend"
+    assert m["a"] == "/dev/WebApp/Backend"
+    assert m["b"] == "/dev/WebApp/Frontend"
 
 
 def test_multi_session_file_sets_source_file_per_session(tmp_path: Path) -> None:
@@ -1467,18 +1467,18 @@ def test_home_dir_session_does_not_swallow_every_project() -> None:
     from tokenol.serve.state import _grouped_cwd_by_sid
 
     sessions = [
-        Session(session_id="home", source_file="", is_sidechain=False, cwd="/home/ff235"),
-        Session(session_id="a", source_file="", is_sidechain=False, cwd="/home/ff235/dev/StratSense"),
-        Session(session_id="b", source_file="", is_sidechain=False, cwd="/home/ff235/dev/StratSense/Backend"),
-        Session(session_id="c", source_file="", is_sidechain=False, cwd="/home/ff235/dev/OtherProj"),
+        Session(session_id="home", source_file="", is_sidechain=False, cwd="/home/someuser"),
+        Session(session_id="a", source_file="", is_sidechain=False, cwd="/home/someuser/dev/WebApp"),
+        Session(session_id="b", source_file="", is_sidechain=False, cwd="/home/someuser/dev/WebApp/Backend"),
+        Session(session_id="c", source_file="", is_sidechain=False, cwd="/home/someuser/dev/OtherProj"),
     ]
     m = _grouped_cwd_by_sid(sessions)
-    assert m["a"] == "/home/ff235/dev/StratSense"
-    assert m["b"] == "/home/ff235/dev/StratSense"
-    assert m["c"] == "/home/ff235/dev/OtherProj"
+    assert m["a"] == "/home/someuser/dev/WebApp"
+    assert m["b"] == "/home/someuser/dev/WebApp"
+    assert m["c"] == "/home/someuser/dev/OtherProj"
     # The home-dir session is still its own project — it is dropped as a
     # roll-up *target*, not dropped from the data.
-    assert m["home"] == "/home/ff235"
+    assert m["home"] == "/home/someuser"
 
 
 def test_container_cwd_shapes() -> None:
@@ -1486,7 +1486,7 @@ def test_container_cwd_shapes() -> None:
     machine (with its own home path) are classified without consulting $HOME."""
     from tokenol.serve.state import is_container_cwd
 
-    for cwd in ("/", "/home", "/Users", "/mnt", "/home/ff235", "/Users/someone", "/mnt/scratch"):
+    for cwd in ("/", "/home", "/Users", "/mnt", "/home/someuser", "/Users/someone", "/mnt/scratch"):
         assert is_container_cwd(cwd), cwd
-    for cwd in ("/home/ff235/dev", "/Users/someone/code", "/opt/app", "/mnt/scratch/proj"):
+    for cwd in ("/home/someuser/dev", "/Users/someone/code", "/opt/app", "/mnt/scratch/proj"):
         assert not is_container_cwd(cwd), cwd

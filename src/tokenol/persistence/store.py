@@ -57,7 +57,7 @@ HYDRATE_BATCH_ROWS = 20_000
 # DuckDB reports a lock conflict as an IOException whose text carries the
 # holding PID, e.g.:
 #   Could not set lock on file "...": Conflicting lock is held in
-#   /usr/bin/python3.13 (PID 3170792) by user ff235.
+#   /usr/bin/python3.13 (PID 3170792) by user <name>.
 _CONFLICT_PID_RE = re.compile(r"\(PID (\d+)\)")
 
 

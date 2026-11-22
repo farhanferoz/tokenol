@@ -71,7 +71,7 @@
 - [ ] **Step 0a: Verify the duckdb dep is installed**
 
 ```bash
-cd /home/ff235/dev/claude_rate_limit
+cd ~/dev/claude_rate_limit
 uv run python -c "import duckdb; print(duckdb.__version__)"
 ```
 

@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-05-03-opt-in-persistence-design.md` (commit `4d456af` on `main`).
 
-**Workspace:** All work happens in the worktree at `/home/ff235/dev/claude_rate_limit/.worktrees/persistent-history-pr1/` (branch `feature/persistent-history-pr1`, currently HEAD `2bd64c5`). Land the gate as commit #27 on this branch, then a fast-forward merge to `main` ships it as `0.4.0`.
+**Workspace:** All work happens in the worktree at `~/dev/claude_rate_limit/.worktrees/persistent-history-pr1/` (branch `feature/persistent-history-pr1`, currently HEAD `2bd64c5`). Land the gate as commit #27 on this branch, then a fast-forward merge to `main` ships it as `0.4.0`.
 
 ---
 
@@ -43,10 +43,10 @@
 
 - [ ] **Step 1: Confirm cwd, branch, and head**
 
-Run: `cd /home/ff235/dev/claude_rate_limit/.worktrees/persistent-history-pr1 && pwd && git branch --show-current && git log --oneline -1 && git status --short`
+Run: `cd ~/dev/claude_rate_limit/.worktrees/persistent-history-pr1 && pwd && git branch --show-current && git log --oneline -1 && git status --short`
 
 Expected:
-- `pwd` → `/home/ff235/dev/claude_rate_limit/.worktrees/persistent-history-pr1`
+- `pwd` → `~/dev/claude_rate_limit/.worktrees/persistent-history-pr1`
 - branch → `feature/persistent-history-pr1`
 - HEAD → `2bd64c5 refactor(persistence): consolidate flush logic and remove N+1 session loop`
 - `git status` → empty (clean tree)
@@ -1008,7 +1008,7 @@ Expected: 26 (PR1's existing) + 11 (this work) = approximately **37 commits** ah
 Stop here. The next step is a fast-forward merge into `main`:
 
 ```bash
-cd /home/ff235/dev/claude_rate_limit
+cd ~/dev/claude_rate_limit
 git checkout main
 git merge --ff-only feature/persistent-history-pr1
 ```

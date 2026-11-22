@@ -60,7 +60,7 @@ Aggregates turns by session cwd under a range filter, returning billable tokens 
   "projects": [
     {
       "project": "automl",
-      "cwd": "/Users/ff235/dev/automl",
+      "cwd": "~/dev/automl",
       "cwd_b64": "L1VzZXJzL2ZmMjM1L2Rldi9hdXRvbWw",
       "input": 1200000,
       "output": 2300000,

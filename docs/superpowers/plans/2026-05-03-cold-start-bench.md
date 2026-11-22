@@ -6,7 +6,7 @@
 
 **Architecture:** Single-file Python 3.13 stdlib-only harness. For each of two runs: wipe DuckDB state if applicable, evict every JSONL from the OS page cache via `posix_fadvise`, spawn `tokenol serve --port 8788` (PR1 via `PYTHONPATH` shim of the worktree), sample `/proc/<pid>/{status,stat}` at 0.5 Hz on the serve PID + descendants, poll `/api/snapshot` for time-to-first-paint, hold 60 s of steady-state, SIGTERM, write CSV + summary. After both runs, write a Markdown report comparing peak RSS, time-to-first-paint, total wall, CPU-seconds.
 
-**Tech Stack:** Python 3.13 stdlib only (`subprocess`, `threading`, `urllib.request`, `os.posix_fadvise`, `argparse`, `json`, `csv`, `signal`, `pathlib`, `statistics`). No `psutil`, no `vmtouch`. Uses installed `/home/ff235/miniconda3/bin/tokenol` for v0.3.2 and the same launcher with `PYTHONPATH=.../persistent-history-pr1/src` for PR1.
+**Tech Stack:** Python 3.13 stdlib only (`subprocess`, `threading`, `urllib.request`, `os.posix_fadvise`, `argparse`, `json`, `csv`, `signal`, `pathlib`, `statistics`). No `psutil`, no `vmtouch`. Uses installed `~/miniconda3/bin/tokenol` for v0.3.2 and the same launcher with `PYTHONPATH=.../persistent-history-pr1/src` for PR1.
 
 **Spec:** `docs/superpowers/specs/2026-05-03-cold-start-bench-design.md` (commit `ff61855`).
 
@@ -56,9 +56,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_ROOT = Path("/home/ff235/dev/claude_rate_limit")
+REPO_ROOT = Path("~/dev/claude_rate_limit")
 WORKTREE_SRC = REPO_ROOT / ".worktrees/persistent-history-pr1/src"
-TOKENOL_BIN = Path("/home/ff235/miniconda3/bin/tokenol")
+TOKENOL_BIN = Path("~/miniconda3/bin/tokenol")
 TOKENOL_DATA_DIR = Path.home() / ".tokenol"
 PORT = 8788
 SNAPSHOT_URL = f"http://127.0.0.1:{PORT}/api/snapshot?period=24h"
@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Verify it parses and dispatches**
 
-Run: `/home/ff235/miniconda3/bin/python /home/ff235/dev/claude_rate_limit/_local/cold_start_bench.py --smoke --only pr1 --out /tmp/bench-test`
+Run: `~/miniconda3/bin/python ~/dev/claude_rate_limit/_local/cold_start_bench.py --smoke --only pr1 --out /tmp/bench-test`
 Expected: `[bench] output → /tmp/bench-test` then a `NotImplementedError` traceback. Confirms argparse + dispatch wiring is sound.
 
 - [ ] **Step 3: No commit yet (file is gitignored)**
@@ -202,8 +202,8 @@ def evict_page_cache(paths: list[Path]) -> tuple[int, int, int]:
 
 - [ ] **Step 3: Smoke-test from a Python REPL**
 
-Run: `/home/ff235/miniconda3/bin/python -c "
-import sys; sys.path.insert(0, '/home/ff235/dev/claude_rate_limit/_local')
+Run: `~/miniconda3/bin/python -c "
+import sys; sys.path.insert(0, '~/dev/claude_rate_limit/_local')
 from cold_start_bench import discover_jsonls, evict_page_cache
 files = discover_jsonls()
 print('files:', len(files))
@@ -350,9 +350,9 @@ class ProcessSampler(threading.Thread):
 
 - [ ] **Step 2: Smoke-test sampler against the harness Python interpreter itself**
 
-Run: `/home/ff235/miniconda3/bin/python -c "
+Run: `~/miniconda3/bin/python -c "
 import sys, time, os
-sys.path.insert(0, '/home/ff235/dev/claude_rate_limit/_local')
+sys.path.insert(0, '~/dev/claude_rate_limit/_local')
 from cold_start_bench import ProcessSampler
 s = ProcessSampler(os.getpid(), interval_s=0.5)
 s.start()
@@ -405,7 +405,7 @@ def _resolve_tokenol_version(env: dict[str, str]) -> str:
     """Ask the chosen interpreter what tokenol.__version__ resolves to."""
     proc = subprocess.run(
         [
-            "/home/ff235/miniconda3/bin/python",
+            "~/miniconda3/bin/python",
             "-c",
             "import tokenol; print(tokenol.__version__); print(tokenol.__file__)",
         ],
@@ -608,7 +608,7 @@ def _summarize(
 - [ ] **Step 4: Smoke-test the full single-run flow**
 
 Run (foreground; expect ~5 minutes):
-`/home/ff235/miniconda3/bin/python /home/ff235/dev/claude_rate_limit/_local/cold_start_bench.py --smoke --only v0_3_2`
+`~/miniconda3/bin/python ~/dev/claude_rate_limit/_local/cold_start_bench.py --smoke --only v0_3_2`
 
 Expected: a `_local/cold_start_<ts>/v0_3_2/` directory containing `samples.csv` (≥10 rows), `summary.json` (`samples > 0`, `peak_vmrss_kb > 0`, `crashed: false`), and `serve.log` (uvicorn startup banner). `time_to_first_paint_s` may be non-null even on smoke (v0.3.2 paints fast); `capped: true` is fine if it didn't paint within 5 min.
 
@@ -701,9 +701,9 @@ def _interpretation(pr1: dict, rel: dict) -> str:
 
 - [ ] **Step 2: Verify report writer with synthetic input**
 
-Run: `/home/ff235/miniconda3/bin/python -c "
+Run: `~/miniconda3/bin/python -c "
 import sys, json, pathlib
-sys.path.insert(0, '/home/ff235/dev/claude_rate_limit/_local')
+sys.path.insert(0, '~/dev/claude_rate_limit/_local')
 from cold_start_bench import write_report
 fake = lambda v, paint: {'version': v, 'resolved': ['0.3.2', '/p/'+v], 'jsonl_files': 1802,
     'jsonl_total_bytes': 2_000_000_000, 'samples': 100, 'peak_vmrss_kb': 1_500_000 if v=='pr1' else 500_000,
@@ -724,7 +724,7 @@ Expected: a Markdown table prints to stdout with both columns populated and an i
 
 - [ ] **Step 1: Run smoke for both versions back-to-back**
 
-Run: `/home/ff235/miniconda3/bin/python /home/ff235/dev/claude_rate_limit/_local/cold_start_bench.py --smoke`
+Run: `~/miniconda3/bin/python ~/dev/claude_rate_limit/_local/cold_start_bench.py --smoke`
 
 Expected: ~10-min wall total. Output dir contains `pr1/`, `v0_3_2/`, and `report.md`. Confirm `report.md` has both columns populated. Confirm both `serve.log`s contain a uvicorn startup banner with no Python tracebacks. Confirm both `summary.json`s have `crashed: false`.
 
@@ -748,8 +748,8 @@ Disk headroom check (PR1 backfill writes to `~/.tokenol/`): `df -h ~ | tail -1` 
 
 Run (background; multi-hour expected):
 ```bash
-cd /home/ff235/dev/claude_rate_limit
-nohup /home/ff235/miniconda3/bin/python _local/cold_start_bench.py \
+cd ~/dev/claude_rate_limit
+nohup ~/miniconda3/bin/python _local/cold_start_bench.py \
     > _local/cold_start_run.log 2>&1 &
 echo $! > _local/cold_start_run.pid
 ```
@@ -760,8 +760,8 @@ Use the Bash tool's `run_in_background=true` so the harness keeps running even i
 
 Periodically (every 5-10 min during PR1 run, every 1-2 min during v0.3.2 run):
 ```bash
-tail -20 /home/ff235/dev/claude_rate_limit/_local/cold_start_run.log
-ps -p $(cat /home/ff235/dev/claude_rate_limit/_local/cold_start_run.pid) -o pid,etime,pcpu,rss
+tail -20 ~/dev/claude_rate_limit/_local/cold_start_run.log
+ps -p $(cat ~/dev/claude_rate_limit/_local/cold_start_run.pid) -o pid,etime,pcpu,rss
 ```
 
 Look for `[pr1] first paint at <N>s` then `[pr1] summary →` then the same for `v0_3_2`. Final line should be `[bench] done. <out>/report.md`.
@@ -771,7 +771,7 @@ If PR1 hits the 90-min cap before first paint, the harness records `capped: true
 - [ ] **Step 4: Inspect the report**
 
 ```bash
-cat /home/ff235/dev/claude_rate_limit/_local/cold_start_*/report.md
+cat ~/dev/claude_rate_limit/_local/cold_start_*/report.md
 ```
 
 Verify both columns are populated, then surface the headline numbers (peak RSS, time-to-first-paint, ratio) to the user.

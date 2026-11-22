@@ -677,8 +677,8 @@ def _disambiguate_cwd_labels(cwds: set[str] | list[str]) -> dict[str, str]:
     """Return {cwd: label} where each label is the shortest path suffix unique among *cwds*.
 
     Non-colliding cwds get the plain basename. Colliding ones get parent segments
-    prepended until each is globally unique — e.g. ``/.../mercor/agentic-bench-gh8nb``
-    and ``/.../agentic-bench-gh8nb`` resolve to ``mercor/agentic-bench-gh8nb`` and
+    prepended until each is globally unique — e.g. ``/.../clientco/agentic-bench-gh8nb``
+    and ``/.../agentic-bench-gh8nb`` resolve to ``clientco/agentic-bench-gh8nb`` and
     ``dev/agentic-bench-gh8nb`` respectively.
     """
     labels = {cwd: _cwd_basename(cwd) for cwd in cwds}
@@ -1274,7 +1274,7 @@ def _cwd_basename(cwd: str) -> str:
 
 
 # Root-level directories whose immediate children are user/mount homes, not
-# projects: "/home/ff235" and "/mnt/scratch" group projects, they are not one.
+# projects: "/home/<user>" and "/mnt/scratch" group projects, they are not one.
 _HOME_PARENTS: frozenset[str] = frozenset({"home", "Users", "mnt", "media", "srv"})
 
 # Memoize _grouped_cwd_by_sid on a content fingerprint of the sessions list.
@@ -1315,7 +1315,7 @@ def _grouped_cwd_by_sid(sessions: list[Session]) -> dict[str, str]:
 
     Container directories (see :func:`is_container_cwd`) are never roll-up
     targets. Without that guard a single ``cd ~ && claude`` session collapses
-    every project on the machine into one "ff235" bucket, because the home
+    every project on the machine into one "<user>" bucket, because the home
     directory is a proper ancestor of all of them.
 
     O(C²) in the number of distinct cwds; memoized on a content fingerprint so
